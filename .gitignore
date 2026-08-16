@@ -61,3 +61,6 @@ Thumbs.db
 
 # ===== Claude Code 会话数据（个人会话，不入库）=====
 .claude/
+
+# ===== 其他 =====
+gitpush.sh
