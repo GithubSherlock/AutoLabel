@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoLabel Web v0.3</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; height: 100vh; }
+.sidebar { width: 360px; padding: 20px; background: #16213e; overflow-y: auto; border-right: 1px solid #0f3460; flex-shrink: 0; }
+.main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 20px; overflow: auto; }
+canvas { max-width: 100%; max-height: 100%; border-radius: 8px; cursor: pointer; }
+input, select, button, textarea { width: 100%; padding: 8px 12px; margin: 4px 0 12px; border: 1px solid #0f3460; border-radius: 6px; background: #1a1a2e; color: #e0e0e0; font-size: 14px; }
+button { background: #0f3460; cursor: pointer; font-weight: bold; transition: background .2s; }
+button:hover { background: #16578a; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.result-item { padding: 8px; margin: 4px 0; background: #1a1a2e; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; transition: opacity .2s; }
+.result-item:hover { background: #0f3460; }
+.result-item.deleted { opacity: 0.3; text-decoration: line-through; }
+h3 { margin: 16px 0 8px; color: #53a8b6; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-right: 4px; }
+.summary { padding: 12px; background: #0f3460; border-radius: 8px; margin-bottom: 12px; line-height: 1.6; }
+.error-box { padding: 12px; background: #4a1a1a; border: 1px solid #8b3a3a; border-radius: 8px; margin-bottom: 12px; color: #fca5a5; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+.info-tag { font-size: 11px; padding: 1px 6px; border-radius: 3px; margin-left: 6px; }
+.info-tag.open { background: #2d6a4f; color: #52b788; }
+.info-tag.coco { background: #1b4965; color: #4dabf7; }
+.info-tag.custom { background: #5c4a1f; color: #ffd43b; }
+.spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #53a8b6; border-top-color: transparent; border-radius: 50%; animation: spin .6s linear infinite; margin-right: 8px; vertical-align: middle; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#segSection { display: none; margin-top: -8px; padding: 8px 12px; border-left: 2px solid #53a8b6; background: #1a1a2e; border-radius: 0 6px 6px 0; margin-bottom: 12px; }
+#segSection label { font-size: 13px; margin-top: 0; }
+#segSection select { margin-bottom: 4px; }
+.mode-tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+.mode-tabs button { margin: 0; flex: 1; }
+.mode-tabs button.mode-active { background: #16578a; }
+</style>
+</head>
+<body>
+<div class="sidebar">
+  <h2>🔍 AutoLabel Web</h2>
+  <p style="color:#8899aa;font-size:13px;margin-bottom:12px">v0.3 — 支持全部检测 & 分割模型</p>
+
+  <div class="mode-tabs">
+    <button id="tabAnnotate" class="mode-active" onclick="switchMode('annotate')">🎯 标注</button>
+    <button id="tabReview" onclick="switchMode('review')">✅ 复核队列</button>
+  </div>
+
+  <div id="annotateSection">
+  <label>📷 图像</label>
+  <input type="file" id="imageInput" accept="image/*">
+
+  <label>📝 标注指令</label>
+  <input type="text" id="instruction" value="car, person" placeholder="如: car, person, bicycle (逗号分隔)">
+
+  <label>🎯 检测模型
+    <span id="modelTag" style="font-size:11px;margin-left:4px"></span>
+  </label>
+  <select id="model">
+    <option value="">加载中...</option>
+  </select>
+  <div style="font-size:11px;color:#8899aa;margin:-8px 0 8px" id="modelInfo"></div>
+
+  <label>📊 置信度: <span id="confVal">0.10</span></label>
+  <input type="range" id="conf" min="0.05" max="1" step="0.05" value="0.1" oninput="document.getElementById('confVal').textContent=Number(this.value).toFixed(2)">
+
+  <label>🔗 IoU: <span id="iouVal">0.30</span></label>
+  <input type="range" id="iou" min="0.1" max="0.9" step="0.1" value="0.3" oninput="document.getElementById('iouVal').textContent=Number(this.value).toFixed(2)">
+
+  <label><input type="checkbox" id="withSeg" onchange="toggleSegSection()"> ✂️ 同时生成实例分割 mask</label>
+
+  <div id="segSection">
+    <label>🖌️ 分割模型</label>
+    <select id="segModel">
+      <option value="">加载中...</option>
+    </select>
+  </div>
+
+  <button onclick="runAnnotation()" id="runBtn" style="margin-top:12px;padding:12px;font-size:16px">🚀 开始标注</button>
+
+  <div id="summary" style="margin-top:12px"></div>
+  <div id="errorBox"></div>
+  <h3>📋 检测结果 <span id="resultCount" style="font-weight:normal;font-size:12px;color:#8899aa"></span></h3>
+  <div id="results"></div>
+  <button id="dlBtn" onclick="downloadJSON()" style="display:none;margin-top:12px;background:#2d6a4f">⬇ 下载 COCO JSON</button>
+  <button id="dlVis" onclick="downloadVis()" style="display:none;margin-top:4px;background:#1b4965">🖼 下载可视化图像</button>
+  <label style="display:none;margin-top:8px" id="maskToggle"><input type="checkbox" id="showMasks" checked onchange="redraw()"> 🎭 显示分割 mask</label>
+  </div>
+
+  <div id="reviewSection" style="display:none">
+    <h3>✅ 复核队列</h3>
+    <button onclick="loadReviewFiles()" style="background:#2d6a4f">🔄 刷新队列</button>
+    <div id="reviewFiles"></div>
+    <div id="reviewActions" style="display:none">
+      <button onclick="saveReview()" style="background:#2d6a4f">💾 保存修正</button>
+      <button onclick="downloadReviewJSON()" style="background:#1b4965">⬇ 下载修正 COCO</button>
+    </div>
+  </div>
+</div>
+<div class="main">
+  <canvas id="canvas"></canvas>
+</div>
+
+<script>
+// ── 全局状态 ──
+let currentData = null;
+let deletedIds = new Set();
+let reviewFileName = null;   // 当前复核的队列文件名
+let lastReviewedName = null; // 最近保存的修正文件名
+let detModels = [];
+let segModels = [];
+let modelMeta = {};  // name → {type}
+
+// ── 颜色生成（确定性哈希） ──
+function getColor(label) {
+  let hash = 0;
+  for (let i = 0; i < label.length; i++) {
+    hash = label.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const h = Math.abs(hash) % 360;
+  const s = 0.7, l = 0.55;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => {
+    const k = (n + h / 30) % 12;
+    return l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+  };
+  const r = Math.round(f(0) * 255);
+  const g = Math.round(f(8) * 255);
+  const b = Math.round(f(4) * 255);
+  return `#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${b.toString(16).padStart(2,'0')}`;
+}
+
+// ── 模型加载 ──
+async function loadModels() {
+  try {
+    const [detResp, segResp] = await Promise.all([
+      fetch('/api/models'),
+      fetch('/api/seg-models'),
+    ]);
+    const detData = await detResp.json();
+    const segData = await segResp.json();
+
+    // 展平检测模型
+    detModels = [];
+    modelMeta = {};
+    const detOrder = ['grounding_dino', 'ultralytics', 'pytorch_vision', 'custom'];
+    const detLabels = {
+      grounding_dino: '🌐 Grounding DINO（开放词汇）',
+      ultralytics: '🚀 Ultralytics YOLO',
+      pytorch_vision: '🔬 PyTorch Vision',
+      custom: '📦 自定义权重',
+    };
+    const detSel = document.getElementById('model');
+    detSel.innerHTML = '';
+    for (const cat of detOrder) {
+      const items = detData.models[cat] || [];
+      if (!items.length) continue;
+      const optgroup = document.createElement('optgroup');
+      optgroup.label = detLabels[cat];
+      for (const m of items) {
+        const opt = document.createElement('option');
+        opt.value = m.name;
+        opt.textContent = m.name;
+        optgroup.appendChild(opt);
+        detModels.push(m.name);
+        modelMeta[m.name] = m.type;
+      }
+      detSel.appendChild(optgroup);
+    }
+
+    // 展平分割模型
+    segModels = [];
+    const segOrder = ['fastsam', 'sam', 'sam2', 'sam3', 'maskrcnn', 'custom'];
+    const segLabels = {
+      fastsam: '⚡ FastSAM',
+      sam: '🎯 SAM',
+      sam2: '🎯 SAM2',
+      sam3: '🎯 SAM3',
+      maskrcnn: '🔬 Mask R-CNN',
+      custom: '📦 自定义权重',
+    };
+    const segSel = document.getElementById('segModel');
+    segSel.innerHTML = '';
+    for (const cat of segOrder) {
+      const items = segData.models[cat] || [];
+      if (!items.length) continue;
+      const optgroup = document.createElement('optgroup');
+      optgroup.label = segLabels[cat];
+      for (const m of items) {
+        const opt = document.createElement('option');
+        opt.value = m.name;
+        opt.textContent = m.name;
+        optgroup.appendChild(opt);
+        segModels.push(m.name);
+      }
+      segSel.appendChild(optgroup);
+    }
+
+    // 如果分割模型列表为空，添加默认项
+    if (segSel.children.length === 0) {
+      const opt = document.createElement('option');
+      opt.value = 'FastSAM-s.pt';
+      opt.textContent = 'FastSAM-s.pt';
+      segSel.appendChild(opt);
+      segModels.push('FastSAM-s.pt');
+    }
+
+    console.log(`加载 ${detModels.length} 个检测模型, ${segModels.length} 个分割模型`);
+  } catch (e) {
+    console.error('模型列表加载失败:', e);
+    // 降级：使用硬编码默认值
+    const detSel = document.getElementById('model');
+    detSel.innerHTML = `
+      <option value="yolo26x.pt">yolo26x.pt</option>
+      <option value="yolov8n.pt">yolov8n.pt</option>
+      <option value="fasterrcnn_resnet50_fpn_v2">fasterrcnn_resnet50_fpn_v2</option>
+      <option value="IDEA-Research/grounding-dino-tiny">grounding-dino-tiny</option>
+    `;
+    detModels = ['yolo26x.pt', 'yolov8n.pt', 'fasterrcnn_resnet50_fpn_v2', 'IDEA-Research/grounding-dino-tiny'];
+    modelMeta = {
+      'yolo26x.pt': 'coco_classes',
+      'yolov8n.pt': 'coco_classes',
+      'fasterrcnn_resnet50_fpn_v2': 'coco_classes',
+      'IDEA-Research/grounding-dino-tiny': 'open_vocabulary',
+    };
+  }
+}
+
+// ── 模型选中更新 ──
+document.getElementById('model').addEventListener('change', function() {
+  const name = this.value;
+  const type = modelMeta[name] || 'unknown';
+  const tag = document.getElementById('modelTag');
+  const info = document.getElementById('modelInfo');
+  if (type === 'open_vocabulary') {
+    tag.innerHTML = '<span class="info-tag open">开放词汇</span>';
+    info.textContent = '✅ 支持任意类别名，无需 COCO 预定义';
+  } else if (type === 'coco_classes') {
+    tag.innerHTML = '<span class="info-tag coco">COCO 80类</span>';
+    info.textContent = '⚠️ 仅检测 COCO 80 类中的目标，按 prompt 过滤';
+  } else {
+    tag.innerHTML = '<span class="info-tag custom">自定义</span>';
+    info.textContent = '📦 本地权重文件';
+  }
+
+  // 按模型类型设置合适的默认 instruction
+  const instr = document.getElementById('instruction');
+  if (type === 'coco_classes' && (instr.value === '检测 car 和 person' || instr.value === 'car, person')) {
+    // 保持不变
+  }
+});
+
+// ── 分割开关 ──
+function toggleSegSection() {
+  const seg = document.getElementById('segSection');
+  seg.style.display = document.getElementById('withSeg').checked ? 'block' : 'none';
+}
+
+// ── 运行标注 ──
+async function runAnnotation() {
+  const file = document.getElementById('imageInput').files[0];
+  if (!file) { alert('请先选择图像'); return; }
+
+  const runBtn = document.getElementById('runBtn');
+  const errorBox = document.getElementById('errorBox');
+  errorBox.innerHTML = '';
+  runBtn.disabled = true;
+  runBtn.innerHTML = '<span class="spinner"></span>正在标注...';
+
+  document.getElementById('results').innerHTML = '';
+  document.getElementById('summary').innerHTML = '';
+  document.getElementById('resultCount').textContent = '';
+  deletedIds.clear();
+
+  const form = new FormData();
+  form.append('image', file);
+  form.append('instruction', document.getElementById('instruction').value);
+  form.append('conf', document.getElementById('conf').value);
+  form.append('iou', document.getElementById('iou').value);
+  form.append('model', document.getElementById('model').value);
+  form.append('with_seg', document.getElementById('withSeg').checked);
+  if (document.getElementById('withSeg').checked) {
+    form.append('seg_model', document.getElementById('segModel').value);
+  }
+
+  try {
+    const resp = await fetch('/api/annotate', { method: 'POST', body: form });
+    const data = await resp.json();
+
+    if (!resp.ok || data.error) {
+      errorBox.innerHTML = `<div class="error-box">❌ ${data.error || '未知错误'}</div>`;
+      runBtn.disabled = false;
+      runBtn.innerHTML = '🚀 开始标注';
+      return;
+    }
+
+    currentData = data;
+
+    // 显示图像
+    const img = new Image();
+    img.onload = () => {
+      const c = document.getElementById('canvas');
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      drawMasks(ctx);
+      drawBoxes(ctx);
+    };
+    img.src = data.image_base64;
+
+    // 摘要
+    const segInfo = data.summary.with_seg ? ` | 🖌️ 分割: ${data.summary.seg_model}` : '';
+    document.getElementById('summary').innerHTML = `
+      <div class="summary">
+        <b>${data.summary.total}</b> 个目标 &nbsp;|&nbsp;
+        类别: ${data.summary.classes.join(', ') || '无'}<br>
+        <small>均置信度: ${(data.summary.avg_conf * 100).toFixed(1)}% &nbsp;|&nbsp; 模型: ${data.summary.model}${segInfo}</small>
+      </div>`;
+
+    // 结果列表
+    document.getElementById('resultCount').textContent = `(${data.bboxes.length} 项)`;
+    let html = '';
+    data.bboxes.forEach((b, i) => {
+      const color = getColor(b.label);
+      html += `<div class="result-item" id="item-${i}" onclick="toggleDelete(${i})">
+        <span><span class="badge" style="background:${color};color:#fff">${b.label}</span> ${b.label}</span>
+        <span>${(b.confidence*100).toFixed(1)}%</span>
+      </div>`;
+    });
+    document.getElementById('results').innerHTML = html || '<p style="color:#8899aa">未检测到目标</p>';
+    document.getElementById('dlBtn').style.display = 'block';
+    document.getElementById('dlVis').style.display = 'block';
+    document.getElementById('maskToggle').style.display = (data.masks && data.masks.length) ? 'block' : 'none';
+
+  } catch (e) {
+    errorBox.innerHTML = `<div class="error-box">❌ 请求失败: ${e.message}</div>`;
+  } finally {
+    runBtn.disabled = false;
+    runBtn.innerHTML = '🚀 开始标注';
+  }
+}
+
+function drawBoxes(ctx) {
+  if (!currentData) return;
+  currentData.bboxes.forEach((b, i) => {
+    if (deletedIds.has(i)) return;
+    const color = getColor(b.label);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.5;
+    ctx.strokeRect(b.x, b.y, b.width, b.height);
+
+    // 标签背景
+    const text = `${b.label} ${(b.confidence*100).toFixed(0)}%`;
+    ctx.font = 'bold 13px -apple-system, sans-serif';
+    const tm = ctx.measureText(text);
+    const th = 16;
+    const tx = b.x, ty = Math.max(b.y - th - 2, 2);
+    ctx.fillStyle = color;
+    ctx.fillRect(tx, ty, tm.width + 8, th + 4);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(text, tx + 4, ty + th - 2);
+  });
+}
+
+// ── 分割 mask 叠加（polygon 半透明填充 + 描边） ──
+function drawMasks(ctx) {
+  if (!currentData || !currentData.masks || !currentData.masks.length) return;
+  if (!document.getElementById('showMasks').checked) return;
+  currentData.masks.forEach(m => {
+    // 对应 bbox 被删除时跳过该 mask
+    if (m.bbox_index !== undefined && m.bbox_index >= 0 && deletedIds.has(m.bbox_index)) return;
+    const color = getColor(m.bbox.label);
+    (m.segmentation || []).forEach(poly => {
+      if (!poly || poly.length < 6) return;
+      const path = new Path2D();
+      path.moveTo(poly[0], poly[1]);
+      for (let i = 2; i < poly.length; i += 2) path.lineTo(poly[i], poly[i + 1]);
+      path.closePath();
+      ctx.fillStyle = color + '55';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.fill(path);
+      ctx.stroke(path);
+    });
+  });
+}
+
+// ── 重绘（图像 + mask + 框） ──
+function redraw() {
+  if (!currentData) return;
+  const c = document.getElementById('canvas');
+  const ctx = c.getContext('2d');
+  const img = new Image();
+  img.onload = () => { ctx.drawImage(img, 0, 0); drawMasks(ctx); drawBoxes(ctx); };
+  img.src = currentData.image_url || currentData.image_base64;
+}
+
+function toggleDelete(i) {
+  if (deletedIds.has(i)) { deletedIds.delete(i); }
+  else { deletedIds.add(i); }
+  document.getElementById('item-'+i)?.classList.toggle('deleted');
+  redraw();
+}
+
+async function downloadJSON() {
+  if (!currentData) return;
+  const kept = currentData.bboxes.filter((b, i) => !deletedIds.has(i));
+  const keptMasks = (currentData.masks || []).filter(m =>
+    m.bbox_index === undefined || m.bbox_index < 0 || !deletedIds.has(m.bbox_index));
+
+  const payload = {
+    image_path: currentData.image_path || 'upload.jpg',
+    image_width: document.getElementById('canvas').width,
+    image_height: document.getElementById('canvas').height,
+    bboxes: kept,
+    masks: keptMasks,
+    model: currentData.summary?.model,
+  };
+
+  try {
+    const resp = await fetch('/api/export-coco', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      alert('导出失败: ' + (data.error || resp.status));
+      return;
+    }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'annotations.json';
+    a.click();
+  } catch (e) {
+    alert('导出失败: ' + e.message);
+  }
+}
+
+function downloadVis() {
+  if (!currentData?.image_base64) return;
+  const a = document.createElement('a');
+  a.href = currentData.image_base64;
+  a.download = 'autolabel_visualization.png';
+  a.click();
+}
+
+// ── 标注 / 复核队列 模式切换 ──
+function switchMode(mode) {
+  const annotateOn = mode === 'annotate';
+  document.getElementById('annotateSection').style.display = annotateOn ? 'block' : 'none';
+  document.getElementById('reviewSection').style.display = annotateOn ? 'none' : 'block';
+  document.getElementById('tabAnnotate').classList.toggle('mode-active', annotateOn);
+  document.getElementById('tabReview').classList.toggle('mode-active', !annotateOn);
+
+  // 清空当前数据，避免跨模式串扰
+  currentData = null;
+  reviewFileName = null;
+  deletedIds.clear();
+  document.getElementById('results').innerHTML = '';
+  document.getElementById('summary').innerHTML = '';
+  document.getElementById('resultCount').textContent = '';
+  document.getElementById('errorBox').innerHTML = '';
+  document.getElementById('dlBtn').style.display = 'none';
+  document.getElementById('dlVis').style.display = 'none';
+  document.getElementById('maskToggle').style.display = 'none';
+  document.getElementById('reviewActions').style.display = 'none';
+  if (!annotateOn) loadReviewFiles();
+}
+
+// ── 复核队列 ──
+async function loadReviewFiles() {
+  const box = document.getElementById('reviewFiles');
+  box.innerHTML = '<p style="color:#8899aa">加载中...</p>';
+  try {
+    const resp = await fetch('/api/review-files');
+    const data = await resp.json();
+    if (!data.files || !data.files.length) {
+      box.innerHTML = '<p style="color:#8899aa">队列为空（outputs/ 下无待复核文件）</p>';
+      return;
+    }
+    let html = '';
+    data.files.forEach(f => {
+      html += `<div class="result-item" onclick="loadReviewFile('${f.name}')">
+        <span>📄 ${f.image_stem || f.name}</span>
+        <span>${f.count} 框</span>
+      </div>`;
+    });
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = `<div class="error-box">❌ 加载失败: ${e.message}</div>`;
+  }
+}
+
+async function loadReviewFile(name) {
+  reviewFileName = name;
+  deletedIds.clear();
+  document.getElementById('reviewActions').style.display = 'none';
+  const errorBox = document.getElementById('errorBox');
+  errorBox.innerHTML = '';
+
+  try {
+    const [metaResp, fileResp] = await Promise.all([
+      fetch('/api/review-files'),
+      fetch('/api/review-file?name=' + encodeURIComponent(name)),
+    ]);
+    const metaData = await metaResp.json();
+    const qdata = await fileResp.json();
+    if (!fileResp.ok || qdata.error) {
+      errorBox.innerHTML = `<div class="error-box">❌ ${qdata.error || '队列文件不可读'}</div>`;
+      return;
+    }
+
+    const meta = (metaData.files || []).find(f => f.name === name);
+    const imgPath = qdata.image_path || (meta ? meta.image_path : '');
+
+    if (!imgPath) {
+      errorBox.innerHTML = '<div class="error-box">❌ 该队列文件缺少 image_path 字段（旧版本文件），无法显示原图</div>';
+      return;
+    }
+
+    const imgResp = await fetch('/api/review-image?path=' + encodeURIComponent(imgPath));
+    if (!imgResp.ok) {
+      errorBox.innerHTML = '<div class="error-box">❌ 原图不可读: ' + imgPath + '</div>';
+      return;
+    }
+    const imgUrl = URL.createObjectURL(await imgResp.blob());
+
+    currentData = {
+      image_url: imgUrl,
+      image_path: imgPath,
+      bboxes: qdata.annotations || [],
+      masks: [],
+      summary: { total: (qdata.annotations || []).length, model: '' },
+    };
+
+    const img = new Image();
+    img.onload = () => {
+      const c = document.getElementById('canvas');
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      drawBoxes(ctx);
+    };
+    img.src = imgUrl;
+
+    document.getElementById('resultCount').textContent = `(${currentData.bboxes.length} 项)`;
+    let html = '';
+    currentData.bboxes.forEach((b, i) => {
+      const color = getColor(b.label);
+      html += `<div class="result-item" id="item-${i}" onclick="toggleDelete(${i})">
+        <span><span class="badge" style="background:${color};color:#fff">${b.label}</span> ${b.label}</span>
+        <span>${(b.confidence*100).toFixed(1)}%</span>
+      </div>`;
+    });
+    document.getElementById('results').innerHTML = html || '<p style="color:#8899aa">无待复核标注</p>';
+    document.getElementById('summary').innerHTML = `
+      <div class="summary">
+        <b>${currentData.bboxes.length}</b> 个待复核目标<br>
+        <small>队列文件: ${name} · 点击列表项删除/恢复</small>
+      </div>`;
+    document.getElementById('reviewActions').style.display = 'block';
+  } catch (e) {
+    errorBox.innerHTML = `<div class="error-box">❌ 加载失败: ${e.message}</div>`;
+  }
+}
+
+async function saveReview() {
+  if (!reviewFileName) return;
+  try {
+    const resp = await fetch('/api/review-save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ queue_file: reviewFileName, deleted_indices: [...deletedIds] }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      alert('保存失败: ' + (data.error || resp.status));
+      return;
+    }
+    lastReviewedName = data.saved_path.split('/').pop();
+    alert(`已保存: ${data.saved_path}\n保留 ${data.kept} 框，删除 ${data.deleted} 框`);
+    reviewFileName = null;
+    loadReviewFiles();
+  } catch (e) {
+    alert('保存失败: ' + e.message);
+  }
+}
+
+async function downloadReviewJSON() {
+  if (!lastReviewedName) { alert('请先保存修正'); return; }
+  try {
+    const resp = await fetch('/api/review-file?name=' + encodeURIComponent(lastReviewedName));
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      alert('下载失败: ' + (data.error || resp.status));
+      return;
+    }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = lastReviewedName;
+    a.click();
+  } catch (e) {
+    alert('下载失败: ' + e.message);
+  }
+}
+
+// ── 初始化 ──
+loadModels();
+</script>
+</body>
+</html>

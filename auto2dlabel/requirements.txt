@@ -1,0 +1,38 @@
+# Auto2dLabel 依赖
+# 安装: pip install -r requirements.txt
+
+# ---- 深度学习框架 ----
+torch>=2.0
+torchvision>=0.15
+
+# ---- 检测模型 ----
+transformers>=4.41           # Grounding DINO (HuggingFace)
+ultralytics>=8.0             # YOLO / SAM / SAM3 / FastSAM / RT-DETR
+
+# ---- 图像处理 ----
+opencv-python-headless>=4.8
+numpy>=1.24
+pillow>=10.0
+pycocotools>=2.0
+shapely>=2.0
+
+# ---- CLI & 工具 ----
+typer>=0.9
+rich>=13.0
+pydantic>=2.0
+pyyaml>=6.0
+tqdm>=4.60                   # Benchmark 进度条
+
+# ---- LLM Agent ----
+openai>=1.0
+python-dotenv>=1.0
+httpx>=0.25
+
+# ---- Web 审核界面 ----
+fastapi>=0.100
+uvicorn[standard]>=0.20
+python-multipart>=0.0.6      # 文件上传
+
+# ---- 可选 ----
+# anthropic                  # Anthropic Claude API（不需要可不装）
+# pytest>=7.0                # 测试（开发用）

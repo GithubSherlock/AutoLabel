@@ -1,0 +1,31 @@
+# Auto3dLabel 依赖（待实现）
+# 安装: pip install -r requirements.txt
+
+# ---- 深度学习框架 ----
+# torch>=2.0
+# torchvision>=0.15
+
+# ---- 3D 处理 ----
+# open3d>=0.18
+# trimesh>=4.0
+# plyfile>=1.0
+
+# ---- 检测/分割模型 ----
+# transformers>=4.41
+# segment-anything-2
+
+# ---- 图像/点云处理 ----
+# opencv-python-headless>=4.8
+# numpy>=1.24
+# pillow>=10.0
+# pyyaml>=6.0
+
+# ---- CLI & 工具 ----
+# typer>=0.9
+# rich>=13.0
+# pydantic>=2.0
+
+# ---- LLM Agent ----
+# openai>=1.0
+# python-dotenv>=1.0
+# httpx>=0.25
