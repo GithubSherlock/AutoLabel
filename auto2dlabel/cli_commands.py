@@ -145,7 +145,10 @@ def chat_command(
 
     # ---- Step 5: 执行 TaskPlan ----
     console.print(f"\n[bold]开始执行 {len(plan.steps)} 步任务...[/bold]\n")
-    execute_plan(plan, sahi=sahi)
+    execute_plan(
+        plan, sahi=sahi,
+        explicit_batch_size=batch_size, explicit_num_workers=num_workers,
+    )
 
     console.print("\n[bold green]✓ 全部任务完成[/bold green]")
 
@@ -225,12 +228,12 @@ def _fill_batch_params(
     batch_size: int | None,
     num_workers: int | None,
 ) -> None:
-    """批量推理超参数三档来源：CLI 显式 > chat 交互询问 > GPU 显存推荐。
+    """批量推理超参数来源：CLI 显式 > chat 交互询问 > 执行阶段动态实测。
 
-    - CLI 指定 → 覆盖全部步骤
+    - CLI 指定 → 覆盖全部步骤（经 execute_plan 的 explicit_* 透传恒优先）
     - 未指定且非 --no-wait：交互询问一次（非法输入重问 ≤3 次，超时/空输入跳过）
-    - 仍为 None → recommend_batch_params 按 GPU 显存自动推荐（规则与 LLM
-      prompt 注入一致，代码兜底不烧 token）
+    - 仍未定 → 保持 None，执行阶段模型加载后动态实测（测单图峰值显存算最大
+      batch；实测不可用时回退静态档位表）
     """
     from auto2dlabel.schema.task_plan import detect_gpu_memory_gb, recommend_batch_params
     from auto2dlabel.tools.confirm import ask_with_timeout
@@ -251,8 +254,8 @@ def _fill_batch_params(
         first = plan.steps[0]
         rec_bs, rec_nw = recommend_batch_params(first.task_type, gpu_mem)
         msg = (
-            "[bold]批量推理超参数[/bold]（留空回车 = 按 GPU 推荐 "
-            f"batch_size={rec_bs} num_workers={rec_nw}）\n"
+            "[bold]批量推理超参数[/bold]（留空回车 = 自动实测最大 batch，"
+            f"静态参考 batch_size={rec_bs} num_workers={rec_nw}）\n"
             "  格式: batch_size=N num_workers=M"
         )
         for _ in range(3):
@@ -269,17 +272,10 @@ def _fill_batch_params(
                 step.num_workers = nw
             console.print(f"[dim]已设置 batch_size={bs}, num_workers={nw}[/dim]")
             return
-        console.print("[dim]使用 GPU 推荐批量超参数[/dim]")
+        console.print("[dim]未指定 → 执行阶段自动实测（模型加载后测最大 batch）[/dim]")
 
-    # 3) GPU 显存推荐兜底（LLM 未填 / --no-wait / 超时跳过）
-    gpu_mem = detect_gpu_memory_gb()
-    for step in plan.steps:
-        if step.batch_size is None or step.num_workers is None:
-            bs, nw = recommend_batch_params(step.task_type, gpu_mem)
-            if step.batch_size is None:
-                step.batch_size = bs
-            if step.num_workers is None:
-                step.num_workers = nw
+    # 3) 未定值保持 None → 执行阶段动态实测（模型加载后测单图峰值显存算最大 batch；
+    #    实测不可用时由 tools/device.resolve_batch_params 回退静态表兜底）
 
 
 def _fill_missing_params(plan: TaskPlan, planner: TaskPlanner, timeout: int) -> None:

@@ -194,9 +194,12 @@ class UltralyticsModel:
             model.set_classes(prompts)
 
         # YOLO.__call__ stub 为 Results | Tensor 联合，运行时恒为 list[Results]
+        # rect=False：ultralytics predict 默认 rect=True（单图矩形 letterbox），
+        # 批量混合尺寸时自动禁用 → 单图与批量 letterbox 不同 → 结果不一致。
+        # 显式统一关闭，保证批量/逐图 parity（见 v0.3 批量调优节）
         preds = cast("list[Results]", model(
             image_path, conf=confidence_threshold, iou=self._iou,
-            device=self._device, verbose=False,
+            device=self._device, verbose=False, rect=False,
         ))
 
         return self._parse_pred(preds[0], prompts)
@@ -219,7 +222,7 @@ class UltralyticsModel:
 
         kwargs: dict[str, Any] = {
             "conf": confidence_threshold, "iou": self._iou,
-            "device": self._device, "verbose": False,
+            "device": self._device, "verbose": False, "rect": False,
         }
         if num_workers:
             kwargs["workers"] = num_workers
@@ -521,7 +524,9 @@ def sahi_infer_yolo(
     model 标注为 Any：访问私有 _model/_device（Protocol 不可见），
     与下方 cast(Any, model)._load() 同一惯例。
     """
-    results = model._model(tile, conf=conf, iou=0.5, device=model._device, verbose=False)
+    results = model._model(
+        tile, conf=conf, iou=0.5, device=model._device, verbose=False, rect=False,
+    )
     return _yolo_results_to_dets(results, prompts)
 
 

@@ -60,8 +60,11 @@ def test_task_step_summary_shows_batch() -> None:
     assert "batch=" not in _make_step().summary
 
 
-def test_recommend_no_gpu() -> None:
-    """无 GPU → 逐图（batch_size=1, num_workers=0）。"""
+def test_recommend_no_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """无 GPU → 逐图（batch_size=1）；workers 按 CPU 公式（2 核 → 0）。"""
+    import os
+
+    monkeypatch.setattr(os, "cpu_count", lambda: 2)
     assert recommend_batch_params("object_detection", None) == (1, 0)
 
 
@@ -76,20 +79,31 @@ def test_recommend_no_gpu() -> None:
         ("image_classification", (16, 4)),
     ],
 )
-def test_recommend_large_gpu(task_type: str, expected: tuple[int, int]) -> None:
-    """≥20GB（4090 档）按任务类型推荐。"""
+def test_recommend_large_gpu(
+    task_type: str, expected: tuple[int, int], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """≥20GB（4090 档）按任务类型推荐；workers 按 CPU 公式（16 核 → 4）。"""
+    import os
+
+    monkeypatch.setattr(os, "cpu_count", lambda: 16)
     assert recommend_batch_params(task_type, 24) == expected
 
 
-def test_recommend_mid_gpu() -> None:
-    """10-20GB 档（减半 batch / 减半 workers）。"""
+def test_recommend_mid_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """10-20GB 档（batch 减半）；workers 按 CPU 公式（8 核 → 2）。"""
+    import os
+
+    monkeypatch.setattr(os, "cpu_count", lambda: 8)
     assert recommend_batch_params("object_detection", 16) == (4, 2)
     assert recommend_batch_params("instance_segmentation", 12) == (2, 2)
     assert recommend_batch_params("classification", 10) == (8, 2)
 
 
-def test_recommend_small_gpu() -> None:
-    """<10GB 档（workers 归零）。"""
+def test_recommend_small_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """<10GB 档（batch 再减半）；workers 按 CPU 公式（2 核 → 0）。"""
+    import os
+
+    monkeypatch.setattr(os, "cpu_count", lambda: 2)
     assert recommend_batch_params("object_detection", 8) == (2, 0)
     assert recommend_batch_params("instance_segmentation", 6) == (1, 0)
     assert recommend_batch_params("classification", 4) == (4, 0)

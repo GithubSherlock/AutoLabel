@@ -27,7 +27,9 @@ from auto2dlabel.benchmarks.common import (  # noqa: E402
     evaluate_per_class,
     format_result_table,
     normalize_dota_class,
+    obb_batch_or_fallback,
     rotate_iou,
+    sample_image_paths,
     save_results,
 )
 from auto2dlabel.benchmarks.datasets import ensure_dota_val  # noqa: E402
@@ -116,8 +118,10 @@ def run_obb_detection(
     model_name: str,
     conf: float,
     iou: float,
+    batch: int | None = None,
+    workers: int | None = None,
 ) -> dict[int, list[dict[str, Any]]]:
-    """对 GT 中所有图像运行 OBB 旋转框检测。"""
+    """对 GT 中所有图像运行 OBB 旋转框检测（批量推理 + OOM 降级逐图）。"""
     try:
         from tqdm import tqdm
         has_tqdm = True
@@ -125,6 +129,7 @@ def run_obb_detection(
         has_tqdm = False
 
     from auto2dlabel.models.obb import create_obb_model
+    from auto2dlabel.tools.device import resolve_batch_params
 
     all_cats = sorted(set(o["name"] for g in gt.values() for o in g["objects"]))
     print(f"检测类别 ({len(all_cats)}): {', '.join(all_cats)}")
@@ -133,29 +138,53 @@ def run_obb_detection(
     model = create_obb_model(model_name, iou_threshold=iou)
     predictions: dict[int, list[dict[str, Any]]] = {}
 
+    # 批量推理超参：CLI 显式 > 动态实测（模型加载后测单图显存）> 静态表
+    _obb_batch = getattr(model, "detect_obb_batch", None)
+    infer_fn = (
+        (lambda ps: _obb_batch(ps, all_cats, conf, 0))
+        if _obb_batch is not None else None
+    )
+    batch_size, num_workers = resolve_batch_params(
+        "obb_detection", infer_fn, sample_image_paths(gt, image_dir),
+        explicit_batch=batch, explicit_workers=workers,
+    )
+    print(f"批量推理: batch_size={batch_size}  num_workers={num_workers}")
+
     total = len(gt)
     img_ids = list(gt.keys())
+    n_batches = (total + batch_size - 1) // batch_size
     iterator = (
-        tqdm(enumerate(img_ids), total=total, desc=f"OBB 检测（{model_name}）", unit="img")
-        if has_tqdm else enumerate(img_ids)
+        tqdm(range(0, total, batch_size), total=n_batches,
+             desc=f"OBB 检测（{model_name} b={batch_size}）", unit="batch")
+        if has_tqdm else range(0, total, batch_size)
     )
 
     _t0 = time.time()
-    for i, img_id in iterator:
-        filename = gt[img_id]["file_name"]
-        img_path = image_dir / filename
-        if not img_path.exists():
+    for start in iterator:
+        # 分块（缺失文件过滤，chunk_ids 与 chunk_paths 保序对齐）
+        chunk_ids: list[int] = []
+        chunk_paths: list[str] = []
+        for img_id in img_ids[start:start + batch_size]:
+            img_path = image_dir / gt[img_id]["file_name"]
+            if not img_path.exists():
+                continue
+            chunk_ids.append(img_id)
+            chunk_paths.append(str(img_path))
+        if not chunk_paths:
             continue
 
-        results = model.detect_obb(str(img_path), all_cats, confidence_threshold=conf)
-        predictions[img_id] = []
-        for r in results:
-            corners = rotated_corners(r.cx, r.cy, r.width, r.height, r.angle)
-            predictions[img_id].append({
-                "name": normalize_dota_class(r.label),
-                "quad": [c for pt in corners for c in pt],
-                "conf": r.confidence,
-            })
+        results_per_img = obb_batch_or_fallback(
+            model, chunk_paths, all_cats, conf, num_workers,
+        )
+        for img_id, results in zip(chunk_ids, results_per_img):
+            predictions[img_id] = []
+            for r in results:
+                corners = rotated_corners(r.cx, r.cy, r.width, r.height, r.angle)
+                predictions[img_id].append({
+                    "name": normalize_dota_class(r.label),
+                    "quad": [c for pt in corners for c in pt],
+                    "conf": r.confidence,
+                })
 
     elapsed = time.time() - _t0
     print(f"完成！{elapsed:.1f}s, {total / elapsed:.1f} img/s")
@@ -198,7 +227,8 @@ def main() -> None:
     print(f"已加载 {len(gt)} 张图像\n")
 
     # 检测
-    predictions = run_obb_detection(gt, image_dir, args.model, args.conf, args.iou)
+    predictions = run_obb_detection(gt, image_dir, args.model, args.conf, args.iou,
+                                    batch=args.batch, workers=args.workers)
     print()
 
     # 可视化（--viz：镜像相对路径渲染旋转框 quad）

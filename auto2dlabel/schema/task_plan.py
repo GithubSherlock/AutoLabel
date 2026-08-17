@@ -174,22 +174,28 @@ def detect_gpu_memory_gb() -> int | None:
 
 
 def recommend_batch_params(task_type: str, gpu_memory_gb: int | None) -> tuple[int, int]:
-    """按 GPU 显存档位推荐 (batch_size, num_workers)——LLM prompt 与代码兜底共用。
+    """按 GPU 显存档位推荐 batch_size——LLM prompt 与代码兜底共用。
+
+    静态兜底（规划阶段用，模型尚未加载无法实测）；执行阶段由
+    tools/device.resolve_batch_params 动态实测修正。
+    num_workers 按 CPU 核数推荐（DataLoader 并行度与显存无关，
+    tools/device.recommend_num_workers），不再随显存档位变化。
 
     显存预算依据（RTX 4090 24GB 实测量级）：yolo26x 640 fp32 ~14GB/批、
     maskrcnn 1024 输入 ~2GB/张、resnet18 ~0.1GB/张。推荐值保守留余量，
     用户显式指定的参数优先。
     """
+    from auto2dlabel.tools.device import recommend_num_workers
+
     if gpu_memory_gb is None:
-        return 1, 0
+        return 1, recommend_num_workers()
     if task_type in ("classification", "image_classification"):
         bs = 16 if gpu_memory_gb >= 20 else 8 if gpu_memory_gb >= 10 else 4
     elif task_type in ("instance_segmentation", "semantic_segmentation"):
         bs = 4 if gpu_memory_gb >= 20 else 2 if gpu_memory_gb >= 10 else 1
     else:  # object_detection / obb_detection
         bs = 8 if gpu_memory_gb >= 20 else 4 if gpu_memory_gb >= 10 else 2
-    nw = 4 if gpu_memory_gb >= 20 else 2 if gpu_memory_gb >= 10 else 0
-    return bs, nw
+    return bs, recommend_num_workers()
 
 
 @dataclass

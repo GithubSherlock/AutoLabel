@@ -20,6 +20,7 @@ from auto2dlabel.benchmarks import datetime, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (  # noqa: E402
     OUTPUT_DIR,
     build_parser,
+    classify_batch_or_fallback,
     evaluate_classification,
     format_classification_table,
     save_results,
@@ -40,25 +41,74 @@ def run_classification(
     model_name: str,
     top_k: int,
     class_names: list[str],
+    batch: int | None = None,
+    workers: int | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], float]:
-    """逐图分类，返回 (预测 top-K 列表, 推理耗时秒数)。
+    """批量分类，返回 (预测 top-K 列表, 推理耗时秒数)。
 
     监督路径 candidates=[]（纯 1000 类 top-K）；零样本路径 candidates=100 类英文名。
+    批量 OOM 时自动降级逐图（classify_batch_or_fallback）。
     """
+    try:
+        from tqdm import tqdm
+        has_tqdm = True
+    except ImportError:
+        has_tqdm = False
+
+    from auto2dlabel.tools.device import resolve_batch_params
+
     model = create_classification_model(model_name)
     cast(Any, model)._load()  # 预加载权重，避免首图加载耗时污染吞吐计时
 
     is_zeroshot = "clip" in model_name or "siglip" in model_name
+    candidates = class_names if is_zeroshot else []
     predictions: dict[str, list[dict[str, Any]]] = {}
 
+    # 批量推理超参：CLI 显式 > 动态实测（模型加载后测单图显存）> 静态表
+    _cls_batch = getattr(model, "classify_batch", None)
+    infer_fn = (
+        (lambda ps: _cls_batch(ps, candidates, top_k=top_k))
+        if _cls_batch is not None else None
+    )
+    probe_paths: list[str] = []
+    for info in gt.values():
+        p = dataset_root / info["file_name"]
+        if p.exists():
+            probe_paths.append(str(p))
+        if len(probe_paths) >= 20:
+            break
+    batch_size, num_workers = resolve_batch_params(
+        "classification", infer_fn, probe_paths,
+        explicit_batch=batch, explicit_workers=workers,
+    )
+    print(f"批量推理: batch_size={batch_size}  num_workers={num_workers}")
+
+    total = len(gt)
+    img_ids = list(gt.keys())
+    n_batches = (total + batch_size - 1) // batch_size
+    iterator = tqdm(range(0, total, batch_size), total=n_batches,
+                    desc=f"分类（{model_name} b={batch_size}）", unit="batch") \
+        if has_tqdm else range(0, total, batch_size)
+
     _t0 = time.time()
-    for img_id, info in gt.items():
-        img_path = dataset_root / info["file_name"]
-        if not img_path.exists():
+    for start in iterator:
+        # 分块（缺失文件过滤，chunk_ids 与 chunk_paths 保序对齐）
+        chunk_ids: list[str] = []
+        chunk_paths: list[str] = []
+        for img_id in img_ids[start:start + batch_size]:
+            img_path = dataset_root / gt[img_id]["file_name"]
+            if not img_path.exists():
+                continue
+            chunk_ids.append(img_id)
+            chunk_paths.append(str(img_path))
+        if not chunk_paths:
             continue
-        candidates = class_names if is_zeroshot else []
-        labels = model.classify(str(img_path), candidates, top_k=top_k)
-        predictions[img_id] = [{"label": lb.label, "score": lb.score} for lb in labels]
+
+        labels_per_img = classify_batch_or_fallback(
+            model, chunk_paths, candidates, top_k=top_k,
+        )
+        for img_id, labels in zip(chunk_ids, labels_per_img):
+            predictions[img_id] = [{"label": lb.label, "score": lb.score} for lb in labels]
 
     elapsed = time.time() - _t0
     total = max(len(predictions), 1)
@@ -98,7 +148,10 @@ def main() -> None:
 
     # 推理
     print(f"运行分类（模型 {args.model}，top-{args.top_k}）...")
-    predictions, elapsed = run_classification(gt, dataset_root, args.model, args.top_k, class_names)
+    predictions, elapsed = run_classification(
+        gt, dataset_root, args.model, args.top_k, class_names,
+        batch=args.batch, workers=args.workers,
+    )
     print()
 
     # 可视化（--viz：文本条 GT + top-K）

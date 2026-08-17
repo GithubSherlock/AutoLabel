@@ -20,10 +20,12 @@ from auto2dlabel.benchmarks.common import (
     assign_mask_labels,
     build_parser,
     coco_seg_to_mask,
+    detect_batch_or_fallback,
     evaluate_mask_per_class,
     format_mask_result_table,
     mask_to_bbox,
     polygon_to_mask,
+    sample_image_paths,
     save_results,
 )
 from auto2dlabel.benchmarks.datasets import ensure_coco_val
@@ -89,8 +91,14 @@ def run_segmentation(
     iou: float,
     seg_model_name: str,
     prompt_conf: float = 0.3,
+    batch: int | None = None,
+    workers: int | None = None,
 ) -> dict[int, list[dict]]:
-    """检测 → 分割，返回 mask 预测。"""
+    """检测 → 分割，返回 mask 预测。
+
+    检测步分块批量（detect_batch_or_fallback + OOM 降级）；
+    分割步逐图（每图 bbox prompt 不同，SAM2/FastSAM 无批量能力）。
+    """
     try:
         from tqdm import tqdm
         has_tqdm = True
@@ -100,6 +108,7 @@ def run_segmentation(
     from auto2dlabel.models.detection import create_detection_model
     from auto2dlabel.models.segmentation import create_segmentation_model
     from auto2dlabel.schema.annotation import Bbox
+    from auto2dlabel.tools.device import resolve_batch_params
 
     all_cats = sorted(set(o["name"] for g in gt.values() for o in g["objects"]))
     print(f"分割类别 ({len(all_cats)}): {', '.join(all_cats[:10])}...")
@@ -108,43 +117,70 @@ def run_segmentation(
     seg_model = create_segmentation_model(seg_model_name)
 
     predictions: dict[int, list[dict]] = {}
+
+    # 检测步批量推理超参：CLI 显式 > 动态实测（模型加载后测单图显存）> 静态表
+    _det_batch = getattr(det_model, "detect_batch", None)
+    infer_fn = (
+        (lambda ps: _det_batch(ps, all_cats, conf, 0))
+        if _det_batch is not None else None
+    )
+    batch_size, num_workers = resolve_batch_params(
+        "object_detection", infer_fn, sample_image_paths(gt, image_dir),
+        explicit_batch=batch, explicit_workers=workers,
+    )
+    print(f"批量推理: batch_size={batch_size}  num_workers={num_workers}")
+
     total = len(gt)
     img_ids = sorted(gt.keys())
-    iterator = tqdm(enumerate(img_ids), total=total, desc=f"分割（{seg_model_name}）", unit="img") if has_tqdm else enumerate(img_ids)
+    n_batches = (total + batch_size - 1) // batch_size
+    iterator = tqdm(range(0, total, batch_size), total=n_batches,
+                    desc=f"分割（{seg_model_name} b={batch_size}）", unit="batch") \
+        if has_tqdm else range(0, total, batch_size)
 
     _t0 = time.time()
-    for i, img_id in iterator:
-        filename = gt[img_id]["file_name"]
-        img_path = image_dir / filename
-        if not img_path.exists():
+    for start in iterator:
+        # 分块（缺失文件过滤，chunk_ids 与 chunk_paths 保序对齐）
+        chunk_ids: list[int] = []
+        chunk_paths: list[str] = []
+        for img_id in img_ids[start:start + batch_size]:
+            img_path = image_dir / gt[img_id]["file_name"]
+            if not img_path.exists():
+                continue
+            chunk_ids.append(img_id)
+            chunk_paths.append(str(img_path))
+        if not chunk_paths:
             continue
 
-        # Step 1: 检测
-        det_results = det_model.detect(str(img_path), all_cats, confidence_threshold=conf)
-        high_conf = [r for r in det_results if r.confidence >= prompt_conf]
-        if not high_conf:
+        # Step 1: 检测（批量）
+        det_results_per_img = detect_batch_or_fallback(
+            det_model, chunk_paths, all_cats, conf, num_workers,
+        )
+        for img_id, det_results in zip(chunk_ids, det_results_per_img):
+            high_conf = [r for r in det_results if r.confidence >= prompt_conf]
+            if not high_conf:
+                predictions[img_id] = []
+                continue
+
+            # Step 2: 分割（逐图，用该图高置信度 bbox 做 prompt）
+            img_path = image_dir / gt[img_id]["file_name"]
+            bboxes = [Bbox(x=r.x, y=r.y, width=r.width, height=r.height, label=r.label, confidence=r.confidence)
+                      for r in high_conf]
+            masks = seg_model.generate(str(img_path), bboxes)
+
+            # 获取图像尺寸用于 polygon → mask 转换
+            from PIL import Image as _PILImage
+            im = _PILImage.open(img_path)
+            h, w = im.height, im.width
+
             predictions[img_id] = []
-            continue
-
-        # Step 2: 分割（用高置信度 bbox 做 prompt）
-        bboxes = [Bbox(x=r.x, y=r.y, width=r.width, height=r.height, label=r.label, confidence=r.confidence)
-                  for r in high_conf]
-        masks = seg_model.generate(str(img_path), bboxes)
-
-        # 获取图像尺寸用于 polygon → mask 转换
-        from PIL import Image as _PILImage
-        im = _PILImage.open(img_path)
-        h, w = im.height, im.width
-
-        predictions[img_id] = []
-        for mask_obj in masks:
-            mask_bool = polygon_to_mask(mask_obj.segmentation, h, w)
-            predictions[img_id].append({
-                "name": mask_obj.bbox.label,
-                "conf": mask_obj.bbox.confidence,
-                "mask": mask_bool,
-                "bbox": mask_obj.bbox,
-            })
+            for mask_obj in masks:
+                mask_bool = polygon_to_mask(mask_obj.segmentation, h, w)
+                predictions[img_id].append({
+                    "name": mask_obj.bbox.label,
+                    "conf": mask_obj.bbox.confidence,
+                    "mask": mask_bool,
+                    "bbox": mask_obj.bbox,
+                })
 
     elapsed = time.time() - _t0
     print(f"完成！{elapsed:.1f}s, {total / elapsed:.1f} img/s")
@@ -248,12 +284,13 @@ def main():
     gt, sizes = load_coco_seg_ground_truth(gt_json, max_images=args.max_images)
     print(f"已加载 {len(gt)} 张图像\n")
 
-    # 分割
+    # 分割（box-prompted 模式每图 prompt 不同，保持逐图；两段式检测步接批量）
     if args.box_prompted:
         predictions = run_box_prompted_segmentation(gt, image_dir, args.seg_model)
     else:
         predictions = run_segmentation(
             gt, image_dir, args.conf, args.iou, args.seg_model, args.prompt_conf,
+            batch=args.batch, workers=args.workers,
         )
     print()
 

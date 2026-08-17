@@ -576,9 +576,129 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--iou", type=float, default=0.5, help="IoU 阈值")
     parser.add_argument("--top-classes", type=int, default=20, help="展示前 N 类结果")
     parser.add_argument("--sahi", action="store_true", help="启用 SAHI 切片推理（大图检测）")
+    parser.add_argument("--batch", type=int, default=None,
+                        help="批量推理每批图像数（默认 None=模型加载后自动实测最大 batch，1=逐图）")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="DataLoader 子进程数（默认 None=按 CPU 核数自动）")
     parser.add_argument("--viz", action="store_true",
                         help="渲染预测结果到项目同级 Visualization/<数据集名>/（评测协议不变）")
     return parser
+
+
+# ================================================================
+# 批量推理 helper（模型 *_batch + OOM 降级逐图；结果顺序与 paths 对齐）
+# ================================================================
+
+
+def sample_image_paths(
+    gt: dict[int, dict[str, Any]], image_dir: Path, limit: int = 20,
+) -> list[str]:
+    """取前 limit 张存在的图路径，作显存实测探针候选（device.resolve_batch_params）。"""
+    paths: list[str] = []
+    for info in gt.values():
+        p = image_dir / info["file_name"]
+        if p.exists():
+            paths.append(str(p))
+        if len(paths) >= limit:
+            break
+    return paths
+
+
+def _batch_or_fallback(
+    batch_fn: Callable[[list[str]], list[list[Any]]] | None,
+    single_fn: Callable[[str], list[Any]],
+    paths: list[str],
+) -> list[list[Any]]:
+    """批量推理（batch_fn）+ OOM 降级逐图（single_fn）；结果与 paths 对齐。
+
+    batch_fn 为 None（模型无批量能力）或批量 OOM 时回退逐图；
+    非 OOM 异常向上传播（不吞真实错误）。
+    """
+    if batch_fn is not None and len(paths) > 1:
+        try:
+            return batch_fn(paths)
+        except RuntimeError as e:
+            if "out of memory" not in str(e).lower():
+                raise
+            import torch
+
+            torch.cuda.empty_cache()
+            print(f"  ⚠ 批量 OOM，本块降级逐图（{len(paths)} 张）")
+    return [single_fn(p) for p in paths]
+
+
+def detect_batch_or_fallback(
+    model: Any,
+    paths: list[str],
+    all_cats: list[str],
+    conf: float,
+    num_workers: int = 0,
+) -> list[list[Any]]:
+    """批量检测；无 detect_batch 能力或 OOM → 逐图回退（结果与 paths 对齐）。"""
+    batch_fn = (
+        (lambda ps: model.detect_batch(ps, all_cats, conf, num_workers=num_workers))
+        if hasattr(model, "detect_batch") else None
+    )
+    return _batch_or_fallback(
+        batch_fn,
+        lambda p: model.detect(p, all_cats, confidence_threshold=conf),
+        paths,
+    )
+
+
+def obb_batch_or_fallback(
+    model: Any,
+    paths: list[str],
+    prompts: list[str],
+    conf: float,
+    num_workers: int = 0,
+) -> list[list[Any]]:
+    """批量旋转框检测；无 detect_obb_batch 能力或 OOM → 逐图回退。"""
+    batch_fn = (
+        (lambda ps: model.detect_obb_batch(ps, prompts, conf, num_workers=num_workers))
+        if hasattr(model, "detect_obb_batch") else None
+    )
+    return _batch_or_fallback(
+        batch_fn,
+        lambda p: model.detect_obb(p, prompts, confidence_threshold=conf),
+        paths,
+    )
+
+
+def classify_batch_or_fallback(
+    model: Any,
+    paths: list[str],
+    candidates: list[str],
+    top_k: int = 5,
+) -> list[list[Any]]:
+    """批量分类；无 classify_batch 能力或 OOM → 逐图回退。"""
+    batch_fn = (
+        (lambda ps: model.classify_batch(ps, candidates, top_k=top_k))
+        if hasattr(model, "classify_batch") else None
+    )
+    return _batch_or_fallback(
+        batch_fn,
+        lambda p: model.classify(p, candidates, top_k=top_k),
+        paths,
+    )
+
+
+def generate_batch_or_fallback(
+    model: Any,
+    paths: list[str],
+    bboxes: list[Any],
+    mode: str = "box",
+) -> list[list[Any]]:
+    """批量分割；无 generate_batch 能力或 OOM → 逐图回退。"""
+    batch_fn = (
+        (lambda ps: model.generate_batch(ps, bboxes, mode=mode))
+        if hasattr(model, "generate_batch") else None
+    )
+    return _batch_or_fallback(
+        batch_fn,
+        lambda p: model.generate(p, bboxes, mode=mode),
+        paths,
+    )
 
 
 # ================================================================

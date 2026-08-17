@@ -79,7 +79,7 @@ class SAM2Model:
 
         # SAM.__call__ stub 为 Results | Tensor 联合，运行时恒为 list[Results]
         results = cast(
-            "list[Results]", model(image_path, bboxes=box_prompts, verbose=False)
+            "list[Results]", model(image_path, bboxes=box_prompts, verbose=False, rect=False)
         )
         r = results[0]
 
@@ -157,6 +157,7 @@ class FastSAMModel:
         # FastSAM.__call__ stub 为 Results | Tensor 联合，运行时恒为 list[Results]
         results = cast("list[Results]", model(
             image_path, device=self._device, verbose=False, conf=0.1, iou=0.7,
+            rect=False,
         ))
         r = results[0]
 

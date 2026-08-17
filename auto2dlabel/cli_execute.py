@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import time as _time
+from collections.abc import Callable
 from datetime import datetime as _datetime
 from pathlib import Path
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from auto2dlabel.agent.state import AgentState
@@ -16,11 +16,22 @@ from auto2dlabel.schema.task_plan import DEFAULT_MODEL, TaskPlan, TaskStep
 
 if TYPE_CHECKING:
     from auto2dlabel.agent.evaluate import QualityReport
+    from auto2dlabel.models.classification import ClassificationModel
     from auto2dlabel.models.detection import DetectionModel
+    from auto2dlabel.models.obb import OBBModel
 
 
-def execute_plan(plan: TaskPlan, sahi: bool = False) -> None:
-    """顺序执行 TaskPlan 的每个步骤。"""
+def execute_plan(
+    plan: TaskPlan,
+    sahi: bool = False,
+    explicit_batch_size: int | None = None,
+    explicit_num_workers: int | None = None,
+) -> None:
+    """顺序执行 TaskPlan 的每个步骤。
+
+    explicit_batch_size/explicit_num_workers：CLI 显式指定的批量推理超参数
+    （优先于交互询问值与动态实测推荐）。
+    """
     _plan_t0 = _time.time()
     steps_results: list[dict[str, Any]] = []
 
@@ -54,14 +65,47 @@ def execute_plan(plan: TaskPlan, sahi: bool = False) -> None:
 
             seg_model = create_segmentation_model(seg_name)
 
-        # 批量推理：按 batch_size 分块（1 = 逐图，与旧行为一致）
-        batch_size = max(1, step.batch_size or 1)
-        console.print(f"  批量: batch_size={batch_size}  num_workers={step.num_workers or 0}")
-        for i in range(0, len(images), batch_size):
-            _execute_chunk(
-                step, images[i:i + batch_size], det_name, seg_name, model, seg_model,
-                sahi, _t0, _ts, steps_results,
-            )
+        # OBB/分类模型步骤级复用（原每块重建——同上，权重加载只发生一次）
+        obb_model: Any | None = None
+        if step.task_type == "obb_detection":
+            from auto2dlabel.models.obb import create_obb_model
+
+            obb_model = create_obb_model(step.model_name, iou_threshold=step.iou_threshold)
+        cls_model: Any | None = None
+        if step.task_type == "classification":
+            from auto2dlabel.models.classification import create_classification_model
+
+            cls_model = create_classification_model(step.model_name)
+
+        # 批量推理超参数：显式 > 动态实测（模型加载后探针测单图峰值）> 静态表
+        batch_size, num_workers = _resolve_step_batch(
+            step, images, det_name, seg_name, model, seg_model, obb_model, cls_model,
+            sahi, explicit_batch_size, explicit_num_workers,
+        )
+        console.print(f"  批量: batch_size={batch_size}  num_workers={num_workers}")
+        # 分块执行；批量路径 OOM 时剩余图降级逐图（batch=1 历史已验证路径）
+        idx = 0
+        try:
+            for i in range(0, len(images), batch_size):
+                _execute_chunk(
+                    step, images[i:i + batch_size], det_name, seg_name, model, seg_model,
+                    sahi, _t0, _ts, steps_results,
+                    obb_model=obb_model, cls_model=cls_model, num_workers=num_workers,
+                )
+                idx = i + batch_size
+        except RuntimeError as e:
+            if "out of memory" not in str(e).lower():
+                raise
+            console.print("[yellow]⚠ 批量推理 OOM，剩余图像降级逐图执行[/yellow]")
+            import torch
+
+            torch.cuda.empty_cache()
+            for img in images[idx:]:
+                _execute_chunk(
+                    step, [img], det_name, seg_name, model, seg_model,
+                    sahi, _t0, _ts, steps_results,
+                    obb_model=obb_model, cls_model=cls_model, num_workers=num_workers,
+                )
 
     _log_plan(plan, steps_results, _plan_t0)
 
@@ -122,6 +166,91 @@ def _route_model(step: TaskStep) -> tuple[str | None, str | None]:
     return det_name, seg_name
 
 
+def _build_tune_infer_fn(
+    step: TaskStep,
+    det_name: str | None,
+    seg_name: str | None,
+    model: Any,
+    seg_model: Any,
+    obb_model: Any,
+    cls_model: Any,
+    sahi: bool,
+) -> Callable[[list[str]], Any] | None:
+    """按任务构建动态实测闭包（批量推理探针）；无批量能力 → None（回退静态表）。
+
+    SAHI 切片推理保持逐图；SAM 系列/语义分割无 *_batch → None。
+    探针内 num_workers=0（DataLoader 并行度不影响显存）。
+    """
+    if sahi:
+        return None
+
+    if step.task_type == "classification":
+        if cls_model is None or not hasattr(cls_model, "classify_batch"):
+            return None
+        return lambda paths: cls_model.classify_batch(paths, step.prompts, top_k=5)
+    if step.task_type == "obb_detection":
+        if obb_model is None or not hasattr(obb_model, "detect_obb_batch"):
+            return None
+        return lambda paths: obb_model.detect_obb_batch(
+            paths, step.prompts, step.confidence_threshold, 0,
+        )
+    if step.task_type in ("instance_segmentation", "semantic_segmentation"):
+        # 自带检测分割（maskrcnn）有 generate_batch；两段式受益在检测步
+        if seg_name and _is_self_detect_seg(seg_name):
+            if seg_model is None or not hasattr(seg_model, "generate_batch"):
+                return None
+            prompt_bboxes = [
+                Bbox(x=0, y=0, width=1, height=1, label=p, confidence=1.0)
+                for p in step.prompts
+            ]
+            return lambda paths: seg_model.generate_batch(paths, prompt_bboxes)
+        det_name = det_name or DEFAULT_MODEL
+    if det_name and model is not None and hasattr(model, "detect_batch"):
+        return lambda paths: model.detect_batch(
+            paths, step.prompts, step.confidence_threshold, 0,
+        )
+    return None
+
+
+def _resolve_step_batch(
+    step: TaskStep,
+    images: list[Path],
+    det_name: str | None,
+    seg_name: str | None,
+    model: Any,
+    seg_model: Any,
+    obb_model: Any,
+    cls_model: Any,
+    sahi: bool,
+    explicit_batch_size: int | None,
+    explicit_num_workers: int | None,
+) -> tuple[int, int]:
+    """解析本步批量超参数：显式 CLI > 动态实测 > 静态表。
+
+    显式 CLI 值由 execute_plan 参数透传恒优先；step 字段值（LLM 规划 / 交互询问）
+    仅作规划阶段兜底，执行阶段以动态实测修正。
+    """
+    from auto2dlabel.tools.device import recommend_num_workers, resolve_batch_params
+
+    batch = explicit_batch_size if explicit_batch_size is not None else step.batch_size
+    workers = explicit_num_workers if explicit_num_workers is not None else step.num_workers
+
+    nw = workers if workers is not None else recommend_num_workers()
+    if batch is not None:
+        # CLI 显式 / 交互询问 / LLM 规划已定 batch → 尊重（workers 缺省按 CPU 公式）
+        return max(1, batch), nw
+
+    # batch 未定：动态实测（模型已加载；无批量能力/无 CUDA 回退静态表）
+    infer_fn = _build_tune_infer_fn(
+        step, det_name, seg_name, model, seg_model, obb_model, cls_model, sahi,
+    )
+    bs, _ = resolve_batch_params(
+        step.task_type, infer_fn, [str(p) for p in images[:20]],
+        explicit_workers=workers,
+    )
+    return bs, nw
+
+
 def _execute_image(
     step: TaskStep,
     img_path: Path,
@@ -138,11 +267,14 @@ def _execute_image(
     cls_labels: list[Any] | None = None,
     obb_results: list[Any] | None = None,
     seg_masks: list[Any] | None = None,
+    cls_model: Any = None,
+    obb_model: Any = None,
 ) -> None:
     """执行单图：分类/OBB 分支直接产出；其余走 检测 → 可选分割 → 后处理。
 
     批量路径经 det_results/det_quality/cls_labels/obb_results/seg_masks 注入预计算结果，
     对应模型调用在块级完成（None = 本图自行推理）。
+    cls_model/obb_model 步骤级复用（None 时各步自行创建，旧行为）。
     """
     ann = Annotation(image_path=str(img_path))
     try:
@@ -155,12 +287,18 @@ def _execute_image(
 
     # 分类任务：零样本分类 → labels → 导出（跳过检测/分割/可视化/三档分流）
     if step.task_type == "classification":
-        _classification_step(step, img_path, ann, _ts, step_t0, steps_results, cls_labels)
+        _classification_step(
+            step, img_path, ann, _ts, step_t0, steps_results,
+            cls_labels=cls_labels, cls_model=cls_model,
+        )
         return
 
     # 旋转框检测任务：YOLO-OBB → Bbox(angle) → dota/yolo_obb 导出（三档分流照旧）
     if step.task_type == "obb_detection":
-        _obb_step(step, img_path, ann, _ts, step_t0, steps_results, obb_results)
+        _obb_step(
+            step, img_path, ann, _ts, step_t0, steps_results,
+            obb_results=obb_results, obb_model=obb_model,
+        )
         return
 
     # 检测（自带检测的分割模型跳过）；批量路径直接注入块级结果
@@ -195,33 +333,39 @@ def _execute_chunk(
     step_t0: float,
     _ts: str,
     steps_results: list[dict[str, Any]],
+    obb_model: Any = None,
+    cls_model: Any = None,
+    num_workers: int = 0,
 ) -> None:
     """执行一个图像块：支持批量推理的任务走模型 *_batch 方法，否则逐图回退。
 
     batch_size=1 时 chunk 恒为单图，自然落入逐图路径（与旧行为一致）。
+    obb_model/cls_model 步骤级复用（execute_plan 已创建）；None 时块内创建。
     """
-    num_workers = max(0, step.num_workers or 0)
+    num_workers = max(0, num_workers)
     batch = len(chunk) > 1
 
     # 分类批量（CLIP/SigLIP/torchvision 原生多图）
     if step.task_type == "classification" and batch:
-        labels_per_img = _classification_batch(step, chunk)
+        labels_per_img = _classification_batch(step, chunk, cls_model)
         if labels_per_img is not None:
             for img_path, labels in zip(chunk, labels_per_img):
                 _execute_image(
                     step, img_path, det_name, seg_name, model, seg_model, sahi,
                     step_t0, _ts, steps_results, cls_labels=labels,
+                    obb_model=obb_model, cls_model=cls_model,
                 )
             return
 
     # OBB 批量（ultralytics 原生 batch）
     if step.task_type == "obb_detection" and batch:
-        obb_per_img = _obb_batch(step, chunk, num_workers)
+        obb_per_img = _obb_batch(step, chunk, num_workers, obb_model)
         if obb_per_img is not None:
             for img_path, obb_results in zip(chunk, obb_per_img):
                 _execute_image(
                     step, img_path, det_name, seg_name, model, seg_model, sahi,
                     step_t0, _ts, steps_results, obb_results=obb_results,
+                    obb_model=obb_model, cls_model=cls_model,
                 )
             return
 
@@ -236,6 +380,7 @@ def _execute_chunk(
                     step, img_path, det_name, seg_name, model, seg_model, sahi,
                     step_t0, _ts, steps_results,
                     det_results=det_results, det_quality=det_quality,
+                    obb_model=obb_model, cls_model=cls_model,
                 )
             return
 
@@ -247,6 +392,7 @@ def _execute_chunk(
                 _execute_image(
                     step, img_path, det_name, seg_name, model, seg_model, sahi,
                     step_t0, _ts, steps_results, seg_masks=masks,
+                    obb_model=obb_model, cls_model=cls_model,
                 )
             return
 
@@ -255,6 +401,7 @@ def _execute_chunk(
         _execute_image(
             step, img_path, det_name, seg_name, model, seg_model, sahi,
             step_t0, _ts, steps_results,
+            obb_model=obb_model, cls_model=cls_model,
         )
 
 
@@ -293,11 +440,17 @@ def _detection_batch(
     return out
 
 
-def _classification_batch(step: TaskStep, chunk: list[Path]) -> list[list[Any]] | None:
-    """块内分类批量推理；模型无 classify_batch 返回 None（逐图回退）。"""
-    from auto2dlabel.models.classification import create_classification_model
+def _classification_batch(
+    step: TaskStep, chunk: list[Path], cls_model: Any = None,
+) -> list[list[Any]] | None:
+    """块内分类批量推理；模型无 classify_batch 返回 None（逐图回退）。
 
-    cls_model = create_classification_model(step.model_name)
+    cls_model 步骤级复用（execute_plan 已创建）；None 时块内创建（向后兼容）。
+    """
+    if cls_model is None:
+        from auto2dlabel.models.classification import create_classification_model
+
+        cls_model = create_classification_model(step.model_name)
     classify_batch = cast(
         "Callable[..., list[list[Any]]] | None",
         getattr(cls_model, "classify_batch", None),
@@ -307,11 +460,17 @@ def _classification_batch(step: TaskStep, chunk: list[Path]) -> list[list[Any]] 
     return classify_batch([str(p) for p in chunk], step.prompts, top_k=5)
 
 
-def _obb_batch(step: TaskStep, chunk: list[Path], num_workers: int) -> list[list[Any]] | None:
-    """块内旋转框批量推理；模型无 detect_obb_batch 返回 None（逐图回退）。"""
-    from auto2dlabel.models.obb import create_obb_model
+def _obb_batch(
+    step: TaskStep, chunk: list[Path], num_workers: int, obb_model: Any = None,
+) -> list[list[Any]] | None:
+    """块内旋转框批量推理；模型无 detect_obb_batch 返回 None（逐图回退）。
 
-    obb_model = create_obb_model(step.model_name, iou_threshold=step.iou_threshold)
+    obb_model 步骤级复用（execute_plan 已创建）；None 时块内创建（向后兼容）。
+    """
+    if obb_model is None:
+        from auto2dlabel.models.obb import create_obb_model
+
+        obb_model = create_obb_model(step.model_name, iou_threshold=step.iou_threshold)
     detect_obb_batch = cast(
         "Callable[..., list[list[Any]]] | None",
         getattr(obb_model, "detect_obb_batch", None),
@@ -348,15 +507,18 @@ def _classification_step(
     step_t0: float,
     steps_results: list[dict[str, Any]],
     cls_labels: list[Any] | None = None,
+    cls_model: ClassificationModel | None = None,
 ) -> None:
     """分类任务：零样本分类 → labels → 导出（cls 为目录型格式：每图写 outputs/{stem}.json）。
 
     cls_labels 非 None 时跳过推理（批量路径块级预计算结果）。
+    cls_model 步骤级复用（execute_plan 已创建）；None 时每图创建（旧行为）。
     """
     if cls_labels is None:
-        from auto2dlabel.models.classification import create_classification_model
+        if cls_model is None:
+            from auto2dlabel.models.classification import create_classification_model
 
-        cls_model = create_classification_model(step.model_name)
+            cls_model = create_classification_model(step.model_name)
         cls_labels = cls_model.classify(str(img_path), step.prompts, top_k=5)
     ann.labels = cls_labels
     ann.metadata["model"] = step.model_name
@@ -408,18 +570,21 @@ def _obb_step(
     step_t0: float,
     steps_results: list[dict[str, Any]],
     obb_results: list[Any] | None = None,
+    obb_model: OBBModel | None = None,
 ) -> None:
     """旋转框检测：YOLO-OBB → Bbox(angle) → dota/yolo_obb 导出（三档分流照旧）。
 
     obb_results 非 None 时跳过推理（批量路径块级预计算结果）。
+    obb_model 步骤级复用（execute_plan 已创建）；None 时每图创建（旧行为）。
     """
     from auto2dlabel.agent.evaluate import evaluate_detections
     from auto2dlabel.models.obb import _match_obb_prompt
 
     if obb_results is None:
-        from auto2dlabel.models.obb import create_obb_model
+        if obb_model is None:
+            from auto2dlabel.models.obb import create_obb_model
 
-        obb_model = create_obb_model(step.model_name, iou_threshold=step.iou_threshold)
+            obb_model = create_obb_model(step.model_name, iou_threshold=step.iou_threshold)
         obb_results = obb_model.detect_obb(
             str(img_path), step.prompts,
             confidence_threshold=step.confidence_threshold,

@@ -25,9 +25,11 @@ from auto2dlabel.benchmarks.common import (
     IOU_MATCH_THRESHOLD,
     OUTPUT_DIR,
     build_parser,
+    detect_batch_or_fallback,
     evaluate_per_class,
     format_result_table,
     run_detection_sahi,
+    sample_image_paths,
     save_results,
 )
 from auto2dlabel.benchmarks.datasets import ensure_mot17_frcnn, ensure_mot20
@@ -139,9 +141,14 @@ def load_mot_ground_truth(
 # ================================================================
 
 def run_detection(
-    gt: dict[int, dict[str, Any]], model_name: str, conf: float, iou: float,
+    gt: dict[int, dict[str, Any]],
+    model_name: str,
+    conf: float,
+    iou: float,
+    batch: int | None = None,
+    workers: int | None = None,
 ) -> dict[int, list[dict]]:
-    """对 GT 中所有图像运行检测。"""
+    """对 GT 中所有图像运行检测（批量推理 + OOM 降级逐图）。"""
     try:
         from tqdm import tqdm
         has_tqdm = True
@@ -149,6 +156,7 @@ def run_detection(
         has_tqdm = False
 
     from auto2dlabel.models.detection import create_detection_model
+    from auto2dlabel.tools.device import resolve_batch_params
 
     all_cats = sorted(set(o["name"] for g in gt.values() for o in g["objects"]))
     print(f"检测类别 ({len(all_cats)}): {', '.join(all_cats)}")
@@ -157,21 +165,48 @@ def run_detection(
     model = create_detection_model(model_name, iou_threshold=iou)
     predictions: dict[int, list[dict]] = {}
 
+    # 批量推理超参：CLI 显式 > 动态实测（模型加载后测单图显存）> 静态表
+    # （gt.file_name 为相对 DATASETS_ROOT 的路径，探针基目录用 datasets_root）
+    _det_batch = getattr(model, "detect_batch", None)
+    infer_fn = (
+        (lambda ps: _det_batch(ps, all_cats, conf, 0))
+        if _det_batch is not None else None
+    )
+    batch_size, num_workers = resolve_batch_params(
+        "object_detection", infer_fn, sample_image_paths(gt, datasets_root),
+        explicit_batch=batch, explicit_workers=workers,
+    )
+    print(f"批量推理: batch_size={batch_size}  num_workers={num_workers}")
+
     total = len(gt)
     img_ids = list(gt.keys())
-    iterator = tqdm(enumerate(img_ids), total=total, desc=f"检测（{model_name}）", unit="img") if has_tqdm else enumerate(img_ids)
+    n_batches = (total + batch_size - 1) // batch_size
+    iterator = tqdm(range(0, total, batch_size), total=n_batches,
+                    desc=f"检测（{model_name} b={batch_size}）", unit="batch") \
+        if has_tqdm else range(0, total, batch_size)
 
     _t0 = time.time()
-    for i, img_id in iterator:
-        img_path = datasets_root / gt[img_id]["file_name"]
-        if not img_path.exists():
+    for start in iterator:
+        # 分块（缺失文件过滤，chunk_ids 与 chunk_paths 保序对齐）
+        chunk_ids: list[int] = []
+        chunk_paths: list[str] = []
+        for img_id in img_ids[start:start + batch_size]:
+            img_path = datasets_root / gt[img_id]["file_name"]
+            if not img_path.exists():
+                continue
+            chunk_ids.append(img_id)
+            chunk_paths.append(str(img_path))
+        if not chunk_paths:
             continue
 
-        results = model.detect(str(img_path), all_cats, confidence_threshold=conf)
-        predictions[img_id] = [
-            {"name": r.label, "bbox": [r.x, r.y, r.x + r.width, r.y + r.height], "conf": r.confidence}
-            for r in results
-        ]
+        results_per_img = detect_batch_or_fallback(
+            model, chunk_paths, all_cats, conf, num_workers,
+        )
+        for img_id, results in zip(chunk_ids, results_per_img):
+            predictions[img_id] = [
+                {"name": r.label, "bbox": [r.x, r.y, r.x + r.width, r.y + r.height], "conf": r.confidence}
+                for r in results
+            ]
 
     elapsed = time.time() - _t0
     print(f"完成！{elapsed:.1f}s, {total / elapsed:.1f} img/s")
@@ -212,12 +247,13 @@ def main():
     total_persons = sum(len(g["objects"]) for g in gt.values())
     print(f"已加载 {len(gt)} 张图像, {total_persons} 个行人标注\n")
 
-    # 检测
+    # 检测（SAHI 切片路径不支持批量，仅标准路径接入）
     datasets_root = Path.home() / "autodl-tmp" / "Documents" / "datasets"
     if args.sahi:
         predictions = run_detection_sahi(gt, datasets_root, args.model, args.conf, args.iou)
     else:
-        predictions = run_detection(gt, args.model, args.conf, args.iou)
+        predictions = run_detection(gt, args.model, args.conf, args.iou,
+                                    batch=args.batch, workers=args.workers)
     print()
 
     # 可视化（--viz：镜像相对路径渲染 bbox，序列子目录保留）

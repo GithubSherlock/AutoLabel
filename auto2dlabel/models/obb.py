@@ -124,9 +124,11 @@ class UltralyticsOBBModel:
         model = self._load()
 
         # YOLO.__call__ stub 为 Results | Tensor 联合，运行时恒为 list[Results]
+        # rect=False：统一单图/批量 letterbox（ultralytics 默认 rect=True，
+        # 单图矩形 letterbox 与批量混合尺寸的正方形 letterbox 不同 → 结果不一致）
         preds = cast("list[Results]", model(
             image_path, conf=confidence_threshold, iou=self._iou,
-            device=self._device, verbose=False,
+            device=self._device, verbose=False, rect=False,
         ))
 
         return self._parse_pred(preds[0], prompts)
@@ -146,7 +148,7 @@ class UltralyticsOBBModel:
 
         kwargs: dict[str, Any] = {
             "conf": confidence_threshold, "iou": self._iou,
-            "device": self._device, "verbose": False,
+            "device": self._device, "verbose": False, "rect": False,
         }
         if num_workers:
             kwargs["workers"] = num_workers

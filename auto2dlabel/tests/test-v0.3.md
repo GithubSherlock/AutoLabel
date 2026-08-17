@@ -209,6 +209,39 @@ Task1 旋转框标注（15 类全评），`rotate_iou`（shapely 四边形求交
 
 4 图 × batch_size=2：日志正确输出 `批量: batch_size=2 num_workers=2`，检测结果逐图归位。`batch_size`/`num_workers` 三档来源（CLI 显式 > 交互询问 > GPU 显存推荐）与 `*_batch` 分派（ultralytics/torchvision/CLIP 原生 batch，SAM 系列逐图回退）见 `milestone/v0.3.md` 同节。
 
+## 批量推理动态调优（2026-08-18，RTX 4090）
+
+**需求**：旧实现静态 batch=2/workers=2（浪费 4090 显存）；benchmark 全部逐图串行（GPU 空转）。改为模型加载后动态实测最大 batch 并接入 11 个 benchmark。
+
+### 吞吐实测（coco 100 图 yolo26x）
+
+| 模式 | batch | 耗时 | 吞吐 | mAP@0.5 |
+| --- | --- | --- | --- | --- |
+| 逐图（--batch 1） | 1 | 3.6s | 27.5 img/s | 0.6145 |
+| 动态实测（默认） | **64**（实测档位） | 2.0s | **50.6 img/s（1.84×）** | 0.6145 |
+
+mAP 完全一致；`resolve_batch_params` 实测档位打印 `批量推理: batch_size=64 num_workers=4`。coco 冒烟（batch 2 / 1 / 自动）此前已验证 mAP 均 0.8333。
+
+### OBB 批量 parity 双根因排查（dota_obb）
+
+冒烟发现 dota_obb 批量与逐图 mAP 不一致（10 图 0.8191 vs 0.8397），逐层定位出两个独立根因：
+
+1. **TF32**（Ampere+ 19-bit 尾数加速）：同图×4 批量 vs 单图即差 20+ 框。逐层 hook 证明首层 conv 输出已发散（8e-5），且与注意力无关（Attention 恒等后差异仍在）；cudnn.deterministic 无效、double 对照消失 → 判定 TF32 kernel 选择。关闭 `cudnn.allow_tf32`/`matmul.allow_tf32` 后 raw 差从 9.9e+2 降至 6.1e-5、结果差异 0。
+2. **rect 矩形 letterbox**：同图一致但混合尺寸批量仍差（54 vs 56 框）。ultralytics `_predict` 默认 `rect=True`——单图 `same_shapes=True` 走矩形 letterbox（928×1024 最小 padding），批量混合尺寸 `same_shapes=False` 自动退化正方形（1024×1024），两种预处理结果不同。
+
+**修复**：`tools/device.disable_tf32()`（挂在 `resolve_batch_params`/`print_device` 两入口）+ 全部 6 处 ultralytics 调用显式 `rect=False`（detection detect/detect_batch/SAHI、obb detect/detect_obb_batch、segmentation SAM/FastSAM）。修复后：
+
+- 混合尺寸 4 图批量 vs 逐图：**总差异 0**（56/96/158/0 框逐位一致）
+- dota_obb 10 图 batch 1 vs 2：mAP **完全一致 0.8397**（修复前差 0.02）
+
+代价：单图 letterbox 统一为正方形（历史单图结果有变）+ TF32 关闭吞吐 ~10%（被批量加速覆盖）。回归：`test_disable_tf32_sets_both_flags` / `test_resolve_batch_params_disables_tf32`。
+
+### 分割/生成路径冒烟
+
+- coco_seg 两段式 sam2_l（--batch 2，4 图）：检测步批量生效、分割步逐图，mAP 0.7500，无降级
+- coco_seg maskrcnn generate_batch（--batch 4，4 图）：0.0889（模型固有水平，批量路径跑通）
+- chat 冒烟：单图 → batch=1；4 图目录 → 实测 batch_size=64 num_workers=4
+
 ## 评测协议注记
 
 - **分类双协议**：监督路径（resnet18 等）在完整 ImageNet1K **1000 类空间**取 top-K（官方协议）；零样本路径（CLIP/SigLIP）在 **100 类候选空间**取 top-K——两路 top-1/top-5 **不可直接横向比较**。本轮未跑零样本路（权重未下载），协议已由 `classification_benchmark.py` docstring 与 `docs/Benchmark_plan.md` 固定。

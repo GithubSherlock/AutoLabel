@@ -48,7 +48,7 @@ auto2dlabel sample --top-k 5                  # 主动学习采样（聚合 outp
 auto2dlabel chat "分类为猫和狗，用 clip" --no-wait        # CLIP/SigLIP 零样本分类
 auto2dlabel chat "分类为 cat 和 dog，用 convnext_large" --no-wait  # torchvision 监督分类（候选须英文）
 auto2dlabel chat "检测旋转框，用 yolo11n-obb.pt" --no-wait  # OBB → dota/yolo_obb 导出
-auto2dlabel chat "检测 /data/images 中的汽车" --batch-size 8 --num-workers 4  # 批量推理（未指定时交互询问，仍无则按 GPU 显存自动推荐）
+auto2dlabel chat "检测 /data/images 中的汽车" --batch-size 8 --num-workers 4  # 批量推理（未指定时交互询问，仍无则模型加载后自动实测最大 batch）
 ```
 
 
@@ -65,5 +65,6 @@ auto2dlabel chat "检测 /data/images 中的汽车" --batch-size 8 --num-workers
 - **纯本地部署**：所有模型可用开源权重；DeepSeek API 是唯一外部依赖，可换本地 Qwen（`configs/.env`）。
 - **分割红线**：SAM 系列在小目标/密集场景 mask 易粘连 → 用检测 bbox 作 prompt，必要时回退 Mask R-CNN。
 - **GPU 分级**：模型分级（nano 快速扫 → x/v2 高精度），GPU 紧张时 cascade 策略。
-- **批量推理超参**：`batch_size`/`num_workers` 三档来源——CLI 显式 > chat 交互询问（非法重问 ≤3 次）> `recommend_batch_params` 按 GPU 显存推荐（LLM prompt 注入与代码兜底同源，4090 档 det/obb 8,4 / seg 4,4 / cls 16,4）；`cli_execute` 按 `hasattr` 分派 `*_batch`（ultralytics/torchvision/CLIP 原生 batch，SAM 系列逐图回退）；单图协议（`detect`/`generate`/`classify`）签名冻结。
+- **批量推理超参**：`batch_size`/`num_workers` 四档来源——CLI 显式 > chat 交互询问（非法重问 ≤3 次）> 执行阶段动态实测（模型加载后 `tools/device.measure_single_image_memory` 增量法测单图峰值显存 → 空闲显存×0.85÷单图峰值=最大 batch，`resolve_batch_params` 统一入口）> 规划阶段静态表（`recommend_batch_params`，LLM prompt 注入与代码兜底同源，4090 档 det/obb 8 / seg 4 / cls 16）；num_workers 按 CPU 核数 `min(4, cores//4)`（DataLoader 是 CPU 资源，与显存无关）；`cli_execute`/benchmark 按 `hasattr` 分派 `*_batch`（ultralytics/torchvision/CLIP 原生 batch，SAM 系列逐图回退；批量 OOM 时降级逐图 + empty_cache）；单图协议（`detect`/`generate`/`classify`）签名冻结；benchmark 脚本 `--batch`/`--workers` 默认 None=自动实测（1=逐图）。
+- **批量 parity 两条铁律（2026-08-18 实测根因，违反即批量结果≠逐图）**：① 所有 ultralytics 推理调用必须显式 `rect=False`（ultralytics predict 默认 `rect=True`，单图走矩形 letterbox、批量混合尺寸自动退化正方形 letterbox，两种预处理不同结果不同——曾致 dota_obb 批量 110+/图 差异）；② 推理入口必须关闭 TF32（`tools/device.disable_tf32`，挂在 `resolve_batch_params` 与 `print_device`；TF32 下 batch=1 与 batch>1 走不同 cudnn kernel，经 200 层 + 角度 argmax 放大后曾致 OBB 批量 20+ 框差异）。两者修复后 dota_obb 批量/逐图 mAP 完全一致（0.8397）。
 - **测试位置**：测试在 `auto2dlabel/tests/`（`pytest auto2dlabel/tests/`）——`functional/` pytest 用例、`helpers/` 测试工具（no-LLM baseline / benchmark runner）、`data/` 样例图；实测数据文档（`test-v0.1.md` / `test-v0.2.md`）同目录保留。测试代码不进 cli.py。
