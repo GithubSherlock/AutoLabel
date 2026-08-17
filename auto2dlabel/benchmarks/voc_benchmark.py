@@ -3,19 +3,15 @@
 
 from __future__ import annotations
 
-import json
 import sys
-import time
 import xml.etree.ElementTree as ET
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+from auto2dlabel.benchmarks import datetime, json, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (
     IOU_MATCH_THRESHOLD,
     OUTPUT_DIR,
@@ -34,7 +30,7 @@ TEST_LIST = VOC_ROOT / "ImageSets" / "Main" / "test.txt"
 CONFIG = {
     "confidence_threshold": 0.3,
     "iou_threshold": 0.5,
-    "model_name": "yolov8x.pt",
+    "model_name": "yolo26x.pt",
 }
 
 # VOC → COCO 类别别名映射（部分 VOC 类别名与 COCO 不同）
@@ -128,6 +124,8 @@ def main():
     parser.add_argument("--conf", type=float, default=CONFIG["confidence_threshold"])
     parser.add_argument("--model", type=str, default=CONFIG["model_name"])
     parser.add_argument("--iou", type=float, default=CONFIG["iou_threshold"])
+    parser.add_argument("--viz", action="store_true",
+                        help="渲染预测结果到项目同级 Visualization/voc2007/（评测协议不变）")
     args = parser.parse_args()
 
     CONFIG["confidence_threshold"] = args.conf
@@ -161,6 +159,14 @@ def main():
     # 检测
     predictions = run_detection(image_ids)
     print()
+
+    # 可视化（--viz：镜像相对路径渲染 bbox）
+    if args.viz:
+        from auto2dlabel.benchmarks.viz import visualize_dataset
+        visualize_dataset("voc2007", gt, predictions,
+                          lambda img_id, info: IMAGE_DIR / f"{img_id}.jpg",
+                          rel_name_fn=lambda img_id, info: f"{img_id}.jpg")
+        print()
 
     # 评估
     print(f"计算指标（IoU@{IOU_MATCH_THRESHOLD}）...\n")

@@ -6,32 +6,30 @@
 
 from __future__ import annotations
 
-import json
 import sys
-import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+from auto2dlabel.benchmarks import datetime, json, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (
     IOU_MATCH_THRESHOLD,
     OUTPUT_DIR,
+    assign_mask_labels,
     build_parser,
     coco_seg_to_mask,
     evaluate_mask_per_class,
     format_mask_result_table,
+    mask_to_bbox,
     polygon_to_mask,
     save_results,
 )
 from auto2dlabel.benchmarks.datasets import ensure_coco_val
 
 # ── 配置 ──────────────────────────────────────────────────────
-DET_MODEL = "yolov8x.pt"  # 检测 backbone（为 FastSAM 提供 bbox）
+DET_MODEL = "yolo26x.pt"  # 检测 backbone（为 FastSAM 提供 bbox）
 
 
 # ================================================================
@@ -90,6 +88,7 @@ def run_segmentation(
     conf: float,
     iou: float,
     seg_model_name: str,
+    prompt_conf: float = 0.3,
 ) -> dict[int, list[dict]]:
     """检测 → 分割，返回 mask 预测。"""
     try:
@@ -122,7 +121,7 @@ def run_segmentation(
 
         # Step 1: 检测
         det_results = det_model.detect(str(img_path), all_cats, confidence_threshold=conf)
-        high_conf = [r for r in det_results if r.confidence >= 0.5]
+        high_conf = [r for r in det_results if r.confidence >= prompt_conf]
         if not high_conf:
             predictions[img_id] = []
             continue
@@ -152,13 +151,84 @@ def run_segmentation(
     return predictions
 
 
+def run_box_prompted_segmentation(
+    gt: dict[int, dict[str, Any]],
+    image_dir: Path,
+    seg_model_name: str,
+) -> dict[int, list[dict[str, Any]]]:
+    """box-prompted：GT mask 派生 bbox 直接作 prompt（跳过检测，隔离分割器质量）。
+
+    输出 mask 经 assign_mask_labels 按 mask-IoU 重匹配 GT 命名（对输出
+    顺序/数量零假设，FastSAM 丢框 / SAM2 丢 prompt 均免疫）。
+    """
+    try:
+        from tqdm import tqdm
+        has_tqdm = True
+    except ImportError:
+        has_tqdm = False
+
+    from PIL import Image as _Image
+
+    from auto2dlabel.models.segmentation import create_segmentation_model
+    from auto2dlabel.schema.annotation import Bbox
+
+    seg_model = create_segmentation_model(seg_model_name)
+
+    predictions: dict[int, list[dict[str, Any]]] = {}
+    total = len(gt)
+    img_ids = sorted(gt.keys())
+    iterator = (
+        tqdm(enumerate(img_ids), total=total, desc=f"box-prompted（{seg_model_name}）", unit="img")
+        if has_tqdm else enumerate(img_ids)
+    )
+
+    _t0 = time.time()
+    for i, img_id in iterator:
+        filename = gt[img_id]["file_name"]
+        img_path = image_dir / filename
+        if not img_path.exists():
+            continue
+
+        objects = gt[img_id]["objects"]
+        bboxes = [Bbox(
+            x=b[0], y=b[1], width=b[2] - b[0], height=b[3] - b[1],
+            label=o["name"], confidence=1.0,
+        ) for o, b in ((o, mask_to_bbox(o["mask"])) for o in objects)]
+        masks = seg_model.generate(str(img_path), bboxes)
+
+        im = _Image.open(img_path)
+        h, w = im.height, im.width
+
+        # 未命名输出 mask → mask-IoU 重匹配 GT 实例命名
+        raw_masks = []
+        for mask_obj in masks:
+            mask_bool = polygon_to_mask(mask_obj.segmentation, h, w)
+            raw_masks.append({
+                "mask": mask_bool,
+                "conf": getattr(mask_obj.bbox, "confidence", 1.0),
+            })
+        predictions[img_id] = assign_mask_labels(raw_masks, objects, h, w)
+
+    elapsed = time.time() - _t0
+    print(f"完成！{elapsed:.1f}s, {total / elapsed:.1f} img/s")
+    return predictions
+
+
 # ================================================================
 # 3. 主流程
 # ================================================================
 
 def main():
     parser = build_parser("COCO val 2017 Instance Segmentation Benchmark")
-    parser.add_argument("--seg-model", type=str, default="FastSAM-s.pt", help="分割模型")
+    parser.add_argument("--seg-model", type=str, default="sam2_l.pt", help="分割模型")
+    parser.add_argument(
+        "--box-prompted", action="store_true",
+        help="跳过检测，GT bbox 直接 prompt（隔离分割器质量）",
+    )
+    parser.add_argument(
+        "--prompt-conf", type=float, default=0.3,
+        help="两段式：检测 conf 达到此阈值才作分割 prompt（默认 0.3）",
+    )
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -179,8 +249,20 @@ def main():
     print(f"已加载 {len(gt)} 张图像\n")
 
     # 分割
-    predictions = run_segmentation(gt, image_dir, args.conf, args.iou, args.seg_model)
+    if args.box_prompted:
+        predictions = run_box_prompted_segmentation(gt, image_dir, args.seg_model)
+    else:
+        predictions = run_segmentation(
+            gt, image_dir, args.conf, args.iou, args.seg_model, args.prompt_conf,
+        )
     print()
+
+    # 可视化（--viz：镜像相对路径渲染 mask）
+    if args.viz:
+        from auto2dlabel.benchmarks.viz import visualize_dataset
+        visualize_dataset("coco_seg", gt, predictions,
+                          lambda img_id, info: image_dir / info["file_name"])
+        print()
 
     # 评估
     print(f"计算 mask 指标（mask IoU@{IOU_MATCH_THRESHOLD}）...\n")
@@ -197,7 +279,8 @@ def main():
     mAP = float(np.mean([results[cls]["ap"] for cls in all_cats if cls in results]))
     result_data = {
         "timestamp": ts, "dataset": "COCO val 2017 (seg)",
-        "model": args.seg_model, "det_model": DET_MODEL,
+        "model": args.seg_model, "det_model": "" if args.box_prompted else DET_MODEL,
+        "box_prompted": args.box_prompted, "prompt_conf": args.prompt_conf,
         "confidence_threshold": args.conf,
         "mask_iou_threshold": IOU_MATCH_THRESHOLD, "image_count": len(gt),
         "summary": {"mAP@0.5": round(mAP, 4)},

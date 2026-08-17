@@ -11,13 +11,12 @@
 from __future__ import annotations
 
 import subprocess
-import sys
-from pathlib import Path
 
 from rich.console import Console
 
 import auto2dlabel
 from auto2dlabel.schema.task_plan import BENCHMARK_DATASETS, BenchmarkRequest
+from auto2dlabel.tests import Path, sys
 
 console = Console()
 

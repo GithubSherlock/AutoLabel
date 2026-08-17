@@ -8,6 +8,7 @@ from __future__ import annotations
 import tarfile
 import zipfile
 from pathlib import Path
+from typing import Any
 
 DATASETS_ROOT = Path.home() / "autodl-tmp" / "Documents" / "datasets"
 ARCHIVE_ROOT = Path("/root/autodl-pub")
@@ -71,6 +72,57 @@ def extract_tar_members(
         print(f"  解压 {len(missing)} 个文件 → {dest} ...")
         for m in missing:
             tf.extract(m, dest)
+    return dest
+
+
+def extract_zip_members_uniform(
+    zip_path: Path,
+    dest: Path,
+    member_prefix: str | None = None,
+    per_class: int = 0,
+) -> Path:
+    """从 ZIP 中按子目录分组、每组均匀提取前 per_class 个成员（确定性抽样）。
+
+    适用于 ImageNet100 这类「wnid 目录即标签」的组织；组内排序后取前 N 张，
+    保证可复现。现有 extract_zip_members 的 max_files 是全局截断（只覆盖前几个
+    目录），无法做到每类均匀。
+
+    Args:
+        zip_path: ZIP 文件路径。
+        dest: 解压目标目录。
+        member_prefix: 仅提取以此前缀开头的成员。
+        per_class: 每个子目录最多提取文件数（0 = 全部）。
+    """
+    if not zip_path.exists():
+        raise FileNotFoundError(f"ZIP 未找到: {zip_path}")
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        members = [m for m in zf.namelist() if not m.endswith("/")]  # 过滤目录条目
+        if member_prefix:
+            members = [m for m in members if m.startswith(member_prefix)]
+
+        # 按「前缀后第一段子目录」分组（imagenet100/n01558993/x.JPEG → n01558993）
+        groups: dict[str, list[str]] = {}
+        for m in members:
+            rel = m[len(member_prefix):] if member_prefix else m
+            parts = rel.split("/")
+            if len(parts) < 2:
+                continue
+            groups.setdefault(parts[0], []).append(m)
+
+        selected: list[str] = []
+        for cls_members in groups.values():
+            cls_members.sort()
+            selected.extend(cls_members[:per_class] if per_class > 0 else cls_members)
+
+        missing = [m for m in selected if not (dest / m).exists()]
+        if not missing:
+            print(f"  ✓ 已存在 {len(selected)} 个文件: {dest}")
+            return dest
+
+        print(f"  解压 {len(missing)} 个文件（{len(groups)} 个目录，每目录最多 {per_class} 个）→ {dest} ...")
+        for m in missing:
+            zf.extract(m, dest)
     return dest
 
 
@@ -256,10 +308,11 @@ def ensure_nuimages_mini() -> Path:
 
 
 def ensure_dota_val() -> Path:
-    """解压 DOTA val（458 张航拍图 + HBB 水平框标注）。
+    """解压 DOTA val（458 张航拍图 + HBB 水平框 + OBB 旋转框标注）。
 
     DOTA 是航拍图像旋转框目标检测数据集（15 类）。
-    仅使用 v1.0 HBB（水平边界框）标注以兼容现有 pipeline。
+    HBB（Task2 水平框）供通用检测 pipeline；OBB（Task1 旋转框，
+    labels_obb/，文件前 2 行为 imagesource:/gsd: 头）供 OBB benchmark。
     仅提取 val 分片（train/test 不提取）。
 
     Returns:
@@ -270,9 +323,15 @@ def ensure_dota_val() -> Path:
 
     img_dir = dest / "images"
     label_dir = dest / "labels"
+    obb_label_dir = dest / "labels_obb"
 
-    # 快速幂等检查
-    if img_dir.exists() and label_dir.exists() and any(img_dir.iterdir()) and any(label_dir.iterdir()):
+    # 快速幂等检查（三目录齐备才跳过）
+    ready = (
+        img_dir.exists() and label_dir.exists() and obb_label_dir.exists()
+        and any(img_dir.iterdir()) and any(label_dir.iterdir())
+        and any(obb_label_dir.iterdir())
+    )
+    if ready:
         print(f"  ✓ 已存在: {dest}")
         return dest
 
@@ -299,6 +358,22 @@ def ensure_dota_val() -> Path:
                 # file inside zip: valset_reclabelTxt/P0003.txt
                 data = zf.read(m)
                 out_path = label_dir / Path(m).name
+                out_path.write_bytes(data)
+
+    # OBB 旋转框标注 — labelTxt.zip（Task1，前 2 行为 imagesource:/gsd: 头）
+    # 解压后为 Pxxxx.txt，展平到 labels_obb/
+    obb_zip = ARCHIVE_ROOT / "DOTA" / "val" / "labelTxt-v1.0" / "labelTxt.zip"
+    if not obb_zip.exists():
+        raise FileNotFoundError(f"DOTA val OBB 标注未找到: {obb_zip}")
+    with zipfile.ZipFile(obb_zip, "r") as zf:
+        txt_members = [m for m in zf.namelist() if m.endswith(".txt")]
+        obb_label_dir.mkdir(parents=True, exist_ok=True)
+        missing = [m for m in txt_members if not (obb_label_dir / Path(m).name).exists()]
+        if missing:
+            print(f"  解压 {len(missing)} 个 OBB 标注 → {obb_label_dir} ...")
+            for m in missing:
+                data = zf.read(m)
+                out_path = obb_label_dir / Path(m).name
                 out_path.write_bytes(data)
 
     print(f"  ✓ DOTA val: {dest}")
@@ -391,12 +466,120 @@ def ensure_mot20() -> Path:
 
 
 # ================================================================
+# 图像分类数据集
+# ================================================================
+
+
+def ensure_imagenet100(per_class: int = 50) -> Path:
+    """每类均匀抽样解压 ImageNet100（100 个 wnid 类，每类取 per_class 张）。
+
+    归档 14GB / 126,689 图，全量解压在仅 CPU 服务器上既慢又占磁盘；
+    抽样解压后评测子集 ≈ 100×per_class 张（50 → 5,000 张 ≈ 0.7GB）。
+
+    Returns:
+        DATASETS_ROOT/imagenet100/
+    """
+    dest = DATASETS_ROOT / "imagenet100"
+    dest.mkdir(parents=True, exist_ok=True)
+
+    print(f"📦 解压 ImageNet100（每类 {per_class} 张）...")
+
+    zip_path = ARCHIVE_ROOT / "ImageNet100" / "imagenet100.zip"
+    extract_zip_members_uniform(zip_path, DATASETS_ROOT, member_prefix="imagenet100/", per_class=per_class)
+
+    print(f"  ✓ ImageNet100: {dest}")
+    return dest
+
+
+def load_imagenet100_meta(
+    devkit_archive: Path | None = None,
+) -> dict[str, str]:
+    """从 ILSVRC2012 devkit 的 meta.mat 解析 wnid → 英文类名（流式读取，不落盘）。
+
+    meta.mat 含 1860 个 synset（字段 ILSVRC2012_ID / WNID / words）；
+    words 形如 "kit fox, Vulpes macrotis"，取逗号前第一个词。已实测与
+    torchvision ResNet18_Weights.DEFAULT.meta["categories"] 100/100 匹配。
+
+    Args:
+        devkit_archive: devkit tar.gz 路径，默认归档根下 t12 devkit。
+
+    Returns:
+        {wnid: 英文名} 映射。
+    """
+    from io import BytesIO
+
+    if devkit_archive is None:
+        devkit_archive = ARCHIVE_ROOT / "ImageNet" / "ILSVRC2012" / "ILSVRC2012_devkit_t12.tar.gz"
+    if not devkit_archive.exists():
+        raise FileNotFoundError(f"devkit 未找到: {devkit_archive}")
+
+    import scipy.io as sio
+
+    with tarfile.open(devkit_archive, "r:gz") as tf:
+        member = next((m for m in tf.getnames() if m.endswith("meta.mat")), None)
+        if member is None:
+            raise FileNotFoundError(f"devkit 中未找到 meta.mat: {devkit_archive}")
+        raw = tf.extractfile(member)
+        if raw is None:
+            raise FileNotFoundError(f"无法读取 {member}（空成员）")
+        mat = sio.loadmat(BytesIO(raw.read()))
+
+    synsets = mat["synsets"][:, 0]  # shape (1860, 1) struct 数组 → 按列取
+    mapping: dict[str, str] = {}
+    for s in synsets:
+        wnid = str(s["WNID"][0])
+        words = str(s["words"][0])
+        mapping[wnid] = words.split(",")[0].strip()
+    return mapping
+
+
+def load_imagenet100_ground_truth(
+    dataset_root: Path,
+    max_images: int = 0,
+) -> dict[str, dict[str, Any]]:
+    """加载 ImageNet100 GT（wnid 目录名即标签 → 英文类名）。
+
+    Args:
+        dataset_root: ensure_imagenet100 返回的目录。
+        max_images: 最多图像数（0=全部）；跨类均匀截断（每类按比例取），
+            避免排序截断只覆盖少数类。
+
+    Returns:
+        {image_id(相对路径): {"file_name": str, "label": 英文名}}（单标签）
+    """
+    meta = load_imagenet100_meta()
+    gt: dict[str, dict[str, Any]] = {}
+    for cls_dir in sorted(dataset_root.iterdir()):
+        if not cls_dir.is_dir():
+            continue
+        label = meta.get(cls_dir.name, cls_dir.name)  # 未映射回退 wnid，不静默丢图
+        for img in sorted(cls_dir.iterdir()):
+            if img.suffix.lower() not in (".jpeg", ".jpg", ".png"):
+                continue
+            rel = str(img.relative_to(dataset_root))
+            gt[rel] = {"file_name": rel, "label": label}
+
+    if max_images > 0 and len(gt) > max_images:
+        # 跨类均匀截断：每类按比例取前 N 张（确定性），再按全局排序截断
+        by_cls: dict[str, list[str]] = {}
+        for img_id, info in gt.items():
+            by_cls.setdefault(str(info["label"]), []).append(img_id)
+        per_cls = max(1, max_images // len(by_cls))
+        picked: list[str] = []
+        for ids in by_cls.values():
+            picked.extend(ids[:per_cls])
+        picked.sort()
+        gt = {i: gt[i] for i in picked[:max_images]}
+    return gt
+
+
+# ================================================================
 # 便捷函数：确保所有数据集
 # ================================================================
 
 
 def ensure_all() -> dict[str, Path]:
-    """确保所有 6 个数据集已解压。
+    """确保所有 10 个数据集已解压。
 
     Returns:
         {name: path} 映射。
@@ -411,4 +594,5 @@ def ensure_all() -> dict[str, Path]:
         "d2sa": ensure_d2sa_val(),
         "mot17": ensure_mot17_frcnn(),
         "mot20": ensure_mot20(),
+        "imagenet100": ensure_imagenet100(),
     }

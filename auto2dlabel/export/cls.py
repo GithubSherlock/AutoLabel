@@ -7,10 +7,9 @@ model 取自 annotation.metadata["model"]（分类分支写入），缺失时为
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
+from auto2dlabel.export import Path, json
 from auto2dlabel.schema.annotation import Annotation
 
 

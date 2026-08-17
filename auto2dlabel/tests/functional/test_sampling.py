@@ -6,12 +6,11 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
 import pytest
 
+from auto2dlabel.tests import Path, json
 from auto2dlabel.tools.sampling import (
     collect_review_pool,
     sample_priority,

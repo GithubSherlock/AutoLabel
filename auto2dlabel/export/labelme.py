@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
+from auto2dlabel.export import Path, json
 from auto2dlabel.schema.annotation import Annotation
 
 LABELME_VERSION = "4.5.6"

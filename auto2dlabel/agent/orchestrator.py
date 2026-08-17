@@ -8,10 +8,9 @@
 
 from __future__ import annotations
 
-import json
-import logging
 from typing import Any, cast
 
+from auto2dlabel.agent import json, logging
 from auto2dlabel.agent.evaluate import QualityReport, evaluate_detections
 from auto2dlabel.agent.llm import LLMClient, create_client
 from auto2dlabel.agent.state import AgentState

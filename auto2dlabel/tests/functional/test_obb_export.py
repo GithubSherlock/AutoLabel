@@ -7,7 +7,6 @@ angle 序列化 roundtrip（1e-6）、state/tool 反序列化带 angle。
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 import pytest
 
@@ -15,6 +14,7 @@ from auto2dlabel.agent.state import AgentState
 from auto2dlabel.export.dota import export_dota, rotated_corners
 from auto2dlabel.export.yolo import export_yolo, export_yolo_obb
 from auto2dlabel.schema.annotation import Annotation, Bbox
+from auto2dlabel.tests import Path
 from auto2dlabel.tools.export import ExportTool
 
 
@@ -133,7 +133,8 @@ def test_create_obb_model_dispatch() -> None:
     """create_obb_model：.pt 名 → UltralyticsOBBModel；非 .pt → 报错。"""
     from auto2dlabel.models.obb import UltralyticsOBBModel, create_obb_model
 
-    assert isinstance(create_obb_model("yolo11n-obb.pt"), UltralyticsOBBModel)
+    for name in ("yolo11n-obb.pt", "yolo12n-obb.pt", "yolo26n-obb.pt"):
+        assert isinstance(create_obb_model(name), UltralyticsOBBModel)
     try:
         create_obb_model("fasterrcnn_resnet50_fpn")
         raise AssertionError("应抛出 ValueError")

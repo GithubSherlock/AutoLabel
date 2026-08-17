@@ -2,7 +2,7 @@
 """批量运行所有 benchmark 并生成汇总报告。
 
 用法:
-  python -m auto2dlabel.benchmarks.run_all          # 全部 6 数据集
+  python -m auto2dlabel.benchmarks.run_all          # 全部 11 数据集
   python -m auto2dlabel.benchmarks.run_all --only voc2007  # 仅指定数据集
 """
 
@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
+
+from auto2dlabel.benchmarks import datetime
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -19,36 +20,42 @@ BENCHMARKS = {
     # 目标检测
     "coco2017": {
         "script": "coco_benchmark.py",
-        "model": "yolov8x.pt",
+        "model": "yolo26x.pt",
         "default_args": "--max-images 50 --conf 0.3",
     },
     "voc2007": {
         "script": "voc_benchmark.py",
-        "model": "yolov8x.pt",
+        "model": "yolo26x.pt",
         "default_args": "--max-images 50 --conf 0.3",
     },
     "kitti": {
         "script": "kitti_benchmark.py",
-        "model": "yolov8x.pt",
+        "model": "yolo26x.pt",
         "default_args": "--max-images 50 --conf 0.3",
     },
     # 航拍检测
     "dota": {
         "script": "dota_benchmark.py",
-        "model": "yolov8x.pt",
+        "model": "yolo26x.pt",
+        "default_args": "--max-images 50 --conf 0.3",
+    },
+    # 旋转框检测
+    "dota_obb": {
+        "script": "dota_obb_benchmark.py",
+        "model": "yolo11n-obb.pt",
         "default_args": "--max-images 50 --conf 0.3",
     },
     # 密集行人检测
     "mot": {
         "script": "mot_benchmark.py",
-        "model": "yolov8x.pt",
+        "model": "yolo26x.pt",
         "default_args": "--max-images 50 --conf 0.3",
     },
     # 实例分割
     "coco_seg": {
         "script": "coco_seg_benchmark.py",
         "model": "FastSAM-s.pt",
-        "default_args": "--max-images 50 --conf 0.3 --seg-model FastSAM-s.pt",
+        "default_args": "--max-images 50 --conf 0.3 --seg-model sam2_l.pt",
     },
     "cityscapes": {
         "script": "cityscapes_benchmark.py",
@@ -63,7 +70,13 @@ BENCHMARKS = {
     "d2sa": {
         "script": "d2sa_benchmark.py",
         "model": "FastSAM-s.pt",
-        "default_args": "--max-images 50 --seg-model FastSAM-s.pt",
+        "default_args": "--max-images 50 --seg-model sam2_l.pt",
+    },
+    # 图像分类
+    "imagenet100": {
+        "script": "classification_benchmark.py",
+        "model": "resnet18",
+        "default_args": "--dataset imagenet100 --max-images 50 --per-class 50",
     },
 }
 

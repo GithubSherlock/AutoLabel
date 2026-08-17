@@ -8,16 +8,13 @@ Mini 版仅 50 张图，适合快速 smoke test。
 from __future__ import annotations
 
 import sys
-import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+from auto2dlabel.benchmarks import datetime, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (
     IOU_MATCH_THRESHOLD,
     OUTPUT_DIR,
@@ -29,8 +26,8 @@ from auto2dlabel.benchmarks.common import (
 from auto2dlabel.benchmarks.datasets import ensure_nuimages_mini
 
 # ── 配置 ──────────────────────────────────────────────────────
-DET_MODEL = "yolov8x.pt"
-SEG_MODEL = "FastSAM-s.pt"
+DET_MODEL = "yolo26x.pt"
+SEG_MODEL = "sam2_l.pt"
 
 # nuImages 类别 → COCO 映射（nuImages 使用层级名称）
 NUIMAGES_TO_COCO = {
@@ -162,7 +159,7 @@ def run_segmentation(
 
         # Step 1: 检测
         det_results = det_model.detect(str(img_path), all_cats, confidence_threshold=conf)
-        high_conf = [r for r in det_results if r.confidence >= 0.5]
+        high_conf = [r for r in det_results if r.confidence >= 0.3]
         if not high_conf:
             predictions[img_id] = []
             continue
@@ -216,6 +213,13 @@ def main():
     # 分割
     predictions = run_segmentation(gt, nuim_root, args.conf, args.iou)
     print()
+
+    # 可视化（--viz：镜像相对路径渲染 mask）
+    if args.viz:
+        from auto2dlabel.benchmarks.viz import visualize_dataset
+        visualize_dataset("nuimages", gt, predictions,
+                          lambda img_id, info: nuim_root / info["file_name"])
+        print()
 
     # 评估
     print(f"计算 mask 指标（mask IoU@{IOU_MATCH_THRESHOLD}）...\n")

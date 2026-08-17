@@ -6,6 +6,20 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 
 由于当前 AI 大爆发的背景，之前的大部分软件都可能需要被 Agentic AI 重制，其中包括自动化生成数据标签软件。传统的数据标注软件（如 CVAT、Label Studio）核心是「人工画布 + 快捷键」，自动化能力（预标注）作为辅助插件存在，其工作流仍然是「人为主、AI 为辅」。一个真正 Agentic 的标注软件应该将范式反转为 **「AI 为主、人为辅」**：用户只需下达自然语言指令，由 LLM Agent 自主规划、调用模型、评估结果、并在不确定时主动请求人工介入——这正是 AutoLabel 要做的。
 
+## 总纲
+
+**AutoLabel = Agentic 预标注层**，核心链路：
+
+```text
+自然语言指令 → Planner 任务规划 → 多模型引擎执行（检测/分割/分类/OBB）
+  → 代码级质量评估（不达标时条件触发 LLM Evaluate）→ HITL 三档分流（auto/review/hard）
+  → 多格式导出（COCO/YOLO/VOC/LabelMe/cls/DOTA/YOLO-OBB）
+```
+
+- **Auto2dLabel**：2D 六类任务逐版本推进（检测 → 分割 → 分类 → OBB → Pose → Tracking），当前 v0.3
+- **Auto3dLabel**：3D 标注（调研完成，MVP 走「2D 基础模型 → 3D 提升」路线，v0.1 单帧 MVP 已立项，见 `auto3dlabel/milestone/v0.1.md`）
+- **人工介入点**：低置信度自动入 review/hard 队列 + Web 审核界面 + 主动学习采样，Agent 不确定时主动求助
+
 ## Target User（目标用户）
 
 - **主要用户**：AI 算法工程师 / 数据科学家，需要为训练/微调模型快速生成高质量预标注，再在外部审核工具（Label Studio / CVAT）中精修
@@ -40,10 +54,10 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 
 | 版本 | 覆盖任务 | 状态 |
 | --- | --- | --- |
-| **v0.1** | 目标检测（3 引擎 × 49+ 模型）+ 实例分割（SAM2/SAM3/FastSAM/Mask R-CNN）+ 类别自动推荐 + Web 基础审核 + 9 数据集 Benchmark | ✅ 完成 |
+| **v0.1** | 目标检测（3 引擎 × 29 模型）+ 实例分割（SAM2/SAM3/FastSAM/Mask R-CNN）+ 类别自动推荐 + Web 基础审核 + 9 数据集 Benchmark | ✅ 完成 |
 | **v0.2** | 实例分割（SAM3）+ 类别推荐 + Web 审核（记录见 `auto2dlabel/milestone/v0.2.md`） | ✅ 完成 |
-| **v0.3** | Image Classification（CLIP/SigLIP）+ OBB（YOLO-OBB）+ M2/M3 闭环补全 | ✅ 完成 |
-| **v0.4** | + Pose Estimation（ViTPose/RTMPose） | 📋 规划 |
+| **v0.3** | Image Classification（CLIP/SigLIP + torchvision 14 款）+ OBB（YOLO-OBB）+ M2/M3 闭环补全 | ✅ 完成 |
+| **v0.4** | + Pose Estimation（ViTPose/RTMPose） | 📋 规划（里程碑见 `auto2dlabel/milestone/v0.4.md`） |
 | **v1.0** | + Object Tracking（ByteTrack/BoT-SORT，视频时序） | 📋 规划 |
 
 > 编号注记：早期路线表曾把「分类+OBB」标为 v0.2，实现时后移为 v0.3（v0.2 编号已被分割里程碑文件占用，不重命名现有文件）。
@@ -55,9 +69,18 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 | **M0 调研期** | 模型选型、竞品（CVAT / Label Studio / Roboflow）分析 | ✅ 完成 |
 | **M1 单流程跑通** (v0.1a) | Agent Loop + DetectionTool + 3 引擎 × 47 模型 + CLI + COCO/YOLO/VOC 导出 + 日志 + 可视化 | ✅ 完成 |
 | **M1b 分割** (v0.2) | SAM2/SAM3/FastSAM/Mask R-CNN 集成 + 类别推荐 + Web 基础审核 | ✅ 完成 |
-| **M1c 价值证明** (v0.1c) | no-LLM 对照实验 + HITL 置信度三档分流（对照能力现于 `tests/helpers/no_llm_baseline.py`） | ✅ 完成 |
+| **M1c 价值证明** (v0.1c) | no-LLM 对照实验 + HITL 置信度三档分流（对照能力现于 `auto2dlabel/tests/helpers/no_llm_baseline.py`） | ✅ 完成 |
 | **M2 服务化 + 前端审核** | FastAPI + 审核 UI + mask Canvas 叠加 + 复核队列闭环（消费方 + 保存回流 + 后端 COCO 导出） | ✅ 完成 |
 | **M3 Agentic 闭环** | LLM Evaluate 节点（条件暴露）+ batch 失败隔离/--resume + 主动学习采样 | ✅ 完成 |
+
+## 当前状态（2026-08）
+
+| 项 | 状态 |
+| --- | --- |
+| **Auto2dLabel** | v0.1–v0.3 ✅：检测 + 分割 + 分类（CLIP/SigLIP + torchvision 14 款）+ OBB（YOLO-OBB）+ Web 闭环 + Agentic 闭环，**84 个模型**（含 cityscapes 域内 Mask R-CNN，全量 500 图 mAP 0.5149），11 数据集 Benchmark（含 DOTA OBB 旋转框；CPU 可行性 + GPU 复测均完成，见 `auto2dlabel/tests/test-v0.3.md`） |
+| **质量门** | pyright 0 / mypy 166 / ruff 153 / pytest 212 passed（每版本硬性门槛，命令与标准见 `Benchmark_plan.md` §10.6） |
+| **代码托管** | GitHub `GithubSherlock/AutoLabel`（private），权重与 `.env` 不入库 |
+| **Auto3dLabel** | 调研 ✅，路线定案（2D → 3D 提升）；v0.1 单帧 MVP 里程碑已定义（`auto3dlabel/milestone/v0.1.md`），未动工 |
 
 ## 已知缺口 / 待办
 
@@ -66,9 +89,23 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 | 缺口 | 归入 |
 | --- | --- |
 | Oriented R-CNN 未实现（mmrotate 依赖重，取舍注记） | 暂无计划 |
-| DOTA Task1 旋转 GT 评测（rotate_iou 已就绪，GT 归档未验证到） | P2 挂起 |
+| DOTA Task1 旋转 GT 评测 | ✅ 已闭环（`dota_obb_benchmark.py` + rotate_iou，CPU 实测 0.7047 见 `auto2dlabel/tests/test-v0.3.md`） |
+| 分类 Benchmark 补课进行中（ImageNet100 已闭环 + CPU 可行性验证完成；ILSVRC2012 val / cifar / CUB200 接入待排期） | v0.3 补课 |
 | AgentState from_dict 恢复未实现（to_dict 快照已写） | checkpoint 完整版 |
 | Web 审核：bbox 拖拽/标签编辑、分类与 OBB 结果展示 | 后续版本 |
+| cityscapes 域内权重 | ✅ 已闭环（mmdet 官方权重转换接入 `maskrcnn_r50_cityscapes`，全量 500 图 mAP 0.5149，见 `tests/test-v0.3.md`） |
+| dota/mot 域微调权重（GPU 复测定性为域边界：COCO 预训练模型在航拍/密集行人域失效，规模/SAHI/架构均无效） | 域微调路线（预标注 → 微调 → 回采闭环，AutoLabel 价值场景） |
+
+## 下一步
+
+（2026-08-17 调整：Auto3dLabel v0.1 提前——2D 基础能力已就绪、单帧 3D 不依赖 Pose/Tracking；v1.0 Tracking 紧随其后，2D/3D 共用；v0.4 Pose 与 3D 路线无依赖，穿插/殿后）
+
+| 优先级 | 事项 | 内容 |
+| --- | --- | --- |
+| 1 | **Auto3dLabel v0.1 单帧 3D MVP** | 路线 2：复用 G-DINO + SAM2 → mask 反投影语义点云 → DBSCAN 聚类 → 3D bbox 拟合 → KITTI/nuScenes 导出 + 3D IoU 冒烟评测（里程碑与验收见 `auto3dlabel/milestone/v0.1.md`，选型速查与红线见 `auto3dlabel/CLAUDE.md`） |
+| 2 | **auto2dlabel v1.0 Object Tracking** | ByteTrack / BoT-SORT，视频时序 ID 维持——2D/3D 共用（3D 标注最具价值的增量是跟踪 ID + 运动属性，计划书路线建议第 3 条） |
+| 3 | **auto2dlabel v0.4 Pose Estimation** | ViTPose / RTMPose 关键点检测 + COCO keypoints 导出（里程碑见 `auto2dlabel/milestone/v0.4.md`；与 3D 路线无依赖，穿插/殿后） |
+| 4 | 已知缺口消化 | mot 域微调权重（cityscapes ✅ 已闭环 0.5149，时机与域内数据同步）、分类数据集扩展（ImageNet100 已闭环，ILSVRC2012 val 见 `Benchmark_plan.md`）、AgentState from_dict 恢复、Web bbox 拖拽/标签编辑、分类与 OBB 的 Web 展示 |
 
 ## 差异化定位
 

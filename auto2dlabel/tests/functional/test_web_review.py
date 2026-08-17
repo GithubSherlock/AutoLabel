@@ -1,18 +1,18 @@
 """Web 复核队列端点测试（fastapi TestClient + tmp_path，零模型加载）。
 
 覆盖：队列扫描（排除已复核/损坏文件、旧字段容错）、路径越界与后缀拒绝、
-保存修正（过滤→COCO→重命名）、前端导出端点含 segmentation。
+保存修正（过滤→COCO→重命名）。
+（/api/export-coco 的 build_coco_dict 已在 test_coco_builder.py 单一验证。）
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
+from auto2dlabel.tests import Path, json
 from auto2dlabel.web import server
 from auto2dlabel.web.server import app
 
@@ -165,39 +165,3 @@ def test_review_save_rejects_bad_names(review_dir: Path) -> None:
         "queue_file": "missing_review.json", "deleted_indices": [],
     })
     assert resp.status_code == 404
-
-
-# ── 前端导出端点 ──────────────────────────────────────────────
-
-def test_export_coco_with_segmentation() -> None:
-    """前端过滤结果 → 端点重建 COCO，mask 的 segmentation/area 透传。"""
-    payload = {
-        "image_path": "upload.png",
-        "image_width": 640,
-        "image_height": 480,
-        "bboxes": [
-            {"x": 10, "y": 20, "width": 100, "height": 200, "label": "car", "confidence": 0.9},
-        ],
-        "masks": [
-            {
-                "bbox": {"x": 10, "y": 20, "width": 100, "height": 200,
-                         "label": "car", "confidence": 0.9},
-                "segmentation": [[10, 20, 110, 20, 110, 220, 10, 220]],
-                "area": 20000.0,
-            },
-        ],
-    }
-    resp = client.post("/api/export-coco", json=payload)
-    assert resp.status_code == 200
-    coco = resp.json()
-    assert coco["images"][0]["file_name"] == "upload.png"
-    assert len(coco["annotations"]) == 2
-    seg_ann = [a for a in coco["annotations"] if "segmentation" in a][0]
-    assert seg_ann["segmentation"] == [[10, 20, 110, 20, 110, 220, 10, 220]]
-    assert seg_ann["area"] == 20000.0
-
-
-def test_export_coco_bad_payload() -> None:
-    """非法字段返回 400 而非 500。"""
-    resp = client.post("/api/export-coco", json={"bboxes": [{"x": "bad"}]})
-    assert resp.status_code == 400

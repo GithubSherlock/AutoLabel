@@ -31,8 +31,8 @@ DEFAULT_TIMEOUT = 30
 # 默认值（benchmark）
 BENCHMARK_DEFAULT_CONF = 0.3
 BENCHMARK_DEFAULT_IOU = 0.5
-BENCHMARK_DEFAULT_MODEL = "yolov8x.pt"
-BENCHMARK_DEFAULT_SEG_MODEL = "FastSAM-s.pt"
+BENCHMARK_DEFAULT_MODEL = "yolo26x.pt"
+BENCHMARK_DEFAULT_SEG_MODEL = "sam2_l.pt"  # GPU 复测：box-prompted 0.9278 vs FastSAM 0.4917（coco_seg）
 BENCHMARK_DEFAULT_MAX_IMAGES = 50
 
 # 可用数据集（用于 LLM prompt + 验证）
@@ -42,12 +42,15 @@ BENCHMARK_DATASETS: dict[str, dict[str, str]] = {
     "voc2007":    {"script": "voc_benchmark.py",        "task_type": "detection"},
     "kitti":      {"script": "kitti_benchmark.py",      "task_type": "detection"},
     "dota":       {"script": "dota_benchmark.py",       "task_type": "detection"},
+    "dota_obb":   {"script": "dota_obb_benchmark.py",   "task_type": "obb_detection"},
     "mot":        {"script": "mot_benchmark.py",        "task_type": "detection"},
     # 实例分割
     "coco_seg":   {"script": "coco_seg_benchmark.py",   "task_type": "segmentation"},
     "cityscapes": {"script": "cityscapes_benchmark.py", "task_type": "segmentation"},
     "nuimages":   {"script": "nuimages_benchmark.py",   "task_type": "segmentation"},
     "d2sa":       {"script": "d2sa_benchmark.py",       "task_type": "segmentation"},
+    # 图像分类
+    "imagenet100": {"script": "classification_benchmark.py", "task_type": "classification"},
 }
 
 # 数据集中文名 → key 映射
@@ -56,23 +59,18 @@ DATASET_CN_MAP: dict[str, str] = {
     "voc": "voc2007", "voc2007": "voc2007", "voc07": "voc2007", "pascal voc": "voc2007",
     "kitti": "kitti",
     "dota": "dota", "航拍": "dota",
+    "dota_obb": "dota_obb", "obb": "dota_obb", "旋转框": "dota_obb",
+    "rotated": "dota_obb", "oriented": "dota_obb",
     "mot": "mot", "mot17": "mot", "mot20": "mot", "行人检测": "mot", "密集行人": "mot",
     "coco分割": "coco_seg", "coco seg": "coco_seg", "coco 分割": "coco_seg",
     "cityscapes": "cityscapes", "城市街景": "cityscapes",
     "nuimages": "nuimages", "nu": "nuimages",
     "d2sa": "d2sa", "零售": "d2sa", "货架": "d2sa", "密集零售": "d2sa",
+    "imagenet100": "imagenet100", "imagenet": "imagenet100", "image net": "imagenet100",
 }
 
 # 必填参数集合
 REQUIRED_PARAMS = {"source", "prompts"}
-
-# 可选参数默认值
-OPTIONAL_PARAMS = {
-    "confidence_threshold": DEFAULT_CONFIDENCE,
-    "iou_threshold": DEFAULT_IOU,
-    "model_name": DEFAULT_MODEL,
-    "export_format": DEFAULT_EXPORT,
-}
 
 
 @dataclass
@@ -89,8 +87,11 @@ class TaskStep:
     confidence_threshold: float = DEFAULT_CONFIDENCE
     iou_threshold: float = DEFAULT_IOU
     model_name: str = DEFAULT_MODEL
+    model_hint: str = ""                 # LLM 选型理由（仅展示，不影响执行）
     export_format: str = DEFAULT_EXPORT
     sahi: bool = False                   # SAHI 切片推理
+    num_workers: int | None = None       # DataLoader 子进程数（None = 按 GPU 推荐/逐图）
+    batch_size: int | None = None        # 批量推理每批图像数（1 = 逐图）
 
     @property
     def missing_params(self) -> list[str]:
@@ -109,10 +110,16 @@ class TaskStep:
     @property
     def summary(self) -> str:
         """一行摘要。"""
+        batch_note = (
+            f" batch={self.batch_size}/{self.num_workers}w"
+            if self.batch_size is not None or self.num_workers is not None
+            else ""
+        )
         return (
             f"Step {self.step_id}: {self.task_type} → {self.source} → "
             f"[{', '.join(self.prompts)}] → conf={self.confidence_threshold} "
             f"iou={self.iou_threshold} → {self.model_name} → {self.export_format}"
+            f"{batch_note}"
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -124,8 +131,11 @@ class TaskStep:
             "confidence_threshold": self.confidence_threshold,
             "iou_threshold": self.iou_threshold,
             "model_name": self.model_name,
+            "model_hint": self.model_hint,
             "export_format": self.export_format,
             "sahi": self.sahi,
+            "num_workers": self.num_workers,
+            "batch_size": self.batch_size,
         }
 
     @classmethod
@@ -138,9 +148,48 @@ class TaskStep:
             confidence_threshold=d.get("confidence_threshold", DEFAULT_CONFIDENCE),
             iou_threshold=d.get("iou_threshold", DEFAULT_IOU),
             model_name=d.get("model_name", DEFAULT_MODEL),
+            model_hint=d.get("model_hint", ""),
             export_format=d.get("export_format", DEFAULT_EXPORT),
             sahi=d.get("sahi", False),
+            num_workers=d.get("num_workers"),
+            batch_size=d.get("batch_size"),
         )
+
+
+# ================================================================
+# 批量推理超参数（batch_size / num_workers）推荐规则
+# ================================================================
+
+
+def detect_gpu_memory_gb() -> int | None:
+    """检测首块 GPU 显存（GB）；无 CUDA GPU 返回 None。"""
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    props = torch.cuda.get_device_properties(0)
+    return int(props.total_memory / (1024 ** 3))
+
+
+def recommend_batch_params(task_type: str, gpu_memory_gb: int | None) -> tuple[int, int]:
+    """按 GPU 显存档位推荐 (batch_size, num_workers)——LLM prompt 与代码兜底共用。
+
+    显存预算依据（RTX 4090 24GB 实测量级）：yolo26x 640 fp32 ~14GB/批、
+    maskrcnn 1024 输入 ~2GB/张、resnet18 ~0.1GB/张。推荐值保守留余量，
+    用户显式指定的参数优先。
+    """
+    if gpu_memory_gb is None:
+        return 1, 0
+    if task_type in ("classification", "image_classification"):
+        bs = 16 if gpu_memory_gb >= 20 else 8 if gpu_memory_gb >= 10 else 4
+    elif task_type in ("instance_segmentation", "semantic_segmentation"):
+        bs = 4 if gpu_memory_gb >= 20 else 2 if gpu_memory_gb >= 10 else 1
+    else:  # object_detection / obb_detection
+        bs = 8 if gpu_memory_gb >= 20 else 4 if gpu_memory_gb >= 10 else 2
+    nw = 4 if gpu_memory_gb >= 20 else 2 if gpu_memory_gb >= 10 else 0
+    return bs, nw
 
 
 @dataclass
@@ -203,8 +252,8 @@ class BenchmarkRequest:
     包含运行 benchmark 所需的全部参数。Chat 命令中缺失参数时追问用户。
     """
 
-    dataset: str = ""  # 数据集 key: coco/voc2007/kitti/dota/mot/coco_seg/cityscapes/nuimages/d2sa
-    task_type: str = "detection"      # detection | segmentation
+    dataset: str = ""  # 数据集 key: coco/voc2007/kitti/dota/dota_obb/mot/coco_seg/cityscapes/nuimages/d2sa/imagenet100
+    task_type: str = "detection"      # detection | segmentation | classification | obb_detection
     model: str = BENCHMARK_DEFAULT_MODEL
     seg_model: str = BENCHMARK_DEFAULT_SEG_MODEL  # 仅 segmentation 使用
     conf: float = BENCHMARK_DEFAULT_CONF
@@ -228,9 +277,17 @@ class BenchmarkRequest:
     @property
     def summary(self) -> str:
         """一行摘要，用于展示给用户确认。"""
+        if self.task_type == "segmentation":
+            task_cn = "实例分割"
+        elif self.task_type == "classification":
+            task_cn = "图像分类"
+        elif self.task_type == "obb_detection":
+            task_cn = "旋转框检测"
+        else:
+            task_cn = "目标检测"
         parts = [
             f"数据集: {self.dataset}",
-            f"任务: {'实例分割' if self.task_type == 'segmentation' else '目标检测'}",
+            f"任务: {task_cn}",
             f"模型: {self.model}",
         ]
         if self.task_type == "segmentation":
@@ -254,6 +311,8 @@ class BenchmarkRequest:
             args.append("--sahi")
         if self.task_type == "segmentation":
             args.extend(["--seg-model", self.seg_model])
+        if self.task_type == "classification":
+            args.extend(["--dataset", self.dataset])
         return args
 
     def to_dict(self) -> dict[str, Any]:

@@ -12,16 +12,13 @@ GT: annotations/D2S_amodal_validation.json → RLE mask + bbox
 from __future__ import annotations
 
 import sys
-import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+from auto2dlabel.benchmarks import datetime, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (
     OUTPUT_DIR,
     build_parser,
@@ -43,13 +40,15 @@ MASK_IOU_THRESHOLD = 0.5
 def load_d2sa_ground_truth(
     gt_json: Path, max_images: int = 0,
 ) -> dict[int, dict[str, Any]]:
-    """加载 D2SA GT（RLE mask + bbox）。
+    """加载 D2SA GT（RLE 压缩存储 + bbox）。
 
-    使用 pycocotools.coco.COCO.annToMask() 处理 RLE 解码，
-    该格式含 backslash 字符，frPyObjects() 无法直接处理。
+    mask 保留 COCO 原生 RLE（不解码）：1920×1440 图 × 15654 实例全量解码
+    约 43GB，叠加预测 mask 会超容器内存限制（OOM 实测，见 milestone/v0.3.md）。
+    评测时经 _decode_gt_view 按类解码，峰值 = 单类实例量级。
 
     Returns:
-        gt: {image_id: {"file_name": str, "objects": [{"name": str, "mask": ndarray, "bbox": [x,y,w,h]}]}}
+        gt: {image_id: {"file_name": str, "size": (w, h),
+                        "objects": [{"name": str, "rle": dict, "bbox": [x,y,w,h]}]}}
     """
     from pycocotools.coco import COCO
 
@@ -60,10 +59,12 @@ def load_d2sa_ground_truth(
     for cat in coco.loadCats(coco.getCatIds()):
         cat_to_supercat[cat["id"]] = cat.get("supercategory", "unknown")
 
-    # 图片索引
+    # 图片索引（文件名 + 尺寸）
     img_id_to_filename: dict[int, str] = {}
+    img_id_to_size: dict[int, tuple[int, int]] = {}
     for img in coco.loadImgs(coco.getImgIds()):
         img_id_to_filename[img["id"]] = img["file_name"]
+        img_id_to_size[img["id"]] = (int(img["width"]), int(img["height"]))
 
     # 限制图片数
     img_ids = sorted(coco.getImgIds())
@@ -78,20 +79,21 @@ def load_d2sa_ground_truth(
 
         objects = []
         for ann in coco.loadAnns(ann_ids):
-            mask = coco.annToMask(ann)  # (H, W) bool
-            if mask.sum() == 0:
+            seg = ann.get("segmentation")
+            if not seg:
                 continue
             supercat = cat_to_supercat.get(ann["category_id"], "unknown")
             bbox = ann["bbox"]  # [x, y, w, h]
             objects.append({
                 "name": supercat,
-                "mask": mask,
+                "rle": seg,      # COCO RLE 压缩存储（评测时按需解码）
                 "bbox": bbox,
             })
 
         if objects:
             gt[img_id] = {
                 "file_name": img_id_to_filename.get(img_id, f"{img_id}.jpg"),
+                "size": img_id_to_size.get(img_id, (1920, 1440)),
                 "objects": objects,
             }
 
@@ -152,20 +154,15 @@ def run_box_prompted_segmentation(
         # FastSAM box-prompted 分割
         masks = seg_model.generate(str(img_path), bboxes)
 
-        # 获取图像尺寸用于 polygon → mask 转换
-        from PIL import Image as _PILImage
-        im = _PILImage.open(img_path)
-        img_h, img_w = im.height, im.width
-
+        # 用 j 关联回原始 GT object 的 label；mask 存 polygon 压缩格式
+        # （全量解码 43GB+ 会超容器内存限制，评测/viz 按需解码）
         predictions[img_id] = []
         for j, mask_obj in enumerate(masks):
-            mask_bool = polygon_to_mask(mask_obj.segmentation, img_h, img_w)
-            # 用 j 关联回原始 GT object 的 label
             label = objects[j]["name"] if j < len(objects) else "unknown"
             predictions[img_id].append({
                 "name": label,
                 "conf": 1.0,
-                "mask": mask_bool,
+                "polygon": mask_obj.segmentation,
                 "bbox": mask_obj.bbox,
             })
 
@@ -175,12 +172,57 @@ def run_box_prompted_segmentation(
 
 
 # ================================================================
+# 2.5 按类解码视图（内存友好评测）
+# ================================================================
+
+def _decode_gt_view(gt: dict[int, dict[str, Any]], class_name: str) -> dict[int, dict[str, Any]]:
+    """GT 单类视图：仅解码该类实例的 RLE → mask（全量解码 43GB+ 会超容器内存）。
+
+    D2SA 的 RLE counts 为特殊字符串编码（含 backslash），pycocotools 原生
+    `mask.decode` 可解（annToMask 同路径），frPyObjects 不行。
+    """
+    from pycocotools import mask as mask_utils
+
+    view: dict[int, dict[str, Any]] = {}
+    for img_id, info in gt.items():
+        objects = [
+            {"name": o["name"], "mask": mask_utils.decode(o["rle"]).astype(bool)}
+            for o in info["objects"] if o["name"] == class_name
+        ]
+        if objects:
+            view[img_id] = {"objects": objects}
+    return view
+
+
+def _decode_pred_view(
+    predictions: dict[int, list[dict[str, Any]]],
+    gt: dict[int, dict[str, Any]],
+    class_name: str,
+) -> dict[int, list[dict[str, Any]]]:
+    """预测单类视图：仅解码该类实例的 polygon → mask（内存同 GT 侧）。"""
+    view: dict[int, list[dict[str, Any]]] = {}
+    for img_id, preds in predictions.items():
+        w, h = gt[img_id]["size"]
+        decoded = [
+            {
+                "name": p["name"],
+                "conf": p.get("conf", 1.0),
+                "mask": polygon_to_mask(p["polygon"], h, w),
+            }
+            for p in preds if p["name"] == class_name
+        ]
+        if decoded:
+            view[img_id] = decoded
+    return view
+
+
+# ================================================================
 # 3. 主流程
 # ================================================================
 
 def main():
     parser = build_parser("D2SA Instance Segmentation Benchmark (box-prompted)")
-    parser.add_argument("--seg-model", type=str, default="FastSAM-s.pt", help="分割模型")
+    parser.add_argument("--seg-model", type=str, default="sam2_l.pt", help="分割模型")
     parser.set_defaults(model="FastSAM-s.pt")
     args = parser.parse_args()
 
@@ -213,11 +255,23 @@ def main():
     predictions = run_box_prompted_segmentation(gt, image_dir, args.seg_model)
     print()
 
-    # 评估 — 按超类分组
+    # 可视化（--viz：镜像相对路径渲染 mask）
+    if args.viz:
+        from auto2dlabel.benchmarks.viz import visualize_dataset
+        visualize_dataset("d2sa", gt, predictions,
+                          lambda img_id, info: image_dir / info["file_name"])
+        print()
+
+    # 评估 — 按超类分组（GT/pred 均 RLE/polygon 压缩存储，按类解码视图，
+    # 峰值内存 = 单类实例量级而非全量 90GB，规避容器 OOM）
     print(f"计算 mask 指标（mask IoU@{MASK_IOU_THRESHOLD}）...\n")
     results = {}
     for cls in all_supercats:
-        results[cls] = evaluate_mask_per_class(gt, predictions, cls, MASK_IOU_THRESHOLD)
+        gt_view = _decode_gt_view(gt, cls)
+        pred_view = _decode_pred_view(predictions, gt, cls)
+        results[cls] = evaluate_mask_per_class(
+            gt_view, pred_view, cls, MASK_IOU_THRESHOLD,
+        )
 
     summary = format_mask_result_table(results, all_supercats, top_n=args.top_classes)
     print(summary)

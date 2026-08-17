@@ -5,11 +5,9 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
+from auto2dlabel.tests import Path, json
 from auto2dlabel.tools.batch import (
     STATUS_FAILED,
     STATUS_OK,

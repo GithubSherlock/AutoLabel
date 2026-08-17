@@ -6,13 +6,12 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
-from pathlib import Path
 
 import pytest
 
 from auto2dlabel.schema.annotation import Annotation, Bbox
+from auto2dlabel.tests import Path, json
 
 
 def _make_annotation() -> Annotation:

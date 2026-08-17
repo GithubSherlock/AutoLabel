@@ -7,18 +7,14 @@ GT 和预测均为 COCO JSON 格式，可直接用 pycocotools 或自实现评�
 
 from __future__ import annotations
 
-import json
 import sys
-import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from auto2dlabel.benchmarks import datetime, json, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (
     IOU_MATCH_THRESHOLD,
     OUTPUT_DIR,
@@ -36,7 +32,7 @@ GT_JSON = COCO_ROOT / "annotations" / "instances_val2017.json"
 CONFIG = {
     "confidence_threshold": 0.3,
     "iou_threshold": 0.5,
-    "model_name": "yolov8x.pt",
+    "model_name": "yolo26x.pt",
 }
 
 IOU_MATCH_THRESHOLD = 0.5
@@ -149,6 +145,8 @@ def main():
     parser.add_argument("--model", type=str, default=CONFIG["model_name"])
     parser.add_argument("--iou", type=float, default=CONFIG["iou_threshold"])
     parser.add_argument("--top-classes", type=int, default=20, help="展示前 N 类的详细结果")
+    parser.add_argument("--viz", action="store_true",
+                        help="渲染预测结果到项目同级 Visualization/coco2017/（评测协议不变）")
 
     args = parser.parse_args()
 
@@ -170,6 +168,13 @@ def main():
     # 运行检测
     predictions = run_detection(gt)
     print()
+
+    # 可视化（--viz：镜像相对路径渲染 bbox）
+    if args.viz:
+        from auto2dlabel.benchmarks.viz import visualize_dataset
+        visualize_dataset("coco2017", gt, predictions,
+                          lambda img_id, info: IMAGE_DIR / info["file_name"])
+        print()
 
     # 计算指标
     print(f"计算指标（IoU@{IOU_MATCH_THRESHOLD}）...\n")

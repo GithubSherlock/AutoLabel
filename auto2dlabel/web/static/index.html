@@ -169,13 +169,14 @@ async function loadModels() {
 
     // 展平分割模型
     segModels = [];
-    const segOrder = ['fastsam', 'sam', 'sam2', 'sam3', 'maskrcnn', 'custom'];
+    const segOrder = ['fastsam', 'sam', 'sam2', 'sam3', 'maskrcnn', 'torchvision', 'custom'];
     const segLabels = {
       fastsam: '⚡ FastSAM',
       sam: '🎯 SAM',
       sam2: '🎯 SAM2',
       sam3: '🎯 SAM3',
       maskrcnn: '🔬 Mask R-CNN',
+      torchvision: '🔬 torchvision 语义分割 (VOC)',
       custom: '📦 自定义权重',
     };
     const segSel = document.getElementById('segModel');
@@ -211,14 +212,14 @@ async function loadModels() {
     const detSel = document.getElementById('model');
     detSel.innerHTML = `
       <option value="yolo26x.pt">yolo26x.pt</option>
-      <option value="yolov8n.pt">yolov8n.pt</option>
+      <option value="yolo12n.pt">yolo12n.pt</option>
       <option value="fasterrcnn_resnet50_fpn_v2">fasterrcnn_resnet50_fpn_v2</option>
       <option value="IDEA-Research/grounding-dino-tiny">grounding-dino-tiny</option>
     `;
-    detModels = ['yolo26x.pt', 'yolov8n.pt', 'fasterrcnn_resnet50_fpn_v2', 'IDEA-Research/grounding-dino-tiny'];
+    detModels = ['yolo26x.pt', 'yolo12n.pt', 'fasterrcnn_resnet50_fpn_v2', 'IDEA-Research/grounding-dino-tiny'];
     modelMeta = {
       'yolo26x.pt': 'coco_classes',
-      'yolov8n.pt': 'coco_classes',
+      'yolo12n.pt': 'coco_classes',
       'fasterrcnn_resnet50_fpn_v2': 'coco_classes',
       'IDEA-Research/grounding-dino-tiny': 'open_vocabulary',
     };

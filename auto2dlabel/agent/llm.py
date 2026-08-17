@@ -6,11 +6,12 @@ Agent Loop 通过此模块与 LLM 交互，不直接依赖任何特定 SDK。
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from auto2dlabel.agent import json
 
 
 def _load_dotenv() -> None:

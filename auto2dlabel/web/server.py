@@ -27,10 +27,13 @@ from auto2dlabel.export.coco import build_coco_dict
 from auto2dlabel.models.detection import create_detection_model
 from auto2dlabel.models.model_catalog import (
     ALL_DETECTION_MODELS,
+    CLASSIFICATION_MODELS,
     COCO_CLASSES,
     GROUNDING_DINO_MODELS,
     PYTORCH_DETECTION_MODELS,
     SEGMENTATION_MODELS,
+    TORCHVISION_CLS_MODELS,
+    TORCHVISION_SEG_MODELS,
     ULTRALYTICS_MODELS,
     WEIGHTS_DIR,
 )
@@ -94,7 +97,7 @@ async def list_detection_models():
             "name": name,
             "type": (
                 "open_vocabulary"
-                if cat == "grounding_dino" or "world" in name.lower()
+                if cat == "grounding_dino"
                 else "coco_classes"
             ),
         }
@@ -126,12 +129,15 @@ async def list_segmentation_models():
         "sam2": [],
         "sam3": [],
         "maskrcnn": [],
+        "torchvision": [],
         "custom": [],
     }
 
     for name in SEGMENTATION_MODELS:
         name_lower = name.lower()
-        if name_lower.startswith("fastsam"):
+        if name_lower in TORCHVISION_SEG_MODELS:
+            grouped["torchvision"].append({"name": name, "type": "torchvision_seg"})
+        elif name_lower.startswith("fastsam"):
             grouped["fastsam"].append({"name": name, "type": "fastsam"})
         elif "sam2." in name_lower or name_lower.startswith("sam2"):
             grouped["sam2"].append({"name": name, "type": "sam2"})
@@ -150,6 +156,32 @@ async def list_segmentation_models():
         for f in WEIGHTS_DIR.glob(ext):
             if f.name not in seen and f.name not in ALL_DETECTION_MODELS:
                 grouped["custom"].append({"name": f.name, "type": "custom_weights"})
+
+    return JSONResponse({
+        "models": grouped,
+        "total": sum(len(v) for v in grouped.values()),
+        "weights_dir": str(WEIGHTS_DIR),
+    })
+
+
+@app.get("/api/cls-models")
+async def list_classification_models() -> JSONResponse:
+    """列出所有可用分类模型，按类别分组（hf 零样本 / torchvision / custom）。"""
+    grouped: dict[str, list[dict[str, str]]] = {
+        "hf_zero_shot": [],
+        "torchvision": [],
+        "custom": [],
+    }
+    for name in CLASSIFICATION_MODELS:
+        grouped["hf_zero_shot"].append({"name": name, "type": "hf_zero_shot"})
+    for name in TORCHVISION_CLS_MODELS:
+        grouped["torchvision"].append({"name": name, "type": "torchvision_cls"})
+
+    # 扫描自定义分类权重（hub/checkpoints 下的 torchvision 权重）
+    seen = set(CLASSIFICATION_MODELS) | set(TORCHVISION_CLS_MODELS)
+    for f in sorted((WEIGHTS_DIR / "hub" / "checkpoints").glob("*.pth")):
+        if f.name not in seen:
+            grouped["custom"].append({"name": f.name, "type": "custom_weights"})
 
     return JSONResponse({
         "models": grouped,
@@ -260,7 +292,7 @@ async def annotate(
     iou: float = Form(0.3),
     model: str = Form(DEFAULT_MODEL),
     with_seg: str = Form("false"),
-    seg_model: str = Form("FastSAM-s.pt"),
+    seg_model: str = Form("sam2_l.pt"),
     box_threshold: float = Form(0.3),
     text_threshold: float = Form(0.25),
 ):

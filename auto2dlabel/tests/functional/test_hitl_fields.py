@@ -5,10 +5,8 @@ Web 复核队列消费方依赖这两个字段显示原图；旧调用不传时�
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 from auto2dlabel.schema.annotation import Bbox
+from auto2dlabel.tests import Path, json
 from auto2dlabel.tools.hitl import TriageResult, export_triage
 
 

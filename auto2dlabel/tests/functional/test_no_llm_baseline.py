@@ -10,11 +10,9 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import pytest
 
+from auto2dlabel.tests import Path, json
 from auto2dlabel.tests.helpers.benchmark_runner import (
     execute_benchmark,
     is_benchmark_intent,
@@ -25,7 +23,7 @@ from auto2dlabel.tests.helpers.no_llm_baseline import (
 )
 
 _WEIGHTS_DIR = Path(__file__).resolve().parents[2] / "weights"
-_YOLOV8X = _WEIGHTS_DIR / "yolov8x.pt"
+_DET_WEIGHT = _WEIGHTS_DIR / "yolo26x.pt"
 
 
 # ============================================================
@@ -59,7 +57,7 @@ class TestExtractPrompts:
 # run_no_llm_baseline：端到端（需要检测模型权重）
 # ============================================================
 
-@pytest.mark.skipif(not _YOLOV8X.exists(), reason="需要 yolov8x.pt 权重（auto2dlabel/weights/）")
+@pytest.mark.skipif(not _DET_WEIGHT.exists(), reason="需要 yolo26x.pt 权重（auto2dlabel/weights/）")
 class TestNoLlmBaselineE2E:
     def test_end_to_end_outputs(self, sample_image: Path, tmp_path: Path) -> None:
         """baseline 输出与 LLM 路径格式一致：JSON / 可视化 / Annotation 结构。"""
@@ -69,7 +67,7 @@ class TestNoLlmBaselineE2E:
             [sample_image],
             "检测汽车和行人",
             threshold=0.1,
-            det_model="yolov8x.pt",
+            det_model="yolo26x.pt",
             output=str(out),
             vis_dir=str(vis),
         )
@@ -98,7 +96,7 @@ class TestNoLlmBaselineE2E:
             [sample_image],
             "检测汽车",
             threshold=0.1,
-            det_model="yolov8x.pt",
+            det_model="yolo26x.pt",
             sahi=True,
             output=str(tmp_path / "out"),
             vis_dir=str(tmp_path / "vis"),
@@ -115,7 +113,7 @@ class TestNoLlmBaselineE2E:
 
 class TestIsBenchmarkIntent:
     def test_benchmark_zh(self) -> None:
-        assert is_benchmark_intent("用 yolov8x 跑 COCO 检测 benchmark，50 张图")
+        assert is_benchmark_intent("用 yolo26x 跑 COCO 检测 benchmark，50 张图")
 
     def test_benchmark_eval_only(self) -> None:
         assert is_benchmark_intent("评估 KITTI 数据集上的检测性能")

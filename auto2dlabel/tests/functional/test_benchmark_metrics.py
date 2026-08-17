@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 from auto2dlabel.benchmarks.common import (
@@ -12,6 +11,7 @@ from auto2dlabel.benchmarks.common import (
     evaluate_mask_per_class,
     evaluate_per_class,
 )
+from auto2dlabel.tests import np
 
 
 class TestComputeIoU:

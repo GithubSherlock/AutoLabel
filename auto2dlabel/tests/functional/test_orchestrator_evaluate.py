@@ -7,12 +7,12 @@ flag 写 metadata、retry 结果并入 _sync_annotations、max_iterations=3 红�
 
 from __future__ import annotations
 
-import json
 from typing import Any, cast
 
 from auto2dlabel.agent.llm import LLMClient, LLMResponse
 from auto2dlabel.agent.orchestrator import AgentOrchestrator
 from auto2dlabel.schema.annotation import Bbox
+from auto2dlabel.tests import json
 from auto2dlabel.tools.base import Tool
 from auto2dlabel.tools.registry import ToolRegistry
 

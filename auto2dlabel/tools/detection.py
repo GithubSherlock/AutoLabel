@@ -7,6 +7,7 @@ import os
 from auto2dlabel.models.detection import (
     DetectionModel,
     create_detection_model,
+    detect_image_sahi,
     detect_with_retry,
 )
 from auto2dlabel.schema.annotation import Bbox
@@ -84,8 +85,6 @@ class DetectionTool(Tool):
         对 Agent Loop 完全透明，不增加迭代次数。
         """
         if self.use_sahi:
-            from auto2dlabel.benchmarks.common import detect_image_sahi
-
             dets, self.last_retried, self.last_retry_threshold = detect_with_retry(
                 lambda conf: detect_image_sahi(
                     self.model, image_path, prompts,

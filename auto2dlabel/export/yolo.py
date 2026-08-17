@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
+from auto2dlabel.export import Path
 from auto2dlabel.schema.annotation import Annotation
 
 

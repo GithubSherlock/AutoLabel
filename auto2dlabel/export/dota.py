@@ -10,8 +10,8 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
+from auto2dlabel.export import Path
 from auto2dlabel.schema.annotation import Annotation
 
 

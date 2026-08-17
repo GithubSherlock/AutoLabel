@@ -11,7 +11,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 from rich.console import Console
 
@@ -19,10 +18,12 @@ from auto2dlabel.agent.evaluate import QualityReport, evaluate_detections
 from auto2dlabel.models.detection import (
     DetectionResult,
     create_detection_model,
+    detect_image_sahi,
     detect_with_retry,
 )
 from auto2dlabel.schema.annotation import Annotation, Bbox
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL
+from auto2dlabel.tests import Path
 from auto2dlabel.tools.export import ExportTool
 from auto2dlabel.tools.log import log_python_api_call
 from auto2dlabel.tools.visualize import visualize_annotation
@@ -105,8 +106,6 @@ def run_no_llm_baseline(
 
         # 直接检测，不经过 Agent（与 LLM 路径一致：0 框降阈值重试一次）
         if sahi:
-            from auto2dlabel.benchmarks.common import detect_image_sahi
-
             console.print("[dim]SAHI 切片推理...[/dim]")
             dets, retried, retry_threshold = detect_with_retry(
                 lambda conf: detect_image_sahi(

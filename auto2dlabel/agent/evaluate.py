@@ -71,6 +71,7 @@ def evaluate_detections(
     max_box_warning: int = 200,
     retried: bool = False,
     retry_threshold: float | None = None,
+    prompt_matcher: Callable[[str, list[str]], bool] | None = None,
 ) -> QualityReport:
     """纯函数：0 框判定 / 类别覆盖检查 / 超框数警告。不做任何 I/O。
 
@@ -79,8 +80,12 @@ def evaluate_detections(
     - SAHI dict（{"name"/"label", "bbox", "conf"/"confidence"}）
 
     confidence_threshold 仅作为上下文保留，不参与判定。
+    prompt_matcher: 类别覆盖检查用的匹配函数（OBB 场景传 _match_obb_prompt，
+    默认 _match_prompt 双向子串）。
     """
     from auto2dlabel.models.detection import _match_prompt
+
+    matcher = prompt_matcher or _match_prompt
 
     labels: list[str] = []
     for d in detections:
@@ -93,7 +98,7 @@ def evaluate_detections(
     covered: list[str] = []
     missing: list[str] = []
     for p in prompts:
-        if any(_match_prompt(lab, [p]) for lab in labels):
+        if any(matcher(lab, [p]) for lab in labels):
             covered.append(p)
         else:
             missing.append(p)

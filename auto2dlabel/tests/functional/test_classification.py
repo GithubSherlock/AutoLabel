@@ -1,4 +1,4 @@
-"""分类任务（CLIP/SigLIP）测试 —— 零模型加载、不 import transformers。
+"""分类任务（CLIP/SigLIP/torchvision）测试 —— 零模型加载、不 import 重库。
 
 覆盖：模型名分发、_to_labels 排序、ImageLabel 序列化 roundtrip、
 export_cls JSON 内容、ExportTool format="cls" 标签透传。
@@ -6,19 +6,18 @@ export_cls JSON 内容、ExportTool format="cls" 标签透传。
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 from auto2dlabel.agent.state import AgentState
 from auto2dlabel.export.cls import export_cls
 from auto2dlabel.models.classification import (
     ClassificationModel,
     ClipModel,
     SigLIPModel,
+    TorchVisionClassifier,
     _to_labels,
     create_classification_model,
 )
 from auto2dlabel.schema.annotation import Annotation, ImageLabel
+from auto2dlabel.tests import Path, json
 from auto2dlabel.tools.export import ExportTool
 
 
@@ -53,14 +52,20 @@ class FakeClassificationModel:
 
 
 def test_create_classification_model_dispatch() -> None:
-    """按名称前缀分发：clip / siglip / 未知名报错。"""
+    """按名称前缀分发：clip / siglip / torchvision / 未知名报错。"""
     assert isinstance(create_classification_model("openai/clip-vit-base-patch32"), ClipModel)
     assert isinstance(create_classification_model("google/siglip-base-patch16-224"), SigLIPModel)
     # 大小写不敏感
     assert isinstance(create_classification_model("SIGLIP-x"), SigLIPModel)
+    # torchvision 目录名与前缀容错（目录外 vit_l_16 仍可运行）
+    assert isinstance(create_classification_model("convnext_large"), TorchVisionClassifier)
+    assert isinstance(create_classification_model("vit_l_16"), TorchVisionClassifier)
+    # ResNet / ResNeXt 系列（resnet 前缀无下划线，需前缀容错）
+    assert isinstance(create_classification_model("resnet50"), TorchVisionClassifier)
+    assert isinstance(create_classification_model("resnext101_32x8d"), TorchVisionClassifier)
 
     try:
-        create_classification_model("resnet50")
+        create_classification_model("densenet121")
         raise AssertionError("应抛出 ValueError")
     except ValueError as e:
         assert "无法识别的分类模型" in str(e)
@@ -135,3 +140,12 @@ def test_clip_model_constructor_is_lazy() -> None:
     model = ClipModel(model_name="openai/clip-vit-base-patch32")
     assert model._model_name == "openai/clip-vit-base-patch32"
     assert model._model is None
+
+
+def test_torchvision_classifier_constructor_is_lazy() -> None:
+    """构造 TorchVisionClassifier 零 import/下载（懒加载红线）。"""
+    model = TorchVisionClassifier(model_name="convnext_large")
+    assert model._model_name == "convnext_large"
+    assert model._model is None
+    assert model._transform is None
+    assert model._class_names == []

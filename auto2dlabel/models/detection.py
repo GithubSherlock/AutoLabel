@@ -1,18 +1,16 @@
 """检测模型抽象层。
 
-封装 Grounding DINO 与 Ultralytics 全系列检测模型（YOLOv5/v8/v9/v10/v11/v12），
+封装 Grounding DINO 与 Ultralytics 检测模型（YOLO11/12/26），
 提供统一接口：detect(image, prompts) -> List[DetectionResult]。
 """
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from PIL import Image
-
+from auto2dlabel.models import Image, os
 from auto2dlabel.models.model_catalog import COCO_CLASSES
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL
 
@@ -136,19 +134,19 @@ class GroundingDINOModel:
 
 
 # ============================================================
-# Ultralytics 全系列（YOLOv5/v8/v9/v10/v11/v12 + YOLO-World）
+# Ultralytics 系列（YOLO11/12/26 + RT-DETR）
 # ============================================================
 
 class UltralyticsModel:
-    """Ultralytics 全系列检测模型封装。
+    """Ultralytics 检测模型封装。
 
-    支持所有 YOLOv5/v8/v9/v10/v11/v12 及其 n/s/m/l/x 变体，
-    以及 YOLO-World 开放词汇模型。首次使用自动下载 .pt 权重。
+    支持 YOLO11/12/26 及其 n/s/m/l/x 变体与 RT-DETR。
+    首次使用自动下载 .pt 权重（目录外的自定义 .pt 亦可加载）。
     """
 
     def __init__(
         self,
-        model_name: str = "yolov8n.pt",
+        model_name: str = "yolo26x.pt",
         device: str | None = None,
         iou_threshold: float = 0.5,
     ):
@@ -201,32 +199,63 @@ class UltralyticsModel:
             device=self._device, verbose=False,
         ))
 
+        return self._parse_pred(preds[0], prompts)
+
+    def detect_batch(
+        self,
+        image_paths: list[str],
+        prompts: list[str],
+        confidence_threshold: float = 0.3,
+        num_workers: int = 0,
+    ) -> list[list[DetectionResult]]:
+        """批量检测：ultralytics 原生 batch 推理（model(paths, batch=, workers=)）。
+
+        每图解析与 detect 完全一致（同一 _parse_pred）；len>1 时传 batch=len。
+        """
+        model = self._load()
+
+        if self._is_world:
+            model.set_classes(prompts)
+
+        kwargs: dict[str, Any] = {
+            "conf": confidence_threshold, "iou": self._iou,
+            "device": self._device, "verbose": False,
+        }
+        if num_workers:
+            kwargs["workers"] = num_workers
+        if len(image_paths) > 1:
+            kwargs["batch"] = len(image_paths)
+
+        preds = cast("list[Results]", model(image_paths, **kwargs))
+        return [self._parse_pred(p, prompts) for p in preds]
+
+    def _parse_pred(self, pred: "Results", prompts: list[str]) -> list[DetectionResult]:
+        """单个 ultralytics Results → DetectionResult 列表（单图/批量共用）。"""
         results = []
-        for pred in preds:
-            if pred.boxes is None:
-                continue
-            for box_data in pred.boxes:
-                box_data = cast("Boxes", box_data)  # stub 迭代推断为 BaseTensor，实际是 Boxes
-                x1, y1, x2, y2 = box_data.xyxy[0].tolist()
-                conf = float(box_data.conf[0])
-                cls_id = int(box_data.cls[0])
+        if pred.boxes is None:
+            return results
+        for box_data in pred.boxes:
+            box_data = cast("Boxes", box_data)  # stub 迭代推断为 BaseTensor，实际是 Boxes
+            x1, y1, x2, y2 = box_data.xyxy[0].tolist()
+            conf = float(box_data.conf[0])
+            cls_id = int(box_data.cls[0])
 
-                if self._is_world:
-                    label = prompts[cls_id] if cls_id < len(prompts) else str(cls_id)
+            if self._is_world:
+                label = prompts[cls_id] if cls_id < len(prompts) else str(cls_id)
+            else:
+                # 标准 YOLO：用 COCO 类别名，按 prompt 过滤
+                if cls_id < len(COCO_CLASSES):
+                    label = COCO_CLASSES[cls_id]
+                    if not _match_prompt(label, prompts):
+                        continue  # 跳过不匹配的类别
                 else:
-                    # 标准 YOLO：用 COCO 类别名，按 prompt 过滤
-                    if cls_id < len(COCO_CLASSES):
-                        label = COCO_CLASSES[cls_id]
-                        if not _match_prompt(label, prompts):
-                            continue  # 跳过不匹配的类别
-                    else:
-                        label = str(cls_id)
+                    label = str(cls_id)
 
-                results.append(DetectionResult(
-                    x=x1, y=y1,
-                    width=x2 - x1, height=y2 - y1,
-                    label=label, confidence=conf,
-                ))
+            results.append(DetectionResult(
+                x=x1, y=y1,
+                width=x2 - x1, height=y2 - y1,
+                label=label, confidence=conf,
+            ))
 
         return results
 
@@ -275,12 +304,10 @@ class PyTorchVisionModel:
         if self._model is not None:
             return self._model
 
-        import os as _os
-
         from auto2dlabel.models.model_catalog import WEIGHTS_DIR
 
         # 权重下载目录
-        _os.environ.setdefault("TORCH_HOME", str(WEIGHTS_DIR))
+        os.environ.setdefault("TORCH_HOME", str(WEIGHTS_DIR))
 
         try:
             import torchvision  # noqa: F401, F811
@@ -338,6 +365,41 @@ class PyTorchVisionModel:
         with torch.no_grad():
             outputs = model([image_tensor])[0]
 
+        return self._parse_output(outputs, prompts, confidence_threshold)
+
+    def detect_batch(
+        self,
+        image_paths: list[str],
+        prompts: list[str],
+        confidence_threshold: float = 0.3,
+        num_workers: int = 0,
+    ) -> list[list[DetectionResult]]:
+        """批量检测：torchvision 原生 list-of-tensors 推理。
+
+        每图解析与 detect 完全一致（同一 _parse_output）；num_workers 仅
+        ultralytics 引擎生效，torchvision 前向为同步张量推理，保留参数对齐接口。
+        """
+        model = self._load()
+
+        import torch
+        from torchvision.transforms import functional as F  # noqa: N812
+
+        tensors = [
+            F.to_tensor(Image.open(p).convert("RGB")).to(self._device)
+            for p in image_paths
+        ]
+        with torch.no_grad():
+            outputs = model(tensors)
+
+        return [self._parse_output(o, prompts, confidence_threshold) for o in outputs]
+
+    def _parse_output(
+        self,
+        outputs: dict[str, Any],
+        prompts: list[str],
+        confidence_threshold: float,
+    ) -> list[DetectionResult]:
+        """torchvision 检测输出 dict → DetectionResult 列表（单图/批量共用）。"""
         from auto2dlabel.models.model_catalog import COCO_CLASSES
 
         results = []
@@ -443,3 +505,203 @@ def _is_pytorch_model(name: str) -> bool:
         name.startswith(prefix)
         for prefix in ("fasterrcnn_", "retinanet_", "ssd", "fcos_")
     )
+
+
+# ============================================================
+# SAHI 切片推理（单图；原 benchmarks/common.py 迁移至此，
+# 供标注 pipeline 复用，benchmarks 的 run_detection_sahi 反向引用）
+# ============================================================
+
+
+def sahi_infer_yolo(
+    model: Any, tile: Image.Image, prompts: list[str], conf: float
+) -> list[dict[str, Any]]:
+    """YOLO SAHI 推理：PIL Image → YOLO → dets。
+
+    model 标注为 Any：访问私有 _model/_device（Protocol 不可见），
+    与下方 cast(Any, model)._load() 同一惯例。
+    """
+    results = model._model(tile, conf=conf, iou=0.5, device=model._device, verbose=False)
+    return _yolo_results_to_dets(results, prompts)
+
+
+def sahi_infer_torchvision(
+    model: Any, tile: Image.Image, prompts: list[str], conf: float
+) -> list[dict[str, Any]]:
+    """Torchvision SAHI 推理：PIL Image → Tensor → Faster R-CNN → dets。"""
+    import torch
+    from torchvision.transforms import functional as F  # noqa: N812
+
+    tile_tensor = F.to_tensor(tile).to(model._device)
+    with torch.no_grad():
+        outputs = model._model([tile_tensor])[0]
+
+    dets: list[dict[str, Any]] = []
+    for box, label_idx, score in zip(outputs["boxes"], outputs["labels"], outputs["scores"]):
+        conf_val = float(score)
+        if conf_val < conf:
+            continue
+        cls_id = int(label_idx) - 1  # 1-based → 0-based
+        if cls_id < 0 or cls_id >= len(COCO_CLASSES):
+            continue
+        label = COCO_CLASSES[cls_id]
+        # prompt 过滤
+        label_lower = label.lower()
+        if not any(p.lower() in label_lower or label_lower in p.lower() for p in prompts):
+            continue
+        x1, y1, x2, y2 = box.tolist()
+        dets.append({
+            "name": label,
+            "bbox": [float(x1), float(y1), float(x2), float(y2)],
+            "conf": conf_val,
+        })
+    return dets
+
+
+def _yolo_results_to_dets(results: list[Any], prompts: list[str]) -> list[dict[str, Any]]:
+    """将 Ultralytics YOLO 推理结果转为检测字典列表。"""
+    dets: list[dict[str, Any]] = []
+    for r in results:
+        if r.boxes is None:
+            continue
+        for box in r.boxes:
+            cls_id = int(box.cls[0])
+            if cls_id >= len(COCO_CLASSES):
+                continue
+            label = COCO_CLASSES[cls_id]
+            # 按 prompt 过滤
+            label_lower = label.lower()
+            if not any(p.lower() in label_lower or label_lower in p.lower() for p in prompts):
+                continue
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+            dets.append({
+                "name": label,
+                "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                "conf": float(box.conf[0]),
+            })
+    return dets
+
+
+def nms_per_class(dets: list[dict[str, Any]], iou_threshold: float) -> list[dict[str, Any]]:
+    """按类别分组执行 IoU NMS，返回去重后的检测列表。"""
+    if not dets:
+        return []
+
+    # 按类别分组
+    by_class: dict[str, list[dict[str, Any]]] = {}
+    for d in dets:
+        by_class.setdefault(d["name"], []).append(d)
+
+    kept: list[dict[str, Any]] = []
+    for cls_name, cls_dets in by_class.items():
+        # 按置信度降序
+        cls_dets.sort(key=lambda d: d["conf"], reverse=True)
+        boxes = [d["bbox"] for d in cls_dets]
+
+        # 贪心 NMS
+        suppressed = [False] * len(cls_dets)
+        for i in range(len(cls_dets)):
+            if suppressed[i]:
+                continue
+            kept.append(cls_dets[i])
+            for j in range(i + 1, len(cls_dets)):
+                if suppressed[j]:
+                    continue
+                if _box_iou(boxes[i], boxes[j]) > iou_threshold:
+                    suppressed[j] = True
+
+    return kept
+
+
+def _box_iou(box_a: list[float], box_b: list[float]) -> float:
+    """两个 bbox 的 IoU（[x1,y1,x2,y2] 格式）。"""
+    x1 = max(box_a[0], box_b[0])
+    y1 = max(box_a[1], box_b[1])
+    x2 = min(box_a[2], box_b[2])
+    y2 = min(box_a[3], box_b[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    if inter == 0:
+        return 0.0
+    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+    return inter / (area_a + area_b - inter)
+
+
+def detect_image_sahi(
+    model: DetectionModel,
+    image_path: str,
+    prompts: list[str],
+    confidence_threshold: float = 0.3,
+    slice_size: int = 640,
+    overlap_ratio: float = 0.2,
+) -> list[dict[str, Any]]:
+    """SAHI 切片推理单张图像，返回检测 dict 列表。
+
+    将大图切为重叠的 slice_size × slice_size 小块，分别推理后
+    跨切片 NMS 合并。适用于航拍/高分辨率图中 YOLO resize 导致
+    小物体丢失的场景。
+
+    Args:
+        model: 已加载的 DetectionModel 实例（需有 _model 属性）。
+        image_path: 图像路径。
+        prompts: 检测类别（英文名）。
+        confidence_threshold: 置信度阈值。
+        slice_size: 切片尺寸（正方形，像素）。
+        overlap_ratio: 相邻切片重叠比例。
+
+    Returns:
+        [{"name": str, "bbox": [x1,y1,x2,y2], "conf": float}, ...]
+    """
+    # 确保模型已加载（_load 为具体模型类方法，Protocol 不可见）
+    if hasattr(model, "_load"):
+        cast(Any, model)._load()
+
+    # 根据模型类型选择推理后端
+    if isinstance(model, PyTorchVisionModel):
+        _infer_fn = sahi_infer_torchvision
+    elif isinstance(model, UltralyticsModel):
+        _infer_fn = sahi_infer_yolo
+    else:
+        # 回退：直接调 model.detect()
+        results = model.detect(image_path, prompts, confidence_threshold)
+        return [
+            {
+                "name": r.label,
+                "bbox": [r.x, r.y, r.x + r.width, r.y + r.height],
+                "conf": r.confidence,
+            }
+            for r in results
+        ]
+
+    img = Image.open(image_path).convert("RGB")
+    w, h = img.size
+
+    # 小图直接推理
+    if w <= slice_size and h <= slice_size:
+        return _infer_fn(model, img, prompts, confidence_threshold)
+
+    # 切片推理
+    step = int(slice_size * (1 - overlap_ratio))
+    all_dets: list[dict[str, Any]] = []
+    y_starts = list(range(0, h, step))
+    x_starts = list(range(0, w, step))
+
+    for y in y_starts:
+        for x in x_starts:
+            x2 = min(x + slice_size, w)
+            y2 = min(y + slice_size, h)
+            x1 = max(0, x2 - slice_size)
+            y1 = max(0, y2 - slice_size)
+
+            tile = img.crop((x1, y1, x2, y2))
+            for det in _infer_fn(model, tile, prompts, confidence_threshold):
+                bx1, by1, bx2, by2 = det["bbox"]
+                all_dets.append({
+                    "name": det["name"],
+                    "bbox": [bx1 + x1, by1 + y1, bx2 + x1, by2 + y1],
+                    "conf": det["conf"],
+                })
+
+    # 跨切片 NMS 合并（用 model 的 iou 阈值）
+    iou_threshold = getattr(model, "_iou", 0.5)
+    return nms_per_class(all_dets, iou_threshold)

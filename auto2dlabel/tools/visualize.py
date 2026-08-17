@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import cv2
 import numpy as np
 
 from auto2dlabel.schema.annotation import Annotation, Bbox, Mask
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL
+from auto2dlabel.tools import Path
 from auto2dlabel.tools.base import Tool
 
 # 类别颜色（BGR 格式，OpenCV 用）
@@ -301,7 +300,7 @@ def detect_and_visualize(
     iou_threshold: float = 0.3,
     model_name: str = DEFAULT_MODEL,
     with_segmentation: bool = False,
-    seg_model_name: str = "fastsam",
+    seg_model_name: str = "sam2_l.pt",
 ) -> list[Path]:
     """检测图像中的目标并可视化，可选分割。
 

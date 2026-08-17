@@ -1,6 +1,6 @@
 """旋转框检测模型抽象层（YOLO-OBB）。
 
-封装 Ultralytics YOLO11-OBB 系列（yolo11n/s/m/l/x-obb.pt），提供统一接口：
+封装 Ultralytics YOLO11/12/26-OBB 系列（yolo11/12/26 n/s/m/l/x-obb.pt），提供统一接口：
 detect_obb(image_path, prompts, confidence_threshold) -> list[OBBResult]。
 
 Oriented R-CNN 等 mmrotate 系模型延后（依赖重，见 milestone/v0.3.md 取舍注记）。
@@ -11,12 +11,35 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from auto2dlabel.models.detection import _match_prompt
-from auto2dlabel.models.model_catalog import COCO_CLASSES
+from auto2dlabel.models.model_catalog import DOTA_CLASSES, DOTA_PROMPT_ALIASES
 
 if TYPE_CHECKING:
     # 仅用于类型标注与 cast（字符串前向引用），运行时保持懒加载
     from ultralytics.engine.results import Results
+
+
+def _resolve_obb_label(cls_id: int, names: dict[int, str] | None = None) -> str:
+    """DOTA 类别 id → 类名（空格命名，与 ultralytics dota8.yaml 一致）。
+
+    names: 模型 checkpoint 的 names dict（优先，权威）；缺省回退 DOTA_CLASSES。
+    """
+    if names and cls_id in names:
+        return str(names[cls_id])
+    return DOTA_CLASSES[cls_id] if cls_id < len(DOTA_CLASSES) else str(cls_id)
+
+
+def _match_obb_prompt(label: str, prompts: list[str]) -> bool:
+    """检查 OBB 标签是否匹配用户 prompt（连字符↔空格归一 + DOTA 别名 + 双向子串）。
+
+    例：label "small vehicle" 匹配 prompt "car"（别名）/"small-vehicle"（归一）/"vehicle"（子串）。
+    """
+    norm = label.replace("-", " ").lower()
+    candidates = {norm, *DOTA_PROMPT_ALIASES.get(norm, ())}
+    for p in prompts:
+        p_norm = p.replace("-", " ").lower()
+        if p_norm in norm or norm in p_norm or p_norm in candidates:
+            return True
+    return False
 
 
 @dataclass
@@ -106,26 +129,56 @@ class UltralyticsOBBModel:
             device=self._device, verbose=False,
         ))
 
+        return self._parse_pred(preds[0], prompts)
+
+    def detect_obb_batch(
+        self,
+        image_paths: list[str],
+        prompts: list[str],
+        confidence_threshold: float = 0.3,
+        num_workers: int = 0,
+    ) -> list[list[OBBResult]]:
+        """批量旋转框检测：ultralytics 原生 batch 推理（model(paths, batch=, workers=)）。
+
+        每图解析与 detect_obb 完全一致（同一 _parse_pred）。
+        """
+        model = self._load()
+
+        kwargs: dict[str, Any] = {
+            "conf": confidence_threshold, "iou": self._iou,
+            "device": self._device, "verbose": False,
+        }
+        if num_workers:
+            kwargs["workers"] = num_workers
+        if len(image_paths) > 1:
+            kwargs["batch"] = len(image_paths)
+
+        preds = cast("list[Results]", model(image_paths, **kwargs))
+        return [self._parse_pred(p, prompts) for p in preds]
+
+    def _parse_pred(self, pred: "Results", prompts: list[str]) -> list[OBBResult]:
+        """单个 ultralytics Results → OBBResult 列表（单图/批量共用）。"""
+        # checkpoint 的 names dict（权威类名表，dict[int, str]）
+        model_names = cast(Any, self._model).names
+
         results = []
-        for pred in preds:
-            obb = getattr(pred, "obb", None)  # 非 OBB 模型容错
-            if obb is None:
-                continue
-            # stub 未覆盖 OBB 字段类型，统一按 Any 处理
-            rows = cast(Any, obb).xywhr.tolist()
-            confs = cast(Any, obb).conf.tolist()
-            cls_ids = cast(Any, obb).cls.tolist()
-            for (cx, cy, w, h, angle), conf, cls_id in zip(rows, confs, cls_ids):
-                cls_id = int(cls_id)
-                label = COCO_CLASSES[cls_id] if cls_id < len(COCO_CLASSES) else str(cls_id)
-                if not _match_prompt(label, prompts):
-                    continue  # 跳过不匹配的类别
-                results.append(OBBResult(
-                    cx=float(cx), cy=float(cy),
-                    width=float(w), height=float(h),
-                    angle=float(angle),
-                    label=label, confidence=float(conf),
-                ))
+        obb = getattr(pred, "obb", None)  # 非 OBB 模型容错
+        if obb is None:
+            return results
+        # stub 未覆盖 OBB 字段类型，统一按 Any 处理
+        rows = cast(Any, obb).xywhr.tolist()
+        confs = cast(Any, obb).conf.tolist()
+        cls_ids = cast(Any, obb).cls.tolist()
+        for (cx, cy, w, h, angle), conf, cls_id in zip(rows, confs, cls_ids):
+            label = _resolve_obb_label(int(cls_id), model_names)
+            if not _match_obb_prompt(label, prompts):
+                continue  # 跳过不匹配的类别
+            results.append(OBBResult(
+                cx=float(cx), cy=float(cy),
+                width=float(w), height=float(h),
+                angle=float(angle),
+                label=label, confidence=float(conf),
+            ))
         return results
 
 

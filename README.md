@@ -7,7 +7,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-%3E%3D3.10-blue" alt="Python >=3.10">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License MIT">
-  <img src="https://img.shields.io/badge/models-64%2B-orange" alt="64+ Models">
+  <img src="https://img.shields.io/badge/models-84%2B-orange" alt="84+ Models">
   <img src="https://img.shields.io/badge/version-0.3.0-informational" alt="Version 0.3.0">
 </p>
 
@@ -61,7 +61,7 @@
 
 | 子项目 | 状态 | 说明 |
 | --- | --- | --- |
-| **auto2dlabel** | ✅ v0.3 完成 | 2D 检测 + 分割 + 分类（CLIP/SigLIP）+ OBB + NL 交互 + Web 审核 |
+| **auto2dlabel** | ✅ v0.3 完成 | 2D 检测 + 分割 + 分类（CLIP/SigLIP/torchvision）+ OBB + NL 交互 + Web 审核 |
 | **auto3dlabel** | 📋 待实现 | 3D 点云标注（占位） |
 
 ---
@@ -70,11 +70,11 @@
 
 - **🗣️ 自然语言交互** — `chat` 命令支持中英文自然语言描述标注任务，LLM 自动提取参数（类别、阈值、模型），缺失参数交互追问
 - **🧠 Agentic 编排** — LLM Agent 规划多步任务（检测 → 分割 → 导出），自动调用工具，token 高效设计（结果摘要注入，避免全量 bbox 回传）
-- **🔧 3 引擎 × 64+ 模型** — Grounding DINO（开放词汇）、Ultralytics YOLO（YOLOv5–v12/v26/World/RT-DETR）、PyTorch Vision（Faster R-CNN/RetinaNet/SSD/FCOS）；分割支持 SAM/SAM2/SAM3/Mask R-CNN/FastSAM；分类 CLIP/SigLIP；OBB YOLO-OBB（n/s/m/l/x）
+- **🔧 3 引擎 × 84+ 模型** — Grounding DINO（开放词汇）、Ultralytics YOLO（YOLO11/12/26 + RT-DETR）、PyTorch Vision（Faster R-CNN/RetinaNet/SSD/FCOS）；分割支持 SAM/SAM2/SAM3/Mask R-CNN（含 cityscapes 域内权重）/FastSAM/torchvision 语义分割（FCN/DeepLabV3/LRASPP）；分类 CLIP/SigLIP/torchvision ImageNet1K（convnext/maxvit/swin/efficientnet/vit/resnet/resnext）；OBB YOLO-OBB 11/12/26（n/s/m/l/x）
 - **✅ HITL 置信度分流** — 三档阈值：高置信（≥0.7）直接接受 / 中置信（0.3–0.7）待人工审核 / 低置信（<0.3）难例队列
 - **📦 多格式导出** — COCO JSON / YOLO txt / Pascal VOC XML / LabelMe JSON / cls JSON / DOTA / YOLO-OBB txt，已通过 round-trip 测试（坐标误差 < 1e-3）
 - **🖼️ 零样本图像分类** — CLIP/SigLIP 多候选 softmax 排序取 top-K，`Annotation.labels` + cls JSON 导出
-- **📐 OBB 旋转框** — YOLO-OBB 5 枚，`Bbox.angle` 弧度约定，DOTA 8 角点 / YOLO-OBB txt 导出，旋转多边形可视化
+- **📐 OBB 旋转框** — YOLO-OBB 15 枚（yolo11/12/26 n/s/m/l/x），`Bbox.angle` 弧度约定，DOTA 8 角点 / YOLO-OBB txt 导出，旋转多边形可视化
 - **🔁 Batch 韧性 + 主动学习** — 单图失败隔离不中断整批 + `--resume` 断点续跑；`sample` 按不确定性排序聚合审核队列
 - **⚡ `--no-llm` Baseline** — 绕过 LLM Agent，使用内置关键词映射直调检测模型，用于对比实验和离线场景
 - **🔍 自动类别推荐** — 扫描全图 80 个 COCO 类别，按检出数量和置信度排序推荐 Top-K 类别
@@ -129,8 +129,8 @@ bash auto2dlabel/weights/download_sam3.sh       # SAM3 权重（~3.4GB）
 ### 4. 第一条命令
 
 ```bash
-# 用 YOLOv8 nano 检测图片中的汽车和行人
-auto2dlabel run photo.jpg "检测汽车和行人" -d yolov8n.pt -t 0.5
+# 用 YOLO12 nano 检测图片中的汽车和行人
+auto2dlabel run photo.jpg "检测汽车和行人" -d yolo12n.pt -t 0.5
 
 # 输出：
 #   outputs/photo_20260810_143052.json       — COCO JSON 标注
@@ -163,7 +163,7 @@ auto2dlabel run photo.jpg "检测汽车、行人、自行车" -d yolo26x.pt -t 0
 auto2dlabel run ./images/ "检测车辆和行人" -d yolo11n.pt --batch
 
 # 导出为 YOLO 格式
-auto2dlabel run photo.jpg "检测汽车" -d yolov8x.pt -e yolo
+auto2dlabel run photo.jpg "检测汽车" -d yolo26x.pt -e yolo
 
 # 不使用 LLM 的 Baseline 模式（关键词映射 + 直调模型）
 auto2dlabel run photo.jpg "检测汽车和行人" --no-llm -d yolo26x.pt
@@ -239,20 +239,27 @@ python -m auto2dlabel.benchmarks.run_all
 # 运行单个数据集
 python -m auto2dlabel.benchmarks.coco_benchmark --max-images 50
 python -m auto2dlabel.benchmarks.voc_benchmark --max-images 100
+
+# 一键包装（环境检查 + 分组透传，CWD 自定位任意目录可跑，见 docs/Benchmark_plan.md §10.8）
+bash auto2dlabel/benchmarks/run_benchmarks.sh detection
+bash auto2dlabel/benchmarks/run_benchmarks.sh classification   # 分类组（imagenet100）
+# 仅 CPU 时检测/分割全组加 --extra "--model yolo11n.pt"（默认 yolo26x 超 run_all 超时）
 ```
 
 **实际 Benchmark 结果（2026-08-06）**：
 
 | 数据集 | 模型 | 指标 | 值 |
 | --- | --- | --- | --- |
-| COCO 2017 val (50 imgs) | yolov8x | mAP@0.5 | 0.453 |
+| COCO 2017 val (50 imgs) | yolov8x（历史值，模型已移除） | mAP@0.5 | 0.453 |
 | VOC 2007 (100 imgs) | yolo26x | mAP@0.5 | 0.592 |
 | KITTI | yolo26x | mAP@0.5 | 0.441 |
-| COCO seg (50 imgs) | yolov8x + FastSAM-s | mask mAP | 0.500 |
+| COCO seg (50 imgs) | yolov8x + FastSAM-s（历史值，模型已移除） | mask mAP | 0.500 |
 | Cityscapes seg | FastSAM-s | mask mAP | 0.007* |
 | nuImages | yolo26x + FastSAM | mAP | 0.383 |
 
 > \* Cityscapes 分数极低是因为 FastSAM 对该数据域过度分割，需换用 SAM3。
+
+分类基准 ImageNet100 已就绪（top-1/top-5；纯 CPU 全量可行性验证见 `auto2dlabel/tests/test-v0.3.md`），ILSVRC2012 val 规划中——模块划分、缺口与程序规范见 `docs/Benchmark_plan.md`，数据集就绪状态见 `docs/datasets_plan.md`。
 
 ### 测试
 
@@ -267,12 +274,12 @@ pytest auto2dlabel/tests/ -v
 
 ## 模型目录
 
-### 检测模型（47 个）
+### 检测模型（29 个）
 
 | 引擎 | 数量 | 示例 | 特点 |
 | --- | --- | --- | --- |
 | **Grounding DINO** (HF) | 3 | `grounding-dino-tiny/base/large` | 开放词汇，文本 prompt 直出 bbox，无需预定义类别 |
-| **Ultralytics YOLO** | 35 | YOLOv5–v12 n/s/m/l/x, YOLO-World, v26, RT-DETR | 统一 API，自动下载权重至 `auto2dlabel/weights/` |
+| **Ultralytics YOLO** | 17 | YOLO11/12/26 n/s/m/l/x, RT-DETR l/x | 统一 API，自动下载权重至 `auto2dlabel/weights/` |
 | **PyTorch Vision** | 9 | Faster R-CNN, RetinaNet, SSD, SSDLite, FCOS | COCO 预训练，torchvision 内置 |
 
 ### 推荐场景
@@ -280,12 +287,12 @@ pytest auto2dlabel/tests/ -v
 | 场景 | 推荐模型 | 理由 |
 | --- | --- | --- |
 | 自动标注（宁多勿漏） | `fasterrcnn_resnet50_fpn_v2` | 召回率最高，person 检出 16（vs YOLO 仅 6），置信度 85%+ |
-| 快速预览 | `yolov8n.pt` / `yolo11n.pt` | 速度最快，适合快速扫图 |
-| 均衡选择 | `yolov8x.pt` / `yolo26x.pt` | 精度与速度折中，VOC mAP@0.5 达 59.2% |
+| 快速预览 | `yolo11n.pt` / `yolo12n.pt` | 速度最快，适合快速扫图 |
+| 均衡选择 | `yolo26x.pt` | 精度与速度折中，VOC mAP@0.5 达 59.2% |
 | 开放词汇 | `IDEA-Research/grounding-dino-tiny` | 无需预设类别，中文 prompt 直译后使用 |
 | 卫星/航拍 | `yolo11n-obb.pt` | OBB 旋转框（v0.3 已支持） |
 
-### 分割模型（8+ 个）
+### 分割模型（23 个）
 
 | 模型 | 引擎 | 权重 | 特点 |
 | --- | --- | --- | --- |
@@ -294,6 +301,7 @@ pytest auto2dlabel/tests/ -v
 | **SAM** | Ultralytics (Meta) | ~160MB | bbox prompt → mask，轻量快速 |
 | **FastSAM** | Ultralytics | ~140MB | bbox IoU 匹配，最轻量 |
 | **Mask R-CNN** | torchvision | 自动下载 | COCO 预训练，检测+分割一步 |
+| **torchvision 语义分割** | torchvision | 自动下载 | FCN×2 / DeepLabV3×3 / LRASPP×1，VOC 21 类全图分割（每类一个 mask） |
 
 **实测对比（000860.png，"car + person"，conf=0.1）**：
 
@@ -303,18 +311,19 @@ pytest auto2dlabel/tests/ -v
 | 总 mask 数 | 14 | **41** | 36 |
 | mask 精度（多边形点数） | 260 | **892** | 860 |
 
-### 分类模型（2 个）
+### 分类模型（16 个）
 
 | 模型 | 引擎 | 权重 | 特点 |
 | --- | --- | --- | --- |
 | **CLIP** | transformers | openai/clip-vit-base-patch32 | 零样本分类，多候选 softmax 排序 |
 | **SigLIP** | transformers | google/siglip-base-patch16-224 | sigmoid logits，softmax 归一化排序 |
+| **torchvision** | torchvision | 自动下载（TORCH_HOME） | convnext_large/base、maxvit_t、swin_b、efficientnet_v2_l、vit_b_16 + resnet18/34/50/101/152、resnext50_32x4d/101_32x8d/101_64x4d；ImageNet1K 监督 top-K，candidates 子串过滤（候选须英文；与 CLIP/SigLIP 零样本语义不同），resnet50 通用之选 |
 
-### OBB 旋转框（5 个）
+### OBB 旋转框（15 个）
 
 | 模型 | 引擎 | 权重 | 特点 |
 | --- | --- | --- | --- |
-| **YOLO-OBB** | Ultralytics | yolo11n/s/m/l/x-obb.pt | 旋转框检测，`dota` / `yolo_obb` 导出 |
+| **YOLO-OBB** | Ultralytics | yolo11/12/26 n/s/m/l/x-obb.pt | 旋转框检测，`dota` / `yolo_obb` 导出 |
 
 ---
 
@@ -358,10 +367,10 @@ AutoLabel/
 │   │   ├── log.py                # 结构化日志
 │   │   └── confirm.py            # 交互确认
 │   ├── models/                   # 模型层
-│   │   ├── model_catalog.py      # 模型目录（49+ 检测 + 8 分割 + 2 分类 + 5 OBB）
+│   │   ├── model_catalog.py      # 模型目录（29 检测 + 23 分割 + 16 分类 + 15 OBB）
 │   │   ├── detection.py          # 检测模型工厂
 │   │   ├── segmentation.py       # 分割模型工厂
-│   │   ├── classification.py     # 分类模型（CLIP/SigLIP）
+│   │   ├── classification.py     # 分类模型（CLIP/SigLIP/torchvision）
 │   │   └── obb.py                # OBB 模型（YOLO-OBB）
 │   ├── schema/                   # 数据 Schema
 │   │   ├── annotation.py         # Bbox / Mask / ImageLabel / Annotation
@@ -389,7 +398,7 @@ AutoLabel/
 | **v0.1b** | ✅ 完成 | Instance Segmentation（SAM/SAM2/Mask R-CNN/FastSAM）+ `chat` 命令 |
 | **v0.1c** | ✅ 完成 | HITL 置信度分流 + `--no-llm` Baseline + Round-trip 测试 + LLM 价值量化实验 |
 | **v0.2** | ✅ 完成 | SAM3 + 类别推荐 + Web 审核界面（FastAPI + Canvas） |
-| **v0.3** | ✅ 完成 | 分类（CLIP/SigLIP）+ OBB（YOLO-OBB）+ M2 mask 叠加/复核队列闭环 + M3 Evaluate 节点/batch 续跑/主动学习采样 |
+| **v0.3** | ✅ 完成 | 分类（CLIP/SigLIP/torchvision）+ OBB（YOLO-OBB）+ M2 mask 叠加/复核队列闭环 + M3 Evaluate 节点/batch 续跑/主动学习采样 |
 | **v0.4** | 📋 计划中 | Pose Estimation（ViTPose/RTMPose） |
 | **v1.0** | 📋 计划中 | Object Tracking（视频时序）+ 3D 点云（auto3dlabel） |
 

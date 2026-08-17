@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from auto2dlabel.agent.llm import LLMClient, LLMResponse
-from auto2dlabel.agent.planner import TaskPlanner, _dict_to_plan
+from auto2dlabel.agent.planner import TaskPlanner, _dict_to_benchmark, _dict_to_plan
 
 
 class _FixedLLM:
@@ -105,3 +105,38 @@ def test_parse_empty_response_raises() -> None:
         raise AssertionError("应抛出 ValueError")
     except ValueError as e:
         assert "空响应" in str(e)
+
+
+_OBB_BENCH_JSON = """{
+  "dataset": "dota_obb",
+  "task_type": "obb_detection",
+  "model": "yolo11n-obb.pt",
+  "conf": 0.3,
+  "iou": 0.5,
+  "max_images": 50,
+  "sahi": false
+}"""
+
+
+def test_parse_obb_benchmark() -> None:
+    """「旋转框评测」→ dataset=dota_obb、task_type=obb_detection、OBB 权重透传。"""
+    planner = TaskPlanner(llm_client=cast(LLMClient, _FixedLLM(_OBB_BENCH_JSON)))
+    req = planner.parse_benchmark("在 DOTA 上评测旋转框检测")
+
+    assert req.dataset == "dota_obb"
+    assert req.task_type == "obb_detection"
+    assert req.model == "yolo11n-obb.pt"
+
+
+def test_dict_to_benchmark_obb_default_model() -> None:
+    """dataset=dota_obb 且 LLM 未给 model → 推导 task_type + 默认 OBB 权重。"""
+    req = _dict_to_benchmark({"dataset": "dota_obb"})
+    assert req.task_type == "obb_detection"
+    assert req.model == "yolo11n-obb.pt"  # yolo26x.pt 无 OBB 头，不得兜底
+
+
+def test_dict_to_benchmark_plain_detection_keeps_default() -> None:
+    """普通检测数据集未给 model → 保持 BENCHMARK_DEFAULT_MODEL。"""
+    req = _dict_to_benchmark({"dataset": "voc2007"})
+    assert req.task_type == "detection"
+    assert req.model.endswith("yolo26x.pt")

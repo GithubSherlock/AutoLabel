@@ -2,7 +2,7 @@
 """DOTA Aerial Detection Benchmark — 航拍图像目标检测 + 实例分割。
 
 DOTA 是航拍视角目标检测数据集（15 类），使用 v1.0 HBB（水平框）标注。
-由于 yolov8x.pt（COCO 预训练）仅支持 80 个通用类别，本 benchmark 仅评估
+由于 yolo26x.pt（COCO 预训练）仅支持 80 个通用类别，本 benchmark 仅评估
 4 个可映射的类别：plane→airplane, ship→boat, large-vehicle→truck, small-vehicle→car。
 其余 11 类在航拍场景中无 COCO 对应类，跳过评估。
 
@@ -11,18 +11,14 @@ GT: labels/*.txt → {name: coco_name, bbox: [x1,y1,x2,y2]}
 
 from __future__ import annotations
 
-import json
 import sys
-import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+from auto2dlabel.benchmarks import datetime, json, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (
     IOU_MATCH_THRESHOLD,
     OUTPUT_DIR,
@@ -165,7 +161,7 @@ def run_detection(
 
 def main():
     parser = build_parser("DOTA Aerial Detection Benchmark")
-    parser.set_defaults(model="yolov8x.pt")
+    parser.set_defaults(model="yolo26x.pt")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -191,6 +187,13 @@ def main():
     else:
         predictions = run_detection(gt, image_dir, args.model, args.conf, args.iou)
     print()
+
+    # 可视化（--viz：镜像相对路径渲染 bbox）
+    if args.viz:
+        from auto2dlabel.benchmarks.viz import visualize_dataset
+        visualize_dataset("dota", gt, predictions,
+                          lambda img_id, info: image_dir / info["file_name"])
+        print()
 
     # 评估
     print(f"计算指标（IoU@{IOU_MATCH_THRESHOLD}）...\n")

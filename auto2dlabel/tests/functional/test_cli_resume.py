@@ -5,16 +5,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
 from PIL import Image
 from typer.testing import CliRunner
 
-from auto2dlabel import cli
+from auto2dlabel import cli, cli_run
 from auto2dlabel.agent.state import AgentState
 from auto2dlabel.schema.annotation import Annotation, Bbox
+from auto2dlabel.tests import Path
 from auto2dlabel.tools.batch import STATUS_FAILED, STATUS_OK, load_manifest
 
 runner = CliRunner()
@@ -56,12 +56,12 @@ def cli_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, list
 
     calls: list[str] = []
     raised: set[str] = set()
-    monkeypatch.setattr(cli, "AgentOrchestrator",
+    monkeypatch.setattr(cli_run, "AgentOrchestrator",
                         lambda **kw: _FakeOrchestrator(calls, raised, **kw))
-    monkeypatch.setattr(cli, "create_client", lambda **kw: _FakeLLM())
+    monkeypatch.setattr(cli_run, "create_client", lambda **kw: _FakeLLM())
     monkeypatch.setattr("auto2dlabel.tools.log.log_llm_call", lambda **kw: None)
-    monkeypatch.setattr(cli, "_visualize_results", lambda *a, **kw: None)
-    monkeypatch.setattr(cli, "_triage_and_export", lambda *a, **kw: None)
+    monkeypatch.setattr(cli_run, "visualize_results", lambda *a, **kw: None)
+    monkeypatch.setattr(cli_run, "triage_and_export", lambda *a, **kw: None)
     return img_dir, calls, tmp_path
 
 

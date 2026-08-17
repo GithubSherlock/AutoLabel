@@ -14,16 +14,13 @@ GT: gt/gt.txt → frame, id, x, y, w, h, conf, class, visibility
 from __future__ import annotations
 
 import sys
-import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+from auto2dlabel.benchmarks import datetime, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (
     IOU_MATCH_THRESHOLD,
     OUTPUT_DIR,
@@ -187,7 +184,7 @@ def run_detection(
 
 def main():
     parser = build_parser("MOT Pedestrian Detection Benchmark (MOT17+MOT20)")
-    parser.set_defaults(model="yolov8x.pt")
+    parser.set_defaults(model="yolo26x.pt")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -222,6 +219,13 @@ def main():
     else:
         predictions = run_detection(gt, args.model, args.conf, args.iou)
     print()
+
+    # 可视化（--viz：镜像相对路径渲染 bbox，序列子目录保留）
+    if args.viz:
+        from auto2dlabel.benchmarks.viz import visualize_dataset
+        visualize_dataset("mot", gt, predictions,
+                          lambda img_id, info: datasets_root / info["file_name"])
+        print()
 
     # 评估
     print(f"计算指标（IoU@{IOU_MATCH_THRESHOLD}）...\n")

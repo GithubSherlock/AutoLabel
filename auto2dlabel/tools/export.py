@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from auto2dlabel.schema.annotation import Annotation
+from auto2dlabel.tools import Path
 from auto2dlabel.tools.base import Tool
 
 

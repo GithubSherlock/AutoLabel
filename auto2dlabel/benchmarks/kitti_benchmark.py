@@ -9,18 +9,14 @@ GT: training/label_2/*.txt → {name, bbox: [x1,y1,x2,y2]}
 
 from __future__ import annotations
 
-import json
 import sys
-import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+from auto2dlabel.benchmarks import datetime, json, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (
     IOU_MATCH_THRESHOLD,
     OUTPUT_DIR,
@@ -141,7 +137,7 @@ def run_detection(gt: dict[int, dict[str, Any]], image_dir: Path, model_name: st
 
 def main():
     parser = build_parser("KITTI object Detection Benchmark")
-    parser.set_defaults(model="yolov8x.pt")
+    parser.set_defaults(model="yolo26x.pt")
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -164,6 +160,13 @@ def main():
     # 检测
     predictions = run_detection(gt, image_dir, args.model, args.conf, args.iou)
     print()
+
+    # 可视化（--viz：镜像相对路径渲染 bbox）
+    if args.viz:
+        from auto2dlabel.benchmarks.viz import visualize_dataset
+        visualize_dataset("kitti", gt, predictions,
+                          lambda img_id, info: image_dir / info["file_name"])
+        print()
 
     # 评估
     print(f"计算指标（IoU@{IOU_MATCH_THRESHOLD}）...\n")

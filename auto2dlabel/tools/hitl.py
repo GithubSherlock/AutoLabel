@@ -8,11 +8,10 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
 from auto2dlabel.schema.annotation import Annotation, Bbox
+from auto2dlabel.tools import Path, json
 
 # 默认阈值（可在 CLI 中覆盖）
 DEFAULT_TAU_HIGH = 0.7

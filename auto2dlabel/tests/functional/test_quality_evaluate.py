@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
@@ -20,6 +19,7 @@ from auto2dlabel.models.detection import (
     detect_with_retry,
 )
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL
+from auto2dlabel.tests import json
 from auto2dlabel.tools.detection import DetectionTool
 from auto2dlabel.tools.registry import ToolRegistry
 
@@ -182,8 +182,9 @@ class TestDetectionToolRetry:
             calls.append(confidence_threshold)
             return sahi_results[len(calls) - 1]
 
+        # detect_image_sahi 顶层导入进 tools.detection 命名空间，patch 调用点所在模块
         monkeypatch.setattr(
-            "auto2dlabel.benchmarks.common.detect_image_sahi", fake_sahi
+            "auto2dlabel.tools.detection.detect_image_sahi", fake_sahi
         )
         tool = DetectionTool(model=MockModel(), use_sahi=True)
         boxes = tool.forward("a.png", ["car"], confidence_threshold=0.3)
@@ -256,15 +257,23 @@ class TestDefaultModelConsistency:
         assert model._model_name == DEFAULT_MODEL
 
     def test_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("DETECTION_MODEL", "yolov8n.pt")
+        monkeypatch.setenv("DETECTION_MODEL", "yolo12n.pt")
         model = create_detection_model(None)
         assert isinstance(model, UltralyticsModel)
-        assert model._model_name == "yolov8n.pt"
+        assert model._model_name == "yolo12n.pt"
 
     def test_planner_prompt_mentions_default(self) -> None:
         from auto2dlabel.agent import planner
 
         assert "yolo26x.pt" in planner._PLANNER_SYSTEM_PROMPT
+
+    def test_planner_prompt_catalog_summary(self) -> None:
+        """目录摘要已注入 planner prompt：含新模型、不含已移除的旧模型。"""
+        from auto2dlabel.agent import planner
+
+        assert "fcn_resnet50" in planner._PLANNER_SYSTEM_PROMPT
+        assert "yolo11n-obb.pt" in planner._PLANNER_SYSTEM_PROMPT
+        assert "yolov8n.pt" not in planner._PLANNER_SYSTEM_PROMPT
 
     def test_visualize_default(self) -> None:
         from auto2dlabel.tools.visualize import detect_and_visualize
