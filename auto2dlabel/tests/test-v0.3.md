@@ -145,6 +145,8 @@ Task1 旋转框标注（15 类全评），`rotate_iou`（shapely 四边形求交
 
 **最终结论（域边界定性）**：cityscapes 检测步失效不是模型规模（yolo26x）、尺度（SAHI）、置信度（0.5）、架构（rtdetr）任一单因素——是 **COCO 预训练模型在 30~50px 小目标域的定位极限**（框 IoU 到不了 0.5）。唯一出路是域微调权重；AutoLabel 的价值闭环恰好在这里：在通用域（COCO/VOC 可用）快速生成预标注 → 微调出域内权重 → 回采难域。分割侧升级路径 = 两段式换 box-prompted SAM2（cityscapes 上限 0.4657）。
 
+> **通俗解释（2026-08-18 确认记录）**：通用模型在 cityscapes 上失效 = **检测视角 + 训练数据分布**双重差异。模型只在 COCO 类日常照片上训练——目标是画面主体，大而清晰（几十到几百 px）；cityscapes 是车载摄像头视角，目标小而密集（30~50px、远距、互相遮挡）。规模/SAHI/架构均无效，说明这不是「能力不够」而是「没学过这类场景」；域内权重（在 cityscapes 上训练过）把 mAP 从 0.0082 拉到 0.5149（62.8×）即是最直接的证明。
+
 ### coco_seg 分割器消融（2026-08-17，含两段式与 prompt-conf）
 
 前提：全量 11 集中 coco_seg 0.4917 在 CPU/GPU 完全一致 + mot 反降调查证 yolo26x 检测步在通用域无问题 → 瓶颈应在分割链路。为此给 `coco_seg_benchmark.py` 加 `--box-prompted`（GT bbox 直接 prompt，隔离分割器）与 `--prompt-conf`（两段式 prompt 过滤阈值），实测：
@@ -241,6 +243,19 @@ mAP 完全一致；`resolve_batch_params` 实测档位打印 `批量推理: batc
 - coco_seg 两段式 sam2_l（--batch 2，4 图）：检测步批量生效、分割步逐图，mAP 0.7500，无降级
 - coco_seg maskrcnn generate_batch（--batch 4，4 图）：0.0889（模型固有水平，批量路径跑通）
 - chat 冒烟：单图 → batch=1；4 图目录 → 实测 batch_size=64 num_workers=4
+
+## 待 GPU 复测清单（2026-08-18，CPU 环境整理，GPU 可用后执行）
+
+原「留 GPU」标记闭环核查：① 大模型精度对比（§CPU 可行性验证）→ ✅ GPU 复测全量 11 集；② GPU 修正方向（§cityscapes 消融）→ ✅ GPU 矩阵 + SAHI 扩展；③ OBB 458 全量（§DOTA OBB）→ ✅ 0.6161。以下为尚未闭环项：
+
+| # | 待测项 | 原因 | 验收 |
+| --- | --- | --- | --- |
+| 1 | cityscapes 消融矩阵按修复后 GT 重跑 | 消融表（0.0008/0.1010/0.4657/0.0077）均系坏 GT（`% 1000`）下测得，仅定性参考；GT 修复后只重测了域内权重全量 | `run_cityscapes_ablation.sh` 重跑，矩阵数字更新（定性结论「唯一出路域微调」预期不变） |
+| 2 | 零样本分类路（CLIP/SigLIP）实测 | 权重未下载，协议已固定但该路从未跑过 | 下载 `weights/hf` 权重 → imagenet100 100 类空间 top-1/top-5 成行（与监督路不可横向比较） |
+| 3 | SAM3 box-prompt 语义补齐后重测 | 现封装 bboxes 仅取 label 作文本 prompt（实为文本检测），box-prompted sam3 0.0175 不代表真实上限 | `segmentation.py` SAM3 封装补 box prompt → 重测 cityscapes box-prompted sam3 行（对照 SAM2 0.4657） |
+| 4 | 11 benchmark 批量接入全量验证 | 批量接入后仅实测 coco 100 图（1.84×）；其余 10 集全量批量吞吐/parity 未跑 | `run_gpu_all.sh` 全量（默认自动实测档位）：各集 mAP 与逐图基线一致 + 吞吐提升 |
+| 5 | nuimages 新默认链路重测 | 0.3469 为旧链路（FastSAM）；新默认 sam2_l + prompt-conf 0.3 仅实测 coco_seg（0.6368） | nuimages 两段式新默认重测；预期检测步域差距仍在（与 cityscapes 同构） |
+| 6 | imagenet100 GPU top-1 下降调查（低优先级） | 74.0 vs CPU 78.0 未深究，同权重跨设备不应差 4pp | 排查 GPU 版 torch resize/预处理差异；结论记入本文 |
 
 ## 评测协议注记
 
