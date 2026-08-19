@@ -83,13 +83,20 @@ def display_results(state: AgentState) -> None:
         table.add_column("Label", style="cyan")
         table.add_column("Bbox [x,y,w,h]", style="green")
         table.add_column("Confidence", style="yellow")
+        has_track = any(b.track_id is not None for b in ann.bboxes)
+        if has_track:
+            table.add_column("Track", style="magenta")
         table.add_column("Status", style="red")
 
         for i, bbox in enumerate(ann.bboxes, 1):
             bbox_str = f"[{bbox.x:.0f}, {bbox.y:.0f}, {bbox.width:.0f}, {bbox.height:.0f}]"
             conf_str = f"{bbox.confidence:.2%}"
             status = "⚠ REVIEW" if i - 1 in ann.review_flags else "✓"
-            table.add_row(str(i), bbox.label, bbox_str, conf_str, status)
+            row = [str(i), bbox.label, bbox_str, conf_str]
+            if has_track:
+                row.append(str(bbox.track_id) if bbox.track_id is not None else "-")
+            row.append(status)
+            table.add_row(*row)
 
         console.print(table)
 

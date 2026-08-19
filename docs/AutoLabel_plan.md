@@ -57,7 +57,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 | **v0.1** | 目标检测（3 引擎 × 29 模型）+ 实例分割（SAM2/SAM3/FastSAM/Mask R-CNN）+ 类别自动推荐 + Web 基础审核 + 9 数据集 Benchmark | ✅ 完成 |
 | **v0.2** | 实例分割（SAM3）+ 类别推荐 + Web 审核（记录见 `auto2dlabel/milestone/v0.2.md`） | ✅ 完成 |
 | **v0.3** | Image Classification（CLIP/SigLIP + torchvision 14 款）+ OBB（YOLO-OBB）+ M2/M3 闭环补全 | ✅ 完成 |
-| **v0.4** | + 3D 基石（Tracking 视频时序 ID + KITTI 域 2D 质量 + Agentic 骨架收尾） | 📋 规划（里程碑见 `auto2dlabel/milestone/v0.4.md`） |
+| **v0.4** | + 3D 基石（Tracking 视频时序 ID + KITTI 域 2D 质量 + Agentic 骨架收尾） | 🔄 进行中：Phase 1 Tracking ✅（2026-08-19，见 `auto2dlabel/milestone/v0.4.md` 与 `auto2dlabel/tests/test-v0.4.md`） |
 | **v0.5** | + Pose Estimation 等非 3D 内容（3D 使命完成后殿后） | 📋 规划 |
 
 > 编号注记：早期路线表曾把「分类+OBB」标为 v0.2，实现时后移为 v0.3（v0.2 编号已被分割里程碑文件占用，不重命名现有文件）。
@@ -78,7 +78,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 
 | 项 | 状态 |
 | --- | --- |
-| **Auto2dLabel** | v0.1–v0.3 ✅：检测 + 分割 + 分类（CLIP/SigLIP + torchvision 14 款）+ OBB（YOLO-OBB）+ Web 闭环 + Agentic 闭环，**84 个模型**（含 cityscapes 域内 Mask R-CNN，全量 500 图 mAP 0.5149），11 数据集 Benchmark（含 DOTA OBB 旋转框；CPU 可行性 + GPU 复测均完成，见 `auto2dlabel/tests/test-v0.3.md`） |
+| **Auto2dLabel** | v0.1–v0.3 ✅：检测 + 分割 + 分类（CLIP/SigLIP + torchvision 14 款）+ OBB（YOLO-OBB）+ Web 闭环 + Agentic 闭环，**84 个模型**（含 cityscapes 域内 Mask R-CNN，全量 500 图 mAP 0.5149），11 数据集 Benchmark（含 DOTA OBB 旋转框；CPU 可行性 + GPU 复测均完成，见 `auto2dlabel/tests/test-v0.3.md`）；**v0.4 Phase 1 Tracking ✅**（ByteTrack：`run --track` + MOT 导出 + MOTA/IDF1 评测，2026-08-19，见 `tests/test-v0.4.md`） |
 | **质量门** | pyright 0 / mypy 166 / ruff 153 / pytest 212 passed（每版本硬性门槛，命令与标准见 `Benchmark_plan.md` §10.6） |
 | **代码托管** | GitHub `GithubSherlock/AutoLabel`（private），权重与 `.env` 不入库 |
 | **Auto3dLabel** | 调研 ✅，路线定案（2D → 3D 提升）；**2026-08-19 战略调整：主推进**——v0.1 单帧 MVP 里程碑已定义（`auto3dlabel/milestone/v0.1.md`），KITTI object 数据已就位，与 Auto2dLabel v0.4 双线并行 |
@@ -104,7 +104,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 | 优先级 | 事项 | 内容 |
 | --- | --- | --- |
 | 1 | **Auto3dLabel v0.1 单帧 3D MVP**（主推进） | 路线 2：复用 G-DINO + SAM2 → mask 反投影语义点云 → DBSCAN 聚类 → 3D bbox 拟合 → KITTI 导出 + 3D IoU 冒烟评测（里程碑与验收见 `auto3dlabel/milestone/v0.1.md`，选型速查与红线见 `auto3dlabel/CLAUDE.md`）。KITTI object 数据已就位：`Documents/datasets/KITTI/object`（2026-08-19 从 `/autodl-pub/data/KITTI/object` 补齐 velodyne/calib/image_2 全量） |
-| 1' | **Auto2dLabel v0.4 3D 基石版**（双线并行） | Tracking（ByteTrack/BoT-SORT，视频时序 ID——3D v0.2 多帧的跟踪 ID + 运动属性依赖）+ KITTI 域 2D 检测质量（benchmark 接入 + 域内微调权重）+ AgentState from_dict 收尾（里程碑见 `auto2dlabel/milestone/v0.4.md`） |
+| 1' | **Auto2dLabel v0.4 3D 基石版**（双线并行） | Tracking（ByteTrack，视频时序 ID——3D v0.2 多帧的跟踪 ID + 运动属性依赖；**Phase 1 ✅ 2026-08-19**）+ KITTI 域 2D 检测质量（benchmark 接入 + 域内微调权重）+ AgentState from_dict 收尾（里程碑见 `auto2dlabel/milestone/v0.4.md`） |
 | 2 | **Auto3dLabel v0.2 多帧** | 跟踪 ID + 运动属性（速度/加速度），依赖 2D v0.4 Tracking 交付 |
 | 3 | 已知缺口消化 | mot 域微调权重（cityscapes ✅ 已闭环 0.5149，时机与域内数据同步）、分类数据集扩展（ImageNet100 已闭环，ILSVRC2012 val 见 `Benchmark_plan.md`）、Web bbox 拖拽/标签编辑、分类与 OBB 的 Web 展示（部分随 v0.4 Phase 3 消化） |
 

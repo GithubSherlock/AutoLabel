@@ -4,6 +4,7 @@ Usage:
     auto2dlabel run image.jpg "detect all cars and pedestrians"
     auto2dlabel run image.jpg "detect all cars" --threshold 0.5 --export coco
     auto2dlabel run ./images/ "detect cars, bikes, people" --batch --export yolo
+    auto2dlabel run video.mp4 "检测行人" --track
 """
 
 from __future__ import annotations
@@ -50,6 +51,23 @@ def run(
     base_url: str = typer.Option(None, "--base-url", help="LLM API base URL"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="详细日志输出"),
     sahi: bool = typer.Option(False, "--sahi", help="启用 SAHI 切片推理（大分辨率图像）"),
+    track: bool = typer.Option(
+        False, "--track",
+        help="跟踪模式：视频/帧目录逐帧检测 + ByteTrack ID 维持 + MOT 导出",
+    ),
+    llm: bool = typer.Option(
+        False, "--llm",
+        help="跟踪模式下启用 LLM 一次性指令解析（复杂指令；失败自动回退代码级解析）",
+    ),
+    bot_sort: bool = typer.Option(
+        False, "--bot-sort",
+        help="跟踪模式精度档：BoT-SORT（ReID 外观关联 + ECC 相机运动补偿）",
+    ),
+    reid_model: str = typer.Option(
+        "openai/clip-vit-base-patch32",
+        "--reid-model",
+        help="BoT-SORT ReID 特征模型（clip 或 siglip，见 model_catalog.REID_MODELS）",
+    ),
 ) -> None:
     """对图像运行 Agentic 标注。"""
     run_command(
@@ -68,6 +86,10 @@ def run(
         base_url=base_url,
         verbose=verbose,
         sahi=sahi,
+        track=track,
+        use_llm=llm,
+        bot_sort=bot_sort,
+        reid_model=reid_model,
     )
 
 

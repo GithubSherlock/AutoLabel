@@ -63,7 +63,7 @@ def build_coco_dict(annotations: list[Annotation]) -> dict[str, Any]:
         # Bbox annotations
         for bbox in ann.bboxes:
             cat_id = category_name_to_id[bbox.label]
-            coco_ann = {
+            coco_ann: dict[str, Any] = {
                 "id": next_ann_id,
                 "image_id": image_id,
                 "category_id": cat_id,
@@ -72,6 +72,8 @@ def build_coco_dict(annotations: list[Annotation]) -> dict[str, Any]:
                 "iscrowd": 0,
                 "score": bbox.confidence,
             }
+            if bbox.track_id is not None:
+                coco_ann["track_id"] = bbox.track_id
             coco["annotations"].append(coco_ann)
             next_ann_id += 1
 
@@ -88,6 +90,8 @@ def build_coco_dict(annotations: list[Annotation]) -> dict[str, Any]:
                 "segmentation": mask.segmentation,
                 "score": mask.bbox.confidence,
             }
+            if mask.bbox.track_id is not None:
+                coco_ann["track_id"] = mask.bbox.track_id
             coco["annotations"].append(coco_ann)
             next_ann_id += 1
 

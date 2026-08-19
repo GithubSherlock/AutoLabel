@@ -13,6 +13,7 @@ from auto2dlabel.models import Image, os
 from auto2dlabel.models.detection import _match_prompt
 from auto2dlabel.models.model_catalog import TORCHVISION_CLS_MODELS, WEIGHTS_DIR
 from auto2dlabel.schema.annotation import ImageLabel
+from auto2dlabel.tools.device import get_device
 
 
 class ClassificationModel(Protocol):
@@ -326,6 +327,3 @@ def create_classification_model(
         f"无法识别的分类模型: '{model_name}'。\n"
         f"可用: {', '.join(all_models)}"
     )
-
-
-from auto2dlabel.tools.device import get_device  # noqa: E402

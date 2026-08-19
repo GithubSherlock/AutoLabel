@@ -26,17 +26,10 @@ from auto2dlabel.schema.task_plan import DEFAULT_MODEL
 from auto2dlabel.tests import Path
 from auto2dlabel.tools.export import ExportTool
 from auto2dlabel.tools.log import log_python_api_call
+from auto2dlabel.tools.prompts import extract_prompts
 from auto2dlabel.tools.visualize import visualize_annotation
 
 console = Console()
-
-# 与 AgentOrchestrator 共用同一份中→英关键词映射表
-CN_EN_MAP = {
-    "行人": "person", "人": "person", "汽车": "car", "车": "car",
-    "自行车": "bicycle", "单车": "bicycle", "摩托车": "motorcycle",
-    "公交车": "bus", "卡车": "truck", "狗": "dog", "猫": "cat",
-    "红绿灯": "traffic light", "交通灯": "traffic light",
-}
 
 
 @dataclass
@@ -51,21 +44,6 @@ class NoLlmResult:
     vis_path: Path | None = None
     elapsed: float = 0.0
     quality: QualityReport | None = None
-
-
-def extract_prompts(instruction: str) -> list[str]:
-    """从用户指令中提取英文 prompts（与 orchestrator 的 hint 映射一致）。
-
-    Raises:
-        ValueError: 指令中不含任何映射关键词。
-    """
-    prompts: list[str] = []
-    for cn, en in CN_EN_MAP.items():
-        if cn in instruction and en not in prompts:
-            prompts.append(en)
-    if not prompts:
-        raise ValueError("无法从指令中提取关键词。请直接使用英文 prompt。")
-    return prompts
 
 
 def run_no_llm_baseline(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import cv2
 import numpy as np
 
@@ -82,6 +84,8 @@ def draw_bboxes(
             parts.append(bbox.label)
         if show_conf:
             parts.append(f"{bbox.confidence:.0%}")
+        if bbox.track_id is not None:
+            parts.append(f"ID:{bbox.track_id}")
 
         if parts:
             label_text = " ".join(parts)
@@ -107,6 +111,38 @@ def draw_bboxes(
                 cv2.LINE_AA,
             )
 
+    return img
+
+
+def draw_trajectories(
+    image: np.ndarray[Any, Any],
+    trajectories: dict[int, list[tuple[float, float]]],
+    line_thickness: int = 2,
+) -> np.ndarray[Any, Any]:
+    """绘制跟踪轨迹线（各轨迹中心点折线，颜色按 track_id 稳定哈希）。
+
+    Args:
+        image: BGR 格式的 numpy 数组 (H, W, 3)。
+        trajectories: {track_id: [(cx, cy), ...]} 帧序中心点。
+        line_thickness: 线宽。
+
+    Returns:
+        绘制后的图像（BGR）。
+    """
+    img = image.copy()
+    for track_id, centers in trajectories.items():
+        if len(centers) < 2:
+            continue
+        import colorsys
+        import hashlib
+
+        h = int(hashlib.md5(str(track_id).encode()).hexdigest(), 16) % 360
+        r, g, b = colorsys.hsv_to_rgb(h / 360, 0.7, 0.9)
+        color = (int(b * 255), int(g * 255), int(r * 255))
+        pts = np.array(
+            [[round(cx), round(cy)] for cx, cy in centers], dtype=np.int32
+        ).reshape(-1, 1, 2)
+        cv2.polylines(img, [pts], isClosed=False, color=color, thickness=line_thickness)
     return img
 
 
@@ -145,6 +181,7 @@ def visualize_annotation(
     annotation: Annotation,
     output_path: Path,
     draw_mask: bool = True,
+    trajectories: dict[int, list[tuple[float, float]]] | None = None,
 ) -> Path:
     """可视化一个标注结果并保存。
 
@@ -153,6 +190,7 @@ def visualize_annotation(
         annotation: 标注数据。
         output_path: 输出路径。
         draw_mask: 是否绘制 mask。
+        trajectories: 跟踪轨迹（{track_id: [(cx, cy), ...]}），非 None 时先绘制轨迹线。
 
     Returns:
         输出文件路径。
@@ -163,6 +201,9 @@ def visualize_annotation(
 
     if annotation.masks and draw_mask:
         image = draw_masks(image, annotation.masks)
+
+    if trajectories:
+        image = draw_trajectories(image, trajectories)
 
     if annotation.bboxes:
         image = draw_bboxes(image, annotation.bboxes)

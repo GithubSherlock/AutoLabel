@@ -5,6 +5,8 @@
 OBB（YOLO-OBB）。
 """
 
+from pathlib import Path
+
 # ============================================================
 # Grounding DINO（HuggingFace transformers，开放词汇）
 # ============================================================
@@ -109,7 +111,9 @@ SEGMENTATION_MODELS = [
     # FastSAM
     "FastSAM-s.pt", "FastSAM-x.pt",
     # SAM / SAM2 (Ultralytics)
-    "sam_t.pt", "sam_s.pt", "sam_b.pt", "sam_l.pt", "sam2_t.pt", "sam2_s.pt", "sam2_b.pt", "sam2_l.pt", "sam2.1_t.pt", "sam2.1_s.pt", "sam2.1_b.pt", "sam2.1_l.pt",
+    "sam_t.pt", "sam_s.pt", "sam_b.pt", "sam_l.pt",
+    "sam2_t.pt", "sam2_s.pt", "sam2_b.pt", "sam2_l.pt",
+    "sam2.1_t.pt", "sam2.1_s.pt", "sam2.1_b.pt", "sam2.1_l.pt",
     # Mask R-CNN
     "maskrcnn_resnet50_fpn",
     "maskrcnn_resnet50_fpn_v2",
@@ -127,6 +131,15 @@ SEGMENTATION_MODELS = [
 # 分类模型（HuggingFace transformers，零样本）
 # ============================================================
 CLASSIFICATION_MODELS = [
+    "openai/clip-vit-base-patch32",
+    "google/siglip-base-patch16-224",
+]
+
+# ============================================================
+# ReID 特征提取模型（HuggingFace transformers 图像编码器，
+# BoT-SORT 外观关联用；与分类共用同一批 CLIP/SigLIP 权重）
+# ============================================================
+REID_MODELS = [
     "openai/clip-vit-base-patch32",
     "google/siglip-base-patch16-224",
 ]
@@ -165,7 +178,6 @@ ULTRALYTICS_OBB_MODELS = [
 # ============================================================
 # 权重下载目录
 # ============================================================
-from pathlib import Path
 WEIGHTS_DIR = Path(__file__).resolve().parent.parent / "weights"
 WEIGHTS_DIR.mkdir(exist_ok=True)
 
@@ -184,6 +196,8 @@ _CATALOG_SUMMARY_GROUPS: list[tuple[str, list[str], str]] = [
     ("classification [零样本]", CLASSIFICATION_MODELS, "多候选 softmax top-K"),
     ("classification [ImageNet1K, torchvision]", TORCHVISION_CLS_MODELS,
      "监督 top-K，candidates 子串过滤；resnet50 通用之选"),
+    ("reid [图像嵌入, 零样本]", REID_MODELS,
+     "BoT-SORT 外观关联特征（--track --bot-sort）"),
 ]
 
 

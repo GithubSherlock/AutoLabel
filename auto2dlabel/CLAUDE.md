@@ -38,7 +38,7 @@
 | 图像分类 | torchvision 14 款（convnext_large 等 6 款 + resnet18/34/50/101/152、resnext50_32x4d/101_32x8d/101_64x4d，ImageNet1K 监督 top-K） | TORCH_HOME 自动下载；candidates 子串过滤，**候选须英文**（无多语言能力，中文候选建议用 CLIP）；resnet50 通用之选 |
 | OBB 旋转框 | yolo11/12/26 n/s/m/l/x-obb.pt | 仅 YOLO-OBB；Oriented R-CNN 延后（mmrotate 依赖重） |
 
-姿态：ViTPose / RTMPose（v0.4 规划）· 跟踪：ByteTrack / BoT-SORT（v1.0 规划）
+姿态：ViTPose / RTMPose（v0.5 规划）· 跟踪：ByteTrack 默认（v0.4，纯后处理零模型依赖）+ BoT-SORT 精度档（`--bot-sort`，ReID 外观关联 CLIP/SigLIP + ECC 相机运动补偿，权重进 weights/hf/）
 
 ### CLI 速查
 
@@ -49,6 +49,9 @@ auto2dlabel chat "分类为猫和狗，用 clip" --no-wait        # CLIP/SigLIP 
 auto2dlabel chat "分类为 cat 和 dog，用 convnext_large" --no-wait  # torchvision 监督分类（候选须英文）
 auto2dlabel chat "检测旋转框，用 yolo11n-obb.pt" --no-wait  # OBB → dota/yolo_obb 导出
 auto2dlabel chat "检测 /data/images 中的汽车" --batch-size 8 --num-workers 4  # 批量推理（未指定时交互询问，仍无则模型加载后自动实测最大 batch）
+auto2dlabel run video.mp4 "检测行人" --track          # 跟踪模式：视频/帧目录逐帧检测 + ByteTrack ID + MOT 导出 + 轨迹可视化
+auto2dlabel run video.mp4 "检测行人" --track --bot-sort --reid-model google/siglip-base-patch16-224  # 精度档：ReID 外观关联 + ECC（密集场景降 IDSW）
+auto2dlabel run video.mp4 "跟踪穿红衣服的人" --track --llm     # 复杂指令：序列级一次性 LLM 解析（失败回退代码级）
 ```
 
 
@@ -68,3 +71,9 @@ auto2dlabel chat "检测 /data/images 中的汽车" --batch-size 8 --num-workers
 - **批量推理超参**：`batch_size`/`num_workers` 四档来源——CLI 显式 > chat 交互询问（非法重问 ≤3 次）> 执行阶段动态实测（模型加载后 `tools/device.measure_single_image_memory` 增量法测单图峰值显存 → 空闲显存×0.85÷单图峰值=最大 batch，`resolve_batch_params` 统一入口）> 规划阶段静态表（`recommend_batch_params`，LLM prompt 注入与代码兜底同源，4090 档 det/obb 8 / seg 4 / cls 16）；num_workers 按 CPU 核数 `min(4, cores//4)`（DataLoader 是 CPU 资源，与显存无关）；`cli_execute`/benchmark 按 `hasattr` 分派 `*_batch`（ultralytics/torchvision/CLIP 原生 batch，SAM 系列逐图回退；批量 OOM 时降级逐图 + empty_cache）；单图协议（`detect`/`generate`/`classify`）签名冻结；benchmark 脚本 `--batch`/`--workers` 默认 None=自动实测（1=逐图）。
 - **批量 parity 两条铁律（2026-08-18 实测根因，违反即批量结果≠逐图）**：① 所有 ultralytics 推理调用必须显式 `rect=False`（ultralytics predict 默认 `rect=True`，单图走矩形 letterbox、批量混合尺寸自动退化正方形 letterbox，两种预处理不同结果不同——曾致 dota_obb 批量 110+/图 差异）；② 推理入口必须关闭 TF32（`tools/device.disable_tf32`，挂在 `resolve_batch_params` 与 `print_device`；TF32 下 batch=1 与 batch>1 走不同 cudnn kernel，经 200 层 + 角度 argmax 放大后曾致 OBB 批量 20+ 框差异）。两者修复后 dota_obb 批量/逐图 mAP 完全一致（0.8397）。
 - **测试位置**：测试在 `auto2dlabel/tests/`（`pytest auto2dlabel/tests/`）——`functional/` pytest 用例、`helpers/` 测试工具（no-LLM baseline / benchmark runner）、`data/` 样例图；实测数据文档（`test-v0.1.md` / `test-v0.2.md`）同目录保留。测试代码不进 cli.py。
+- **Bbox.track_id 语义（v0.4）**：`id` 是 annotation 内索引（orchestrator review_flags / labelme group_id / Web bbox_index 引用，勿混用）；跟踪 ID 用独立字段 `track_id`（None=未跟踪）。穿透点六处：`to_dict` / `state._annotation_from_dict` / `export._make_bbox` / `export.coco.build_coco_dict`（从 Bbox 对象直构 dict 绕过 to_dict，曾静默丢 track_id）/ `visualize.draw_bboxes` / `cli_common.display_results`，新增形态勿漏。
+- **跟踪评测口径（v0.4 红线）**：MOT 评测必须同时报 MOTA/IDF1 与检测 recall/IDSW（统一走 `benchmarks/track_eval.py`）——recall 低是检测的锅、IDSW 高才是跟踪的锅；`mot_tracking_benchmark.py` 走完整检测→ByteTrack 管线，帧采样用连续窗口（跟踪需时序连续性，不能均匀采样）。
+- **prompts 单一事实源（v0.4）**：`CN_EN_MAP`/`extract_prompts` 只在 `tools/prompts.py`；orchestrator / no-LLM baseline / cli_track 均引用（曾三副本发散，勿再复制）。
+- **ReID 特征只存 Tracklet 不进 Bbox（v0.4 BoT-SORT）**：`Tracklet.feature` + `update_feature`（EMA + L2 重归一化）；Bbox 无 embedding 字段——track_id 六处穿透点之外不再加特征穿透点；特征逐帧按索引对齐经 `update(bboxes, image, features)` 注入（预提取，跟踪算法本体零权重依赖，tracker 单测可注入合成特征）。
+- **BoT-SORT 对比同序列同窗口同 conf（v0.4 红线）**：MOTA/IDF1/IDSW 对比必须同一序列、同一帧窗口、同一 conf（`mot_tracking_benchmark.py --bot-sort` 与基线 ByteTrack 参数一致），且同时报检测 recall/precision——BoT-SORT 默认 track_high_thresh 0.6 / new_track_thresh 0.7（ByteTracker 仍 0.5/0.5），换 tracker 即换口径，勿混比。
+- **ReID 单测零真实权重（v0.4 铁律）**：test_reid_model.py / test_bot_sort.py 只用 FakeReIDModel（duck typing ReIDModel Protocol）注入合成特征，不构造 CLIP/SigLIP 实例；CLIP/SigLIP 构造零加载（`_load()` 幂等 + HF_HOME=weights/hf + ImportError 守卫）。

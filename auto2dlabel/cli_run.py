@@ -36,9 +36,39 @@ def run_command(
     base_url: str,
     verbose: bool,
     sahi: bool,
+    track: bool = False,
+    use_llm: bool = False,
+    bot_sort: bool = False,
+    reid_model: str = "openai/clip-vit-base-patch32",
 ) -> None:
     """`run` 命令实现：续跑/新建清单 → 逐图编排 → 导出/可视化/HITL 分流。"""
     setup_logging(verbose)
+
+    # ---- 跟踪模式：帧序列检测 + ByteTrack ID 维持 + MOT 导出（--llm 仅一次性规划） ----
+    if track:
+        if resume:
+            console.print("[yellow]跟踪模式不支持 --resume（帧序列可整段重跑）[/yellow]")
+        from auto2dlabel.cli_track import run_tracking
+
+        run_tracking(
+            source=image,
+            instruction=instruction,
+            threshold=threshold,
+            iou=iou,
+            export=export,
+            output=output,
+            det_model=det_model,
+            sahi=sahi,
+            verbose=verbose,
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            use_llm=use_llm,
+            use_bot_sort=bot_sort,
+            reid_model_name=reid_model,
+        )
+        return
 
     # ---- 续跑模式：清单为单一事实源（图像列表/指令/参数均从清单读取） ----
     if resume:

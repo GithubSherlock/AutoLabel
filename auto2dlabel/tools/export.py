@@ -104,6 +104,7 @@ class ExportTool(Tool):
         from auto2dlabel.export.coco import export_coco
         from auto2dlabel.export.dota import export_dota
         from auto2dlabel.export.labelme import export_labelme
+        from auto2dlabel.export.mot import export_mot
         from auto2dlabel.export.voc import export_voc
         from auto2dlabel.export.yolo import export_yolo, export_yolo_obb
 
@@ -112,6 +113,7 @@ class ExportTool(Tool):
             "cls": export_cls,
             "dota": export_dota,
             "labelme": export_labelme,
+            "mot": export_mot,
             "yolo": export_yolo,
             "yolo_obb": export_yolo_obb,
             "voc": export_voc,
@@ -132,6 +134,7 @@ class ExportTool(Tool):
             label=d.get("label", ""),
             confidence=d.get("confidence", 1.0),
             angle=d.get("angle", 0.0),
+            track_id=d.get("track_id"),
         )
 
     @staticmethod

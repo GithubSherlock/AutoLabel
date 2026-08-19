@@ -142,13 +142,11 @@ class AgentOrchestrator:
         # 构建初始消息
         state.add_message("system", state.system_prompt)
 
-        # 中→英关键词映射，确保 LLM 不遗漏
-        _cn_map = {"行人": "person", "人": "person", "汽车": "car", "车": "car",
-                    "自行车": "bicycle", "单车": "bicycle", "摩托车": "motorcycle",
-                    "公交车": "bus", "卡车": "truck", "狗": "dog", "猫": "cat",
-                    "红绿灯": "traffic light", "交通灯": "traffic light"}
+        # 中→英关键词映射，确保 LLM 不遗漏（单一事实源 tools.prompts.CN_EN_MAP）
+        from auto2dlabel.tools.prompts import CN_EN_MAP
+
         _hints = []
-        for cn, en in _cn_map.items():
+        for cn, en in CN_EN_MAP.items():
             if cn in instruction:
                 _hints.append(f"{cn}={en}")
         hint_text = ("\nKeyword hints: " + ", ".join(_hints)) if _hints else ""

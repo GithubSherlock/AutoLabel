@@ -125,6 +125,7 @@ def _annotation_from_dict(d: dict[str, Any]) -> Annotation:
             label=b.get("label", ""),
             confidence=b.get("confidence", 1.0),
             angle=b.get("angle", 0.0),
+            track_id=b.get("track_id"),
         )
         for b in d.get("bboxes", [])
     ]
@@ -136,6 +137,7 @@ def _annotation_from_dict(d: dict[str, Any]) -> Annotation:
                 label=m["bbox"].get("label", ""),
                 confidence=m["bbox"].get("confidence", 1.0),
                 angle=m["bbox"].get("angle", 0.0),
+                track_id=m["bbox"].get("track_id"),
             ),
             segmentation=m.get("segmentation", []),
             area=m.get("area", 0.0),

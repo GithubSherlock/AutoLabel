@@ -144,7 +144,7 @@
 | **ADEChallengeData2016** | ⚠️ 部分可用 | 语义分割（150 类），无实例级 mask |
 | **ImageNet / ImageNet100** | ❌ 不适用 | 仅分类标签，无检测/分割标注 |
 | **cifar-10 / cifar-100** | ❌ 不适用 | 仅分类标签，32×32 小图不适合标注 |
-| **MOT20 / mot17** | ❌ 不适用 | 多目标跟踪，auto2dlabel 不支持跟踪 |
+| **MOT20 / mot17** | ✅ 直接可用 | 多目标跟踪（v0.4：ByteTrack `run --track` + `mot_tracking_benchmark`） |
 | **GOT10k / LaSOT** | ❌ 不适用 | 单目标跟踪，auto2dlabel 不支持跟踪 |
 | **Vimeo-90k** | ❌ 不适用 | 视频超分/插帧，非标注任务 |
 | **DIV2K** | ❌ 不适用 | 图像超分辨率，非标注任务 |
@@ -171,7 +171,8 @@
 | **D2SA / CelebA / CUB200** | ❌ 不适用 | 纯 2D 图像 |
 | **ADEChallengeData2016** | ❌ 不适用 | 纯 2D 语义分割，无 3D 数据 |
 | **ImageNet / CIFAR** | ❌ 不适用 | 纯 2D 分类 |
-| **MOT / GOT / LaSOT** | ❌ 不适用 | 2D 跟踪任务 |
+| **MOT** | ✅ 可用（Auto2dLabel v0.4） | 多目标跟踪评测（检测 + ID 维持） |
+| **GOT / LaSOT** | ❌ 不适用 | 单目标跟踪 |
 | **Vimeo-90k / DIV2K** | ❌ 不适用 | 超分任务 |
 | **BERT-Pretrain-Model** | ❌ 不适用 | NLP 模型权重 |
 

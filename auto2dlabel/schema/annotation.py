@@ -6,9 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
-
-import numpy as np
+from typing import Any
 
 
 @dataclass
@@ -21,8 +19,9 @@ class Bbox:
     height: float
     label: str
     confidence: float = 1.0
-    id: Optional[int] = None
+    id: int | None = None
     angle: float = 0.0  # 旋转角度（弧度），width 轴相对 x 轴，(-π/2, π/2]；HBB 恒为 0
+    track_id: int | None = None  # 跟踪 ID（ByteTrack 关联；None=未跟踪）
 
     @property
     def xyxy(self) -> tuple[float, float, float, float]:
@@ -53,6 +52,8 @@ class Bbox:
         }
         if self.id is not None:
             d["id"] = self.id
+        if self.track_id is not None:
+            d["track_id"] = self.track_id
         return d
 
 
@@ -98,7 +99,7 @@ class Annotation:
     """
 
     image_path: str
-    image_id: Optional[int] = None
+    image_id: int | None = None
     image_size: tuple[int, int] = (0, 0)  # (width, height)
     bboxes: list[Bbox] = field(default_factory=list)
     masks: list[Mask] = field(default_factory=list)

@@ -17,10 +17,8 @@ from auto2dlabel.tests.helpers.benchmark_runner import (
     execute_benchmark,
     is_benchmark_intent,
 )
-from auto2dlabel.tests.helpers.no_llm_baseline import (
-    extract_prompts,
-    run_no_llm_baseline,
-)
+from auto2dlabel.tests.helpers.no_llm_baseline import run_no_llm_baseline
+from auto2dlabel.tools.prompts import extract_prompts
 
 _WEIGHTS_DIR = Path(__file__).resolve().parents[2] / "weights"
 _DET_WEIGHT = _WEIGHTS_DIR / "yolo26x.pt"
