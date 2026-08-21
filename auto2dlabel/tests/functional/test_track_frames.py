@@ -1,4 +1,4 @@
-"""cli_track.collect_frames 测试 —— 视频抽帧 / 帧目录收集 / 幂等重跑。
+"""tools.tracking.collect_frames 测试 —— 视频抽帧 / 帧目录收集 / 幂等重跑。
 
 视频合成用 MJPG+AVI（OpenCV 自带编码器，无 FFmpeg 依赖）。
 """
@@ -9,8 +9,8 @@ import tempfile
 
 import cv2
 
-from auto2dlabel.cli_track import collect_frames
 from auto2dlabel.tests import Path, np
+from auto2dlabel.tools.tracking import collect_frames
 
 
 def _make_video(path: Path, num_frames: int = 5) -> Path:

@@ -28,8 +28,7 @@ from auto2dlabel.schema.annotation import Bbox
 
 
 def _det(x: float, y: float, conf: float = 0.9) -> Bbox:
-    return Bbox(x=x, y=y, width=20.0, height=30.0,
-                label="person", confidence=conf)
+    return Bbox(x=x, y=y, width=20.0, height=30.0, label="person", confidence=conf)
 
 
 class FakeReIDModel:
@@ -39,23 +38,25 @@ class FakeReIDModel:
         self.calls: list[int] = []
 
     def extract(
-        self, images: Sequence[Image.Image],
+        self,
+        images: Sequence[Image.Image],
     ) -> list[np.ndarray[Any, Any]]:
         self.calls.append(len(images))
-        return [np.full(4, float(len(self.calls)) * 100 + i, dtype=np.float32)
-                for i in range(len(images))]
+        return [
+            np.full(4, float(len(self.calls)) * 100 + i, dtype=np.float32)
+            for i in range(len(images))
+        ]
 
 
 # ============================================================
 # 工厂与懒加载
 # ============================================================
 
+
 def test_create_reid_model_dispatch() -> None:
     assert isinstance(create_reid_model("openai/clip-vit-base-patch32"), ClipReIDModel)
-    assert isinstance(create_reid_model("google/siglip-base-patch16-224"),
-                      SigLIPReIDModel)
-    assert isinstance(create_reid_model("SIGLIP-base"), SigLIPReIDModel), \
-        "大小写不敏感路由"
+    assert isinstance(create_reid_model("google/siglip-base-patch16-224"), SigLIPReIDModel)
+    assert isinstance(create_reid_model("SIGLIP-base"), SigLIPReIDModel), "大小写不敏感路由"
 
 
 def test_create_reid_model_unknown_raises() -> None:
@@ -78,6 +79,7 @@ def test_reid_constructor_is_lazy() -> None:
 # ============================================================
 # 纯函数
 # ============================================================
+
 
 def test_l2_normalize_unit_norm() -> None:
     feats = np.array([[3.0, 4.0], [0.0, 5.0]], dtype=np.float64)
@@ -124,12 +126,12 @@ def test_crop_bbox_pad_expands_and_still_clamps() -> None:
 # extract_frame_features 对齐语义
 # ============================================================
 
+
 def test_extract_frame_features_alignment_and_filter() -> None:
     """min_conf 过滤 → 低分项 None、高分项特征、与 bboxes 逐索引对齐。"""
     img = Image.new("RGB", (200, 200))
     fake = FakeReIDModel()
-    bboxes = [_det(10.0, 10.0, conf=0.9), _det(50.0, 10.0, conf=0.3),
-              _det(90.0, 10.0, conf=0.8)]
+    bboxes = [_det(10.0, 10.0, conf=0.9), _det(50.0, 10.0, conf=0.3), _det(90.0, 10.0, conf=0.8)]
 
     out = extract_frame_features(fake, img, bboxes, min_conf=0.5)
 
@@ -152,6 +154,7 @@ def test_extract_frame_features_empty_not_called() -> None:
 # get_image_features 输出兼容（transformers 5.x 输出对象）
 # ============================================================
 
+
 def test_image_embeds_compat_output_object() -> None:
     """5.x 输出对象 → pooler_output / image_embeds 提取（零权重，SimpleNamespace 模拟）。"""
     from types import SimpleNamespace
@@ -167,9 +170,51 @@ def test_image_embeds_compat_output_object() -> None:
 # 目录常量
 # ============================================================
 
+
 def test_reid_catalog_constant_and_summary() -> None:
     assert "openai/clip-vit-base-patch32" in REID_MODELS
     assert "google/siglip-base-patch16-224" in REID_MODELS
     summary = format_catalog_summary()
     assert "reid" in summary
     assert "BoT-SORT" in summary
+
+
+def test_load_prefers_local_cache_then_falls_back(monkeypatch: Any) -> None:
+    """_load 离线优先：缓存命中 local_files_only=True 直载；未命中回退联网。
+
+    回归（2026-08-21 sportscheck 实跑）：AutoDL 直连 HF 被墙，缓存完整时
+    联网校验失败曾致 BoT-SORT 崩在首帧 ReID 提取（OSError）。
+    """
+    import sys
+    import types
+
+    calls: list[bool] = []
+
+    class _FakeModel:
+        def to(self, device: Any) -> _FakeModel:
+            return self
+
+        def eval(self) -> _FakeModel:
+            return self
+
+    class _FakeHF:
+        @staticmethod
+        def from_pretrained(name: str, local_files_only: bool = False) -> Any:
+            calls.append(local_files_only)
+            if local_files_only and len(calls) == 1:
+                raise OSError("offline cache miss (simulated)")
+            return _FakeModel()
+
+    fake_tf = types.ModuleType("transformers")
+    setattr(fake_tf, "CLIPModel", type(
+        "CLIPModel", (), {"from_pretrained": staticmethod(_FakeHF.from_pretrained)}
+    ))
+    setattr(fake_tf, "CLIPProcessor", type(
+        "CLIPProcessor", (), {"from_pretrained": staticmethod(_FakeHF.from_pretrained)}
+    ))
+    monkeypatch.setitem(sys.modules, "transformers", fake_tf)
+
+    out = ClipReIDModel("openai/clip-vit-base-patch32")._load()
+
+    assert calls == [True, False, False]  # model 离线失败 → 整体回退联网（model+processor）
+    assert isinstance(out, _FakeModel)

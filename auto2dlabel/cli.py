@@ -68,6 +68,10 @@ def run(
         "--reid-model",
         help="BoT-SORT ReID 特征模型（clip 或 siglip，见 model_catalog.REID_MODELS）",
     ),
+    no_viz: bool = typer.Option(
+        False, "--no-viz",
+        help="跟踪模式：跳过逐帧 PNG 可视化（vis_outputs），省磁盘；MOT/JSON/成片视频不受影响",
+    ),
 ) -> None:
     """对图像运行 Agentic 标注。"""
     run_command(
@@ -90,6 +94,7 @@ def run(
         use_llm=llm,
         bot_sort=bot_sort,
         reid_model=reid_model,
+        viz=not no_viz,
     )
 
 
@@ -128,6 +133,10 @@ def chat(
         None, "--num-workers", min=0,
         help="DataLoader 子进程数（缺省交互询问，未指定按 GPU 显存自动推荐）",
     ),
+    no_viz: bool = typer.Option(
+        False, "--no-viz",
+        help="跟踪指令：跳过逐帧 PNG 可视化（vis_outputs），省磁盘；MOT/JSON/成片视频不受影响",
+    ),
 ) -> None:
     """自然语言驱动的 Agentic 标注——无需记忆 CLI 参数。
 
@@ -147,6 +156,7 @@ def chat(
         sahi=sahi,
         batch_size=batch_size,
         num_workers=num_workers,
+        viz=not no_viz,
     )
 
 

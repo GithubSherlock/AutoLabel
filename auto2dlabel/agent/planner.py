@@ -37,7 +37,7 @@ Output ONLY valid JSON:
   "steps": [
     {
       "step_id": 1,
-      "task_type": "object_detection | instance_segmentation | classification | obb_detection",
+      "task_type": "object_detection|instance_segmentation|classification|obb_detection|tracking",
       "source": "/path/to/images",
       "prompts": ["car", "person"],
       "confidence_threshold": 0.1,
@@ -53,14 +53,14 @@ Output ONLY valid JSON:
 }
 
 Rules:
-- task_type: "classification" if user says 分类/classify/打标签/图片分类 (prompts are candidate labels); "obb_detection" if user says 旋转框/obb/rotate/oriented (prompts are classes); "instance_segmentation" if user says 分割/segmentation/mask; otherwise "object_detection"
-- source: data path. "" if not specified.
-- prompts: English only. Map: 汽车→car, 行人/人→person, 自行车/单车→bicycle, 摩托车→motorcycle, 公共汽车/公交车→bus, 卡车→truck, 狗→dog, 猫→cat
-- confidence_threshold: default 0.1
-- iou_threshold: default 0.3
-- model_name: map hints to names. Key mappings: faster rcnn→fasterrcnn_resnet50_fpn_v2, yolo→yolo26x.pt, yolo12→yolo12x.pt, rtdetr/rt-detr/detr→rtdetr-l.pt, grounding dino→IDEA-Research/grounding-dino-tiny, clip→openai/clip-vit-base-patch32, siglip→google/siglip-base-patch16-224, convnext→convnext_large, swin→swin_b, maxvit→maxvit_t, efficientnet→efficientnet_v2_l, vit→vit_b_16, resnet→resnet50, resnext→resnext101_32x8d, obb→yolo11n-obb.pt, fcn→fcn_resnet50, deeplab→deeplabv3_resnet50, lraspp→lraspp_mobilenet_v3_large. cityscapes 街景分割→maskrcnn_r50_cityscapes. sam3/sam/maskrcnn/fastsam/fcn*/deeplabv3*/lraspp* are SEGMENTATION models — keep them as model_name (the system auto-routes them). default: yolo26x.pt
+- task_type: "tracking" if user says 跟踪/追踪/track/video/视频/序列 (prompts are fixed classes; ByteTrack/BoT-SORT are trackers chosen by the CLI, NOT part of this JSON); "classification" if user says 分类/classify/打标签/图片分类 (prompts are candidate labels); "obb_detection" if user says 旋转框/obb/rotate/oriented (prompts are classes); "instance_segmentation" if user says 分割/segmentation/mask; otherwise "object_detection"
+- source: data path (image dir, or video .mp4/.avi/.mov/.mkv for tracking). "" if not specified.
+- prompts: English only. Map: 汽车/车辆→car, 行人/人→person, 自行车/单车→bicycle, 摩托车→motorcycle, 公共汽车/公交车→bus, 卡车→truck, 狗→dog, 猫→cat
+- confidence_threshold: default 0.1; extract if user says 置信度/conf/阈值X (e.g. 置信度0.5)
+- iou_threshold: default 0.3; extract if user says iou/IoU X (e.g. iou0.5)
+- model_name: map hints to names. Key mappings: faster rcnn→fasterrcnn_resnet50_fpn_v2, yolo→yolo26x.pt, yolo12→yolo12x.pt, rtdetr/rt-detr/detr→rtdetr-l.pt, grounding dino→IDEA-Research/grounding-dino-tiny, clip→openai/clip-vit-base-patch32, siglip→google/siglip-base-patch16-224, convnext→convnext_large, swin→swin_b, maxvit→maxvit_t, efficientnet→efficientnet_v2_l, vit→vit_b_16, resnet→resnet50, resnext→resnext101_32x8d, obb→yolo11n-obb.pt, fcn→fcn_resnet50, deeplab→deeplabv3_resnet50, lraspp→lraspp_mobilenet_v3_large. cityscapes 街景分割→maskrcnn_r50_cityscapes. sam3/sam/maskrcnn/fastsam/fcn*/deeplabv3*/lraspp* are SEGMENTATION models — keep them as model_name (the system auto-routes them). ByteTrack/BoT-SORT are TRACKERS not models — ignore them for model_name. default: yolo26x.pt
 - export_format: "cls" if task_type=classification; "dota" if task_type=obb_detection;
-  otherwise "coco"
+  "mot" if task_type=tracking; otherwise "coco"
 - sahi: true if user mentions SAHI/切片/切块/slicing/sahi/大图. default false.
 - num_workers/batch_size: extract ONLY if the user explicitly specifies them
   (e.g. "batch_size=8", "num_workers=4", "批量4"). Otherwise null — the CLI will

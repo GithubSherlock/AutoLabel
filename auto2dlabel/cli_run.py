@@ -40,6 +40,7 @@ def run_command(
     use_llm: bool = False,
     bot_sort: bool = False,
     reid_model: str = "openai/clip-vit-base-patch32",
+    viz: bool = True,
 ) -> None:
     """`run` 命令实现：续跑/新建清单 → 逐图编排 → 导出/可视化/HITL 分流。"""
     setup_logging(verbose)
@@ -67,6 +68,7 @@ def run_command(
             use_llm=use_llm,
             use_bot_sort=bot_sort,
             reid_model_name=reid_model,
+            viz=viz,
         )
         return
 

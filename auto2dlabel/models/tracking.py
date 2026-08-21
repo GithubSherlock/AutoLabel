@@ -173,6 +173,10 @@ class Tracklet:
 
     def update(self, bbox: Bbox) -> None:
         """命中：卡尔曼更新 + 生命周期刷新 + 轨迹点追加。"""
+        if self.time_since_update > 0:
+            # 丢失后重命中：断开轨迹线（只清视觉历史，关联状态零影响）——
+            # 防 gap 两端的点直接连线成跨屏长线（跳变修复 A 的防御兜底）
+            self._centers.clear()
         self.mean, self.covariance = self.kf.update(
             self.mean, self.covariance, self._measure(bbox))
         self.hits += 1
@@ -248,7 +252,7 @@ def _associate(
     iou = _iou_matrix(dets, tracklets)
     cost = np.where(iou >= iou_threshold, 1.0 - iou, 1.0)
 
-    from scipy.optimize import linear_sum_assignment
+    from scipy.optimize import linear_sum_assignment  # Hungarian Algorithm
 
     row, col = linear_sum_assignment(cost)
     matches: list[tuple[Bbox, Tracklet]] = []
@@ -349,7 +353,9 @@ def _associate_high(
     sim = _similarity_matrix(det_feats, tracklets)
     cost = np.full_like(iou, 1.0)
     iou_ok = iou >= match_thresh
-    reid_ok = ~np.isnan(sim) & (sim >= appearance_thresh)
+    # IoU 达标是融合通道的硬门（2026-08-22 实测：漏门致零 IoU 外观匹配
+    # 跨屏跳变 + flip-flop，轨迹线从画面一端跳到另一端）
+    reid_ok = iou_ok & ~np.isnan(sim) & (sim >= appearance_thresh)
     cost[reid_ok] = lambda_ * (1.0 - sim[reid_ok]) + (1.0 - lambda_) * (1.0 - iou[reid_ok])
     io_only = iou_ok & np.isnan(sim)
     cost[io_only] = 1.0 - iou[io_only]
@@ -554,7 +560,10 @@ class BotSORTTracker(ByteTracker):
         match_low_thresh: float = 0.5,
         track_high_thresh: float = 0.6,
         track_low_thresh: float = 0.1,
-        new_track_thresh: float = 0.7,
+        # 标注场景定案（2026-08-22）：官方 0.7 → 0.6——[0.6,0.7) 未匹配框
+        # 立即建轨迹，消除「检测到但轨迹延迟输出」（sportscheck 实测 75% 轨迹
+        # 有 3-30 帧前史，其中 66.5% 来自该 conf 段）；0.6 与 track_high 对齐
+        new_track_thresh: float = 0.6,
         track_buffer: int = 30,
         lambda_: float = 0.98,
         appearance_thresh: float = 0.25,
@@ -783,8 +792,15 @@ class ClipReIDModel:
         except ImportError:
             raise ImportError("transformers 未安装，请运行: pip install transformers")
 
-        self._model = CLIPModel.from_pretrained(self._model_name)
-        self._processor = CLIPProcessor.from_pretrained(self._model_name)
+        # 缓存命中时离线加载：AutoDL 直连 HF 被墙，联网校验失败不应阻塞已缓存权重
+        try:
+            self._model = CLIPModel.from_pretrained(self._model_name, local_files_only=True)
+            self._processor = CLIPProcessor.from_pretrained(
+                self._model_name, local_files_only=True
+            )
+        except Exception:
+            self._model = CLIPModel.from_pretrained(self._model_name)
+            self._processor = CLIPProcessor.from_pretrained(self._model_name)
         self._model.to(self._device)
         self._model.eval()
         return self._model
@@ -834,9 +850,17 @@ class SigLIPReIDModel:
         except ImportError:
             raise ImportError("transformers 未安装，请运行: pip install transformers")
 
-        self._model = SiglipModel.from_pretrained(self._model_name)
-        self._processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
-            self._model_name)
+        # 缓存命中时离线加载：AutoDL 直连 HF 被墙，联网校验失败不应阻塞已缓存权重
+        try:
+            self._model = SiglipModel.from_pretrained(self._model_name, local_files_only=True)
+            self._processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
+                self._model_name, local_files_only=True
+            )
+        except Exception:
+            self._model = SiglipModel.from_pretrained(self._model_name)
+            self._processor = AutoProcessor.from_pretrained(  # type: ignore[no-untyped-call]
+                self._model_name
+            )
         self._model.to(self._device)
         self._model.eval()
         return self._model

@@ -52,6 +52,10 @@ auto2dlabel chat "检测 /data/images 中的汽车" --batch-size 8 --num-workers
 auto2dlabel run video.mp4 "检测行人" --track          # 跟踪模式：视频/帧目录逐帧检测 + ByteTrack ID + MOT 导出 + 轨迹可视化
 auto2dlabel run video.mp4 "检测行人" --track --bot-sort --reid-model google/siglip-base-patch16-224  # 精度档：ReID 外观关联 + ECC（密集场景降 IDSW）
 auto2dlabel run video.mp4 "跟踪穿红衣服的人" --track --llm     # 复杂指令：序列级一次性 LLM 解析（失败回退代码级）
+auto2dlabel chat "跟踪 video.mp4 中的行人和车辆，使用 ByteTrack" --no-wait   # chat 跟踪入口（planner 产 tracking 步 → 与 run --track 共用 TrackingTool 管线）
+auto2dlabel chat "跟踪 dir/ 中的行人、车辆和自行车，使用 BoT-SORT" --no-wait  # BoT-SORT 精度档：指令含 bot-sort 即触发（代码级扫描，LLM 不参与）
+auto2dlabel run video.mp4 "检测行人" --track --no-viz   # 测试/省磁盘：跳过逐帧 PNG 可视化（vis_outputs）；MOT/逐帧 JSON/成片视频不受影响
+# 视频源跟踪附带标注成片：output_<原名>.mp4 落在源视频同目录（帧率随源视频）；帧目录不产片
 ```
 
 
@@ -75,5 +79,6 @@ auto2dlabel run video.mp4 "跟踪穿红衣服的人" --track --llm     # 复杂�
 - **跟踪评测口径（v0.4 红线）**：MOT 评测必须同时报 MOTA/IDF1 与检测 recall/IDSW（统一走 `benchmarks/track_eval.py`）——recall 低是检测的锅、IDSW 高才是跟踪的锅；`mot_tracking_benchmark.py` 走完整检测→ByteTrack 管线，帧采样用连续窗口（跟踪需时序连续性，不能均匀采样）。
 - **prompts 单一事实源（v0.4）**：`CN_EN_MAP`/`extract_prompts` 只在 `tools/prompts.py`；orchestrator / no-LLM baseline / cli_track 均引用（曾三副本发散，勿再复制）。
 - **ReID 特征只存 Tracklet 不进 Bbox（v0.4 BoT-SORT）**：`Tracklet.feature` + `update_feature`（EMA + L2 重归一化）；Bbox 无 embedding 字段——track_id 六处穿透点之外不再加特征穿透点；特征逐帧按索引对齐经 `update(bboxes, image, features)` 注入（预提取，跟踪算法本体零权重依赖，tracker 单测可注入合成特征）。
-- **BoT-SORT 对比同序列同窗口同 conf（v0.4 红线）**：MOTA/IDF1/IDSW 对比必须同一序列、同一帧窗口、同一 conf（`mot_tracking_benchmark.py --bot-sort` 与基线 ByteTrack 参数一致），且同时报检测 recall/precision——BoT-SORT 默认 track_high_thresh 0.6 / new_track_thresh 0.7（ByteTracker 仍 0.5/0.5），换 tracker 即换口径，勿混比。
+- **BoT-SORT 对比同序列同窗口同 conf（v0.4 红线）**：MOTA/IDF1/IDSW 对比必须同一序列、同一帧窗口、同一 conf（`mot_tracking_benchmark.py --bot-sort` 与基线 ByteTrack 参数一致），且同时报检测 recall/precision——BoT-SORT 默认 track_high_thresh 0.6 / new_track_thresh 0.6（官方 0.7，2026-08-22 标注场景定案降为 0.6：与 track_high 对齐，[0.6,0.7) 未匹配框立即建轨迹，消除轨迹延迟输出；ByteTracker 仍 0.5/0.5），换 tracker 即换口径，勿混比。
 - **ReID 单测零真实权重（v0.4 铁律）**：test_reid_model.py / test_bot_sort.py 只用 FakeReIDModel（duck typing ReIDModel Protocol）注入合成特征，不构造 CLIP/SigLIP 实例；CLIP/SigLIP 构造零加载（`_load()` 幂等 + HF_HOME=weights/hf + ImportError 守卫）。
+- **TrackingTool 不注册 LLM registry（v0.4 chat 跟踪）**：序列级工具（视频→逐帧→MOT）orchestrator 单图循环调不动；调用方 = execute_plan track 分支 + cli_track 薄壳（共用 `tools/tracking.py` 管线，错误只抛 ValueError、typer.Exit 收敛 CLI 层）；跟踪器选择 `detect_tracker_kind`（tools/tracking.py）为单一事实源——LLM 不参与，chat 在确认后用 plan.raw_instruction 代码级扫描，勿在 planner/execute_plan 再散副本；逐帧 JSON 在 export_format=mot 时映射回 coco（MOT 恒为序列级合并导出）；**视频源附带标注成片**（源视频同目录 `output_<原名>.mp4`，帧率随源视频、mp4v 编码，与 PNG 同一 draw_bboxes+draw_trajectories 绘制管线）——帧目录不产片（防污染数据集目录）。

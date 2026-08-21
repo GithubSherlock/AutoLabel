@@ -1,4 +1,4 @@
-"""TaskPlan 执行器 —— chat 命令 Step 5 的实现（检测/分割/分类/OBB 四类任务）。"""
+"""TaskPlan 执行器 —— chat 命令 Step 5 的实现（检测/分割/分类/OBB/跟踪五类任务）。"""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from auto2dlabel.cli_common import collect_images, console, display_results, tri
 from auto2dlabel.models.model_catalog import SEGMENTATION_MODELS, TORCHVISION_SEG_MODELS
 from auto2dlabel.schema.annotation import Annotation, Bbox
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL, TaskPlan, TaskStep
+from auto2dlabel.tools.tracking import DEFAULT_REID_MODEL
 
 if TYPE_CHECKING:
     from auto2dlabel.agent.evaluate import QualityReport
@@ -26,11 +27,18 @@ def execute_plan(
     sahi: bool = False,
     explicit_batch_size: int | None = None,
     explicit_num_workers: int | None = None,
+    use_bot_sort: bool = False,
+    reid_model_name: str = DEFAULT_REID_MODEL,
+    output_dir: str = "outputs",
+    viz: bool = True,
 ) -> None:
     """顺序执行 TaskPlan 的每个步骤。
 
     explicit_batch_size/explicit_num_workers：CLI 显式指定的批量推理超参数
     （优先于交互询问值与动态实测推荐）。
+    use_bot_sort/reid_model_name/output_dir：tracking 步骤的跟踪器选择、
+    ReID 特征模型与输出目录（run --track 与 chat 共用 TrackingTool 管线）。
+    viz：tracking 步骤是否输出逐帧 PNG 可视化（--no-viz 关闭，省磁盘）。
     """
     _plan_t0 = _time.time()
     steps_results: list[dict[str, Any]] = []
@@ -42,6 +50,21 @@ def execute_plan(
         _ts = _datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
         source_path = Path(step.source)
+
+        # 序列跟踪（视频/帧目录）：走 TrackingTool 管线（与 run --track 共用，
+        # 不进逐图 collect_images 循环）
+        if step.task_type == "tracking":
+            _execute_tracking_step(
+                step,
+                use_bot_sort=use_bot_sort,
+                reid_model_name=reid_model_name,
+                output_dir=output_dir,
+                explicit_batch_size=explicit_batch_size,
+                explicit_num_workers=explicit_num_workers,
+                steps_results=steps_results,
+                viz=viz,
+            )
+            continue
 
         # 收集图像
         images = collect_images(source_path, batch=True if source_path.is_dir() else False)
@@ -108,6 +131,61 @@ def execute_plan(
                 )
 
     _log_plan(plan, steps_results, _plan_t0)
+
+
+def _execute_tracking_step(
+    step: TaskStep,
+    use_bot_sort: bool,
+    reid_model_name: str,
+    output_dir: str,
+    explicit_batch_size: int | None,
+    explicit_num_workers: int | None,
+    steps_results: list[dict[str, Any]],
+    viz: bool = True,
+) -> None:
+    """tracking 步骤：委托 TrackingTool 序列管线（与 run --track 同一实现）。
+
+    batch/workers 取「CLI 显式 > step 字段」（与其余任务一致的优先级）；
+    逐帧 JSON 用通用检测格式（step.export_format=mot 时映射回 coco——
+    MOT 恒为序列级独立合并导出）；失败（ValueError）红字提示后跳过本步。
+    """
+    from auto2dlabel.tools.tracking import TrackingTool
+
+    batch_size = explicit_batch_size if explicit_batch_size is not None else step.batch_size
+    num_workers = explicit_num_workers if explicit_num_workers is not None else step.num_workers
+    per_frame_format = "coco" if step.export_format == "mot" else step.export_format
+    tool = TrackingTool(
+        model_name=step.model_name,
+        iou_threshold=step.iou_threshold,
+        use_sahi=step.sahi,
+        use_bot_sort=use_bot_sort,
+        reid_model_name=reid_model_name,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        output_dir=output_dir,
+        export_format=per_frame_format,
+        viz=viz,
+    )
+    try:
+        summary = tool.forward(
+            step.source, step.prompts, confidence_threshold=step.confidence_threshold
+        )
+    except ValueError as e:
+        console.print(f"[red]跟踪失败: {e}[/red]")
+        return
+    steps_results.append(
+        {
+            "step_id": step.step_id,
+            "source": step.source,
+            "model": step.model_name,
+            "prompts": step.prompts,
+            "bbox_count": summary["bboxes"],
+            "triage_summary": {},
+            "track_ids": summary["track_ids"],
+            "mot_path": summary["mot_path"],
+            "video_path": summary.get("video_path"),
+        }
+    )
 
 
 def _print_step_header(step: TaskStep) -> None:

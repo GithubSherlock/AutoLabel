@@ -149,6 +149,26 @@ def test_trajectory_history() -> None:
     assert all(c == pytest.approx((100.0, 100.0)) for c in centers)
 
 
+def test_trajectory_breaks_on_gap_reassociation() -> None:
+    """丢失后重命中：轨迹历史断开（2026-08-22 断线兜底，跳变修复 A 的防御层）。
+
+    只清视觉历史（_centers），关联语义不变——buffer 内恢复同 ID；
+    gap 两端的点不连线，防跨屏长线。
+    """
+    tracker = ByteTracker()
+    tracker.update([_det(100.0, 100.0)])
+    tracker.update([_det(100.0, 100.0)])
+    tracker.update([])  # 丢 1 帧
+
+    reappeared = _det(103.0, 100.0)
+    tracker.update([reappeared])
+    assert reappeared.track_id == 0, "关联语义不变：buffer 内丢帧恢复同 ID"
+    centers = tracker.trajectory(0)
+    assert centers is not None
+    assert len(centers) == 1, "gap 前历史应断开，只含重命中后 1 点"
+    assert centers[0][0] == pytest.approx(103.0, abs=3.0)  # 卡尔曼更新后均值
+
+
 def test_trajectory_and_velocity_unknown_id_none() -> None:
     """未知 ID 查询返回 None（调用方按需跳过）。"""
     tracker = ByteTracker()

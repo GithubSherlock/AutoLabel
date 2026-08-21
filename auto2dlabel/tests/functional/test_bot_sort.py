@@ -92,17 +92,33 @@ def test_extensions_off_matches_byte_tracker() -> None:
         assert a == b, f"快照第 {i} 项不一致:\n{a}\n!=\n{b}"
 
 
-def test_botsort_official_defaults() -> None:
-    """BoT-SORT 官方默认参数（与 ByteTrack 的 0.5/0.5 有意不同）。"""
+def test_botsort_defaults() -> None:
+    """BoT-SORT 默认参数（与 ByteTrack 的 0.5/0.5 有意不同）。
+
+    new_track_thresh 0.6 为标注场景定案（2026-08-22，官方 0.7 → 0.6）：
+    与 track_high 对齐，[0.6,0.7) 未匹配框立即建轨迹，消除轨迹延迟输出。
+    """
     tracker = BotSORTTracker()
     assert tracker.track_high_thresh == 0.6
-    assert tracker.new_track_thresh == 0.7
+    assert tracker.new_track_thresh == 0.6
     assert tracker.lambda_ == 0.98
     assert tracker.appearance_thresh == 0.25
     assert tracker.ema_alpha == 0.9
     assert tracker.use_cmc is True
     assert tracker.cmc_model == "euclidean"
     assert tracker.cmc_max_side == 640
+
+
+def test_new_track_thresh_06_boundary() -> None:
+    """方案 2 定案边界（2026-08-22）：conf 0.65 未匹配建轨迹（旧官方 0.7 不建），
+    conf 0.55 低分池未匹配仍不建（只救援语义保持）。"""
+    det_065 = _det(100.0, 100.0, conf=0.65)
+    BotSORTTracker().update([det_065])
+    assert det_065.track_id == 0, "[0.6,0.7) 未匹配框应立即建轨迹（消除延迟输出）"
+
+    det_055 = _det(100.0, 100.0, conf=0.55)
+    BotSORTTracker().update([det_055])
+    assert det_055.track_id is None, "[0.5,0.6) 低分池未匹配不建轨迹（语义保持）"
 
 
 # ============================================================
@@ -200,6 +216,23 @@ def test_associate_high_gate_rejection_and_iou_fallback() -> None:
         [det], [np.array([0.0, 1.0])], [tr0], None, 0.8, 0.98, 0.25)
     assert matches2 == []
     assert len(unmatched2) == 1 and unmatched2[0][0] is det
+
+
+def test_associate_high_iou_hard_gate_blocks_far_appearance_match() -> None:
+    """IoU 硬门回归（2026-08-22 轨迹跳变根因）：外观相似但 IoU=0 的框对不得匹配。
+
+    真实案例：sportscheck 视频帧 245→246 两框相隔 1300px、IoU=0、cos=0.5，
+    漏门致轨迹跨屏跳变 + 两目标间 flip-flop（轨迹线从画面一端跳到另一端）。
+    """
+    tr = Tracklet(7, _det(100.0, 100.0))
+    tr.feature = np.array([1.0, 0.0])
+    far = _det(1500.0, 500.0)  # 与 tr 预测框零重叠
+    feat = np.array([0.5, np.sqrt(0.75)])  # cos(feat, tr.feature) = 0.5
+
+    matches, unmatched, _ = _associate_high(
+        [far], [feat], [tr], None, 0.8, 0.98, 0.25)
+    assert matches == [], "IoU=0 的框对即使外观相似（cos=0.5）也不得匹配"
+    assert len(unmatched) == 1 and unmatched[0][0] is far
 
 
 def test_reid_gate_prevents_swap() -> None:

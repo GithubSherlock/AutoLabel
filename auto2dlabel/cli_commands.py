@@ -74,6 +74,7 @@ def chat_command(
     sahi: bool,
     batch_size: int | None = None,
     num_workers: int | None = None,
+    viz: bool = True,
 ) -> None:
     """`chat` 命令实现：自然语言解析 → 缺失参数追问 → 确认 → 执行 TaskPlan。"""
     setup_logging(verbose)
@@ -143,11 +144,20 @@ def chat_command(
             except Exception:
                 console.print("[yellow]无法解析修改，使用原计划[/yellow]")
 
+    # ---- Step 4.5: 跟踪器选择（代码级扫描指令，LLM 不参与）----
+    from auto2dlabel.tools.tracking import detect_tracker_kind
+
+    use_bot_sort = detect_tracker_kind(plan.raw_instruction) == "bot_sort"
+
     # ---- Step 5: 执行 TaskPlan ----
     console.print(f"\n[bold]开始执行 {len(plan.steps)} 步任务...[/bold]\n")
     execute_plan(
-        plan, sahi=sahi,
-        explicit_batch_size=batch_size, explicit_num_workers=num_workers,
+        plan,
+        sahi=sahi,
+        explicit_batch_size=batch_size,
+        explicit_num_workers=num_workers,
+        use_bot_sort=use_bot_sort,
+        viz=viz,
     )
 
     console.print("\n[bold green]✓ 全部任务完成[/bold green]")
@@ -161,6 +171,8 @@ def _maybe_recommend_classes(plan: TaskPlan, timeout: int, no_wait: bool) -> Non
     from auto2dlabel.tools.recommend import format_recommendation, recommend_classes, scan_classes
 
     for step in plan.steps:
+        if step.task_type == "tracking":
+            continue  # 固定类别跟踪不走类别推荐（视频 source 也无法 scan_classes）
         if step.prompts:
             continue  # 用户已指定类别，不需要推荐
 
