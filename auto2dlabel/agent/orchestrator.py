@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable
 from typing import Any, cast
 
 from auto2dlabel.agent import json, logging
@@ -49,6 +51,9 @@ def _summarize_tool_result(tool_name: str, result: Any) -> dict[str, Any]:
         if result.get("retried"):
             out["retried"] = True
             out["new_count"] = len(result.get("detections", []))
+        if result.get("retried_swap"):
+            out["retried_swap"] = True
+            out["new_count"] = len(result.get("detections", []))
         return out
     return {"success": True, "data": str(result)[:200]}
 
@@ -87,6 +92,8 @@ class AgentOrchestrator:
         self._pending_evaluate: Any | None = None  # EvaluateTool 实例
         self._evaluate_called = False
         self._evaluate_retry_bboxes: list[Bbox] = []  # 重试检测结果，供 _sync_annotations 并入
+        self._model_retried = False  # 是否已换模型重检（每图一次）
+        self._pending_swap_model: str | None = None  # 待换模型的备选名（换模型后写 metadata）
 
     def _ensure_tools_registered(self) -> None:
         """确保默认 Tool 已注册。"""
@@ -102,8 +109,6 @@ class AgentOrchestrator:
     def _ensure_llm(self) -> LLMClient:
         """确保 LLM 客户端可用。默认用 DeepSeek（如果配了 API key），否则 fallback 到 OpenAI。"""
         if self.llm is None:
-            import os
-
             if os.environ.get("DEEPSEEK_API_KEY"):
                 provider = "deepseek"
             elif os.environ.get("OPENAI_API_KEY"):
@@ -118,6 +123,7 @@ class AgentOrchestrator:
         image_path: str,
         instruction: str,
         confidence_threshold: float = 0.3,
+        initial_state: AgentState | None = None,
     ) -> AgentState:
         """运行 Agent Loop（同步版本）。
 
@@ -125,6 +131,9 @@ class AgentOrchestrator:
             image_path: 待标注图像的路径。
             instruction: 用户的标注指令（自然语言）。
             confidence_threshold: 置信度阈值。
+            initial_state: 从快照恢复的状态（v0.4 Phase 3 续跑）——非 None 时
+                跳过状态构造与初始消息注入，从恢复点继续循环；防重复调用标记
+                （detect/evaluate）也按 tool_calls 历史恢复。
 
         Returns:
             AgentState 包含所有标注结果。
@@ -132,44 +141,55 @@ class AgentOrchestrator:
         self._ensure_tools_registered()
         llm = self._ensure_llm()
 
-        state = AgentState(
-            image_path=image_path,
-            user_instruction=instruction,
-            confidence_threshold=confidence_threshold,
-            max_iterations=self.max_iterations,
-        )
+        if initial_state is not None:
+            state = initial_state
+            if state.done:
+                logger.info("Initial state already done, skip: %s", image_path)
+                return state
+        else:
+            state = AgentState(
+                image_path=image_path,
+                user_instruction=instruction,
+                confidence_threshold=confidence_threshold,
+                max_iterations=self.max_iterations,
+            )
 
-        # 构建初始消息
-        state.add_message("system", state.system_prompt)
+            # 构建初始消息
+            state.add_message("system", state.system_prompt)
 
-        # 中→英关键词映射，确保 LLM 不遗漏（单一事实源 tools.prompts.CN_EN_MAP）
-        from auto2dlabel.tools.prompts import CN_EN_MAP
+            # 中→英关键词映射，确保 LLM 不遗漏（单一事实源 tools.prompts.CN_EN_MAP）
+            from auto2dlabel.tools.prompts import CN_EN_MAP
 
-        _hints = []
-        for cn, en in CN_EN_MAP.items():
-            if cn in instruction:
-                _hints.append(f"{cn}={en}")
-        hint_text = ("\nKeyword hints: " + ", ".join(_hints)) if _hints else ""
+            _hints = []
+            for cn, en in CN_EN_MAP.items():
+                if cn in instruction:
+                    _hints.append(f"{cn}={en}")
+            hint_text = ("\nKeyword hints: " + ", ".join(_hints)) if _hints else ""
 
-        state.add_message(
-            "user",
-            f"Image: {image_path}\n"
-            f"Instruction: {instruction}\n"
-            f"Threshold: {confidence_threshold}"
-            f"{hint_text}",
-        )
+            state.add_message(
+                "user",
+                f"Image: {image_path}\n"
+                f"Instruction: {instruction}\n"
+                f"Threshold: {confidence_threshold}"
+                f"{hint_text}",
+            )
 
         logger.info("Agent Loop started: %s", instruction)
 
-        _detect_called = False  # 防止重复调用检测
+        # 防止重复调用检测/evaluate：快照恢复时按 tool_calls 历史重建标记
+        _detect_called = any(
+            tc.get("tool_name") == "detect_objects" for tc in state.tool_calls
+        )
         # 重置 LLM Evaluate 节点状态（单图作用域）
         self._pending_evaluate = None
         self._evaluate_called = False
         self._evaluate_retry_bboxes = []
+        self._model_retried = False
+        self._pending_swap_model = None
 
-        while state.iteration < self.max_iterations and not state.done:
+        while state.iteration < state.max_iterations and not state.done:
             state.iteration += 1
-            logger.info("Iteration %d/%d", state.iteration, self.max_iterations)
+            logger.info("Iteration %d/%d", state.iteration, state.max_iterations)
 
             # 每轮重建 tools：质量未通过且尚未处置时，条件暴露 evaluate_quality
             tools = self.registry.to_openai_tools()
@@ -256,6 +276,11 @@ class AgentOrchestrator:
                                 state.metadata["llm_review_flagged"] = True
                             if result.get("retried"):
                                 self._evaluate_retry_bboxes = list(result.get("detections", []))
+                            if result.get("retried_swap"):
+                                self._evaluate_retry_bboxes = list(result.get("detections", []))
+                                self._model_retried = True
+                                if self._pending_swap_model:
+                                    state.metadata["model_swapped"] = self._pending_swap_model
                             state.add_message(
                                 "user",
                                 "处置完成。Summarize NOW. No tools. One line per class.",
@@ -329,6 +354,7 @@ class AgentOrchestrator:
         """质量未通过时挂起 EvaluateTool（下一轮条件暴露给 LLM）。
 
         detect_fn 复用 DetectionTool.forward（内部已含降阈值重试），
+        swap_fn 换备选模型重检（与降阈值同构，每图一次），
         每图仅允许一次 evaluate 处置（_evaluate_called 守卫）。
         """
         from auto2dlabel.tools.evaluate import EvaluateTool
@@ -348,7 +374,49 @@ class AgentOrchestrator:
             retry_used=bool(getattr(tool, "last_retried", False)),
             base_threshold=base_threshold,
             detect_fn=_retry_detect if tool is not None else None,
+            model_retried=self._model_retried,
+            swap_fn=self._build_swap_fn(image_path, prompts, base_threshold),
         )
+
+    def _build_swap_fn(
+        self,
+        image_path: str,
+        prompts: list[str],
+        base_threshold: float,
+    ) -> Callable[[], list[Any]]:
+        """构造换模型重检闭包：备选模型（pick_alternate_model）+ 同阈值检测一次。
+
+        当前模型名解析链：detection_model > 工具 _model_name > env > DEFAULT_MODEL。
+        换模型权重加载延迟到闭包执行时（LLM 不选 retry_swap_model 则零开销）。
+        """
+        from auto2dlabel.agent.evaluate import pick_alternate_model
+        from auto2dlabel.models.detection import create_detection_model
+        from auto2dlabel.schema.task_plan import DEFAULT_MODEL
+        from auto2dlabel.tools.detection import DetectionTool
+
+        tool = self._detect_tool
+        current = (
+            self.detection_model
+            or getattr(tool, "_model_name", None)
+            or os.environ.get("DETECTION_MODEL")
+            or DEFAULT_MODEL
+        )
+        alternate = pick_alternate_model(current)
+        self._pending_swap_model = alternate
+        use_sahi = bool(getattr(tool, "use_sahi", False))
+
+        def _swap() -> list[Any]:
+            alt_tool = DetectionTool(
+                model=create_detection_model(alternate, iou_threshold=self.iou_threshold),
+                model_name=alternate,
+                use_sahi=use_sahi,
+            )
+            return list(alt_tool.forward(
+                image_path=image_path, prompts=prompts,
+                confidence_threshold=base_threshold,
+            ))
+
+        return _swap
 
     def _sync_annotations(self, state: AgentState) -> None:
         """将 tool_call 记录同步回 Annotation 数据结构。"""

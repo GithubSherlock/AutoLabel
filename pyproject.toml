@@ -25,6 +25,7 @@ dependencies = [
     "httpx>=0.25",
     "pyyaml>=6.0",
     "shapely>=2.0",
+    "onnxruntime>=1.16",
 ]
 
 [project.optional-dependencies]
@@ -58,17 +59,30 @@ include = ["auto2dlabel*"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# vendored 官方 Florence-2 代码（Apache-2.0，第三方原样，见 vendor_florence2/README.md）
+exclude = ["auto2dlabel/models/vendor_florence2"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# LLM system prompt 长行刻意保留（拆行会改变注入 LLM 的 prompt 内容）
+"auto2dlabel/agent/planner.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.10"
 strict = true
 ignore_missing_imports = true
+# exclude 只对递归发现（`mypy .`）生效，显式目录 `mypy auto2dlabel/` 走 overrides
+exclude = ["auto2dlabel/models/vendor_florence2"]
+
+[[tool.mypy.overrides]]
+module = "auto2dlabel.models.vendor_florence2.*"
+ignore_errors = true
 
 [tool.pyright]
 typeCheckingMode = "basic"
+exclude = ["auto2dlabel/models/vendor_florence2"]
 
 [tool.pytest.ini_options]
 testpaths = ["auto2dlabel/tests"]

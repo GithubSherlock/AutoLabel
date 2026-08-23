@@ -197,6 +197,67 @@ ByteTrack 成片复查发现「ID 切换过多」→ 量化后同视频同 conf=
 
 **口径说明**（统一 JSON-only 复算，窗口 = 轨迹首帧前 30 帧内同位置 <100px 无轨迹检测框）：方案 2 前 82.2% 有前史（中位 1 帧、≥2 帧 22.8%）→ 方案 2 后 40.4%（中位 2 帧、≥2 帧 22.9%）。≥2 帧前史绝对数 92→195 非退化：分母 404→853 翻倍后占比持平——新增轨迹多为 [0.5,0.6) 闪烁目标（此前从未有轨迹，现由 [0.6,0.7) 帧建立，前史自然更长）；[0.6,0.7) 段 2020 个无轨迹框**归零**（立即建轨迹，方案 2 的 66.5% 延迟来源完全消除）。剩余 1316 个无轨迹框全在 [0.5,0.6)：低于用户 conf 0.5 仅 0.1 的模糊带，维持低分救援语义（只并入已有轨迹、不建新轨迹，闪断风险小）为定案预期。
 
+### J. from_dict 快照续跑真实冒烟（2026-08-22）
+
+真实管线冒烟：`auto2dlabel run sample.png "检测行人" -t 0.3 -o outputs`（yolo26x.pt，CPU）→ 快照文件 `sample_*_state.json` 读回 `AgentState.from_dict`——**snapshot OK**：iter=3 / done=True / max_iter=3 全字段恢复，与运行期状态一致。续跑路径（`--resume` 恢复 + 防重复检测）由单测覆盖（零权重 Fake 注入，见测试统计行）。
+
+### K. 3b 模型级重试 + 批次级策略（2026-08-22）
+
+真实冒烟：`auto2dlabel chat "检测 /tmp/chat_batch_smoke 中的汽车" --no-wait --batch-strategy --batch-size 2`（4 张 COCO 图，yolo26x.pt CPU）——**全链路通过**：Step 1 object_detection → 批次策略抽样 4 张 → LLM 每批 1 次调参 **conf 0.1→0.05 + 建议模型 yolo26x.pt** → 2 图 × 2 块批量推理 → 4 图导出/可视化完成。无 API key / LLM 输出非法时黄字降级代码级默认参数（单测覆盖）。换模型动作（retry_swap_model）路径由单测覆盖（FakeAltModel monkeypatch，零真实权重）——真实换模型加载留给 GPU 批量场景复测。
+
+### L. KITTI difficulty 分层真实冒烟（2026-08-22）
+
+冒烟：`python -m auto2dlabel.benchmarks.kitti_benchmark --max-images 50 --conf 0.3`（yolo26x.pt，CPU，24.1s）——**分层同报通过**：50 图 GT 152 目标全部分档（无 ignore 残留），三档之和 == overall 总 GT；mAP 随难度单调递减符合 KITTI 语义：
+
+| 难度档 | mAP@0.5 | GT 目标 |
+| --- | --- | --- |
+| overall | 0.3147 | 152 |
+| easy | 0.3794 | 58 |
+| moderate | 0.1621 | 64 |
+| hard | 0.1459 | 30 |
+
+`--difficulty easy/moderate/hard` 单档模式与 `--difficulty all` 默认（overall + 三档同报 + JSON per_difficulty 字段）均由单测覆盖（判据边界 10 例 + GT 标签/过滤/分层指标合成，见测试统计行）。域内微调闭环为 GPU 项（见 milestone/v0.4.md Phase 2）。
+
+### M. Web 三件套：分类展示 + OBB 旋转框 + bbox 拖拽/标签编辑（2026-08-22）
+
+真实冒烟（server 端口 8766 启动 + curl）：
+
+- **端点冒烟**：`/api/obb-models` 15 个 YOLO-OBB 模型；`/api/cls-models` 21 个（hf 零样本 2 + torchvision 14 + custom 5）；首页含 taskType/clsModel/画布编辑钩子 15 处
+- **OBB 真实标注**：`POST /api/annotate task_type=obb model=yolo11n-obb.pt`（COCO 图 000000000139.jpg，本地权重）→ 1 旋转框：xy=(446.7,127.6)（cx-w/2 转换）、angle=1.3893 rad、labels=[]，可视化 base64 正常
+- sample.png 本身无目标（直接 detect_obb 亦 0 框）——路由正常非缺陷
+- 分类真实模型冒烟（CLIP 权重 ~600MB 下载）留给 GPU 环境复测；分类/拖拽/标签编辑路径由单测覆盖（Fake 注入零真实权重）
+
+### N. KITTI 域内微调闭环（GPU，2026-08-23）
+
+训练（`python3 -m auto2dlabel.tools.train_kitti`，RTX 3080 Ti 12GB）：
+
+| 项 | 值 |
+| --- | --- |
+| 数据 | train 6733 / val 748（seed 42，10% 划分，images symlink 零复制） |
+| 配置 | yolo11s，80 epochs，batch=16，imgsz=640，patience=15 |
+| 时长 | ~33 分钟（81% GPU 利用率，4.5G 显存） |
+| best.pt val（748 图，conf=0.001） | P=0.9047 R=0.8699 **mAP50=0.9430** mAP50-95=0.7505 |
+
+官方口径 benchmark（`--difficulty all --max-images 0`，全量 7481 图，conf=0.3，IoU@0.5，186.0s / 40.2 img/s）：
+
+| 难度档 | 微调 best.pt | yolo26x 基线（同 conf 全量） | GT 目标 |
+| --- | --- | --- | --- |
+| overall | **0.8867** | 0.2702 | 30584 |
+| easy | **0.6177** | 0.2448 | 9744 |
+| moderate | **0.4090** | 0.1068 | 13039 |
+| hard | **0.1592** | 0.0276 | 7801 |
+
+全量同口径（conf=0.3）提升 **3.28 倍**（0.8867 vs 0.2702），难度越深提升越大（hard 档 5.8 倍）；此前基线 50 图冒烟 0.3147 / v0.3 GPU 复测 0.4081 均为子集口径，不可与全量直接比。
+
+逐类 AP（微调 vs 基线）：bicycle **0.9019 vs 0.0147**（61 倍——KITTI Cyclist 框含骑车人整体，COCO 预训练 bicycle 类只认车；微调学到 KITTI 语义）/ truck 0.9086 vs 0.1230 / train 0.9083 vs 0.1530 / person 0.8088 vs 0.4925 / car 0.9060 vs 0.5678——5 类微调后全部 >0.8。
+
+过程修复两处 bug（均有回归测试）：
+
+- `create_detection_model` 路由顺序：`"/" in model_name` 先于 `.pt` 判定，微调产物完整路径被误判为 GroundingDINO HF repo id（AutoProcessor OSError）→ `.pt` 判定前置
+- `save_results` 文件名直接拼接模型名，路径含 "/" 形成非法嵌套目录（指标算完崩在保存）→ common.save_results 统一 sanitize（"/"→"_"，所有 benchmark 受益）
+
+权重落 `weights/kitti_finetune/yolo11s_kitti/weights/best.pt`（19MB，不入库）。
+
 ## 测试统计
 
 | 项 | 数值 |
@@ -208,5 +269,11 @@ ByteTrack 成片复查发现「ID 切换过多」→ 量化后同视频同 conf=
 | 新增单测（ReID 离线加载优先，2026-08-21） | 1（reid_model：本地缓存优先→在线回退） |
 | 新增单测（跳变修复 A + 断线 C + 方案 2，2026-08-22） | 3（bot_sort：IoU 硬门回归 + new_track 0.6 边界；byte_tracker：gap 断线）；另重命名 1（test_botsort_official_defaults→test_botsort_defaults） |
 | 新增单测（--no-viz 开关，2026-08-22） | 1（tracking_tool：viz=False 跳过 vis_outputs 逐帧 PNG，MOT/逐帧 JSON/成片视频不受影响） |
+| 新增单测（约束过滤层 3a，2026-08-22） | 27（constraints 23：parse 参数化 7 / parse_roi 7 / 方位·交集 4 / 属性过滤 4 / TrackingTool 端到端 1；track_llm_plan 11→15 净增 4：attributes/position 解析 + 非法词拒绝） |
+| 新增单测（from_dict 快照续跑，2026-08-22） | 7（test_agent_state_roundtrip 7：全字段 round-trip / annotations 完整恢复 angle·track_id·labels·review_flags / 空与旧快照默认值兼容 / 续跑不重复检测 / 续跑重复调用跳过 / done 短路）；test_cli_resume 适配 initial_state 参数 |
+| 新增单测（3b 模型级重试 + 批次级策略，2026-08-22） | 30（model_swap_retry 13：pick 规则参数化 8 / swap 动作 4 / orchestrator e2e 1；batch_strategy 17：抽样 3 / LLM 调参 6 / apply_strategy 3 / execute_plan 挂钩 5） |
+| 新增单测（KITTI difficulty 分层，2026-08-22） | 14（kitti_difficulty：判据边界参数化 10 / GT 标签与过滤 3 / 分层指标合成 1） |
+| 新增单测（Web 三件套，2026-08-22） | 8（test_web_annotate：_bbox_from_dict 保真 2 / annotate 三路由 3 / export-coco angle 1 / review-save edited 2） |
+| 新增单测（KITTI 域内微调，2026-08-23） | 17（test_kitti_finetune 14：类别映射 / kitti_line_to_yolo 参数化 6 / 转换幂等 / 划分确定性 / data.yaml / 自定义 names 3 / .pt 路径路由回归；test_benchmark_save_results 3：模型路径·HF repo id sanitize / 普通名不变） |
 | 确定性 property（byte_tracker + bot_sort 内） | 3（手工混合场景 + 密集合成场景 + BoT-SORT 含 ECC 开，同输入逐位相等） |
-| 全量 | **391 passed** |
+| 全量 | **585 passed** |

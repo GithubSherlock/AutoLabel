@@ -51,6 +51,7 @@ BENCHMARK_DATASETS: dict[str, dict[str, str]] = {
     "d2sa":       {"script": "d2sa_benchmark.py",       "task_type": "segmentation"},
     # 图像分类
     "imagenet100": {"script": "classification_benchmark.py", "task_type": "classification"},
+    "imagenet1k": {"script": "classification_benchmark.py", "task_type": "classification"},
 }
 
 # 数据集中文名 → key 映射
@@ -67,6 +68,8 @@ DATASET_CN_MAP: dict[str, str] = {
     "nuimages": "nuimages", "nu": "nuimages",
     "d2sa": "d2sa", "零售": "d2sa", "货架": "d2sa", "密集零售": "d2sa",
     "imagenet100": "imagenet100", "imagenet": "imagenet100", "image net": "imagenet100",
+    "imagenet1k": "imagenet1k", "ilsvrc": "imagenet1k", "ilsvrc2012": "imagenet1k",
+    "image net 1k": "imagenet1k",
 }
 
 # 必填参数集合

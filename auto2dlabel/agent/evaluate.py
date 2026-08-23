@@ -18,6 +18,24 @@ from typing import Any
 LLM_RETRY_FACTOR = 0.25
 
 
+def pick_alternate_model(current: str) -> str:
+    """按当前模型选备选检测模型（模型级重试，与 retry_lower_threshold 同构：每图一次）。
+
+    规则（纯函数）：
+    - yolo 系列 → fasterrcnn_resnet50_fpn_v2（高召回档，互补漏检）
+    - fasterrcnn / grounding-dino → yolo26x.pt（均衡精度档）
+    - 未知模型名 → DEFAULT_MODEL（yolo26x.pt）
+    """
+    from auto2dlabel.schema.task_plan import DEFAULT_MODEL
+
+    name = current.lower()
+    if "yolo" in name:
+        return "fasterrcnn_resnet50_fpn_v2"
+    if "fasterrcnn" in name or "grounding" in name or "/" in current:
+        return DEFAULT_MODEL
+    return DEFAULT_MODEL
+
+
 @dataclass
 class QualityReport:
     """单张图检测结果的代码级质量评估报告。"""
@@ -128,14 +146,18 @@ def apply_evaluate_action(
     retry_used: bool,
     base_threshold: float,
     detect_fn: Callable[[float], list[Any]] | None = None,
+    model_retried: bool = False,
+    swap_fn: Callable[[], list[Any]] | None = None,
 ) -> dict[str, Any]:
-    """执行 LLM 选择的处置动作（纯函数，detect_fn 由编排器注入）。
+    """执行 LLM 选择的处置动作（纯函数，detect_fn/swap_fn 由编排器注入）。
 
-    action ∈ {accept, flag_for_review, retry_lower_threshold}：
+    action ∈ {accept, flag_for_review, retry_lower_threshold, retry_swap_model}：
     - accept: 接受现状，不做任何事
     - flag_for_review: 返回标记意图，调用方把整图并入 review 档
     - retry_lower_threshold: 调 detect_fn(base×LLM_RETRY_FACTOR) 一次（每图一次）；
       retry_used=True（代码级已重试过）时拒绝重试，转为 accept
+    - retry_swap_model: 调 swap_fn()（备选模型重检）一次（每图一次）；
+      model_retried=True（已换过模型）时拒绝，转为 accept
     非法 action 抛 ValueError。
     """
     result: dict[str, Any] = {"action": action, "report": report.to_dict()}
@@ -155,9 +177,19 @@ def apply_evaluate_action(
         result["retried"] = True
         result["threshold"] = lowered
         result["detections"] = detect_fn(lowered)
+    elif action == "retry_swap_model":
+        if model_retried:
+            result["accepted"] = True
+            result["note"] = "已换过模型，忽略再次换模型请求"
+            return result
+        if swap_fn is None:
+            raise ValueError("retry_swap_model 需要 swap_fn")
+        result["retried_swap"] = True
+        result["detections"] = swap_fn()
     else:
         raise ValueError(
-            f"非法 action: {action}（可选 accept/flag_for_review/retry_lower_threshold）"
+            f"非法 action: {action}"
+            "（可选 accept/flag_for_review/retry_lower_threshold/retry_swap_model）"
         )
 
     return result

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""ImageNet100 分类 Benchmark — 监督（torchvision）vs 零样本（CLIP/SigLIP）top-K 准确率。
+"""ImageNet 分类 Benchmark — 监督（torchvision）vs 零样本（CLIP/SigLIP）top-K 准确率。
+
+数据集：imagenet100（100 wnid 类）/ imagenet1k（ILSVRC2012 val 1000 类分层抽样，
+不整解压 6.7GB tar——按 devkit GT 每类确定性选样，见 datasets.ensure_imagenet1k_val）。
 
 评测协议（两种标签空间，报告与实测数据须注明）：
 - 监督路径（resnet18 等）：完整 ImageNet1K 1000 类空间取 top-K（官方评测协议），
   GT 英文名与预测英文名精确字符串比较
-- 零样本路径（clip/siglip）：100 类候选空间取 top-K（候选即 GT 类名集合）
+- 零样本路径（clip/siglip）：GT 类名集合候选空间取 top-K（候选即 GT 类名集合）
 """
 
 from __future__ import annotations
@@ -26,7 +29,9 @@ from auto2dlabel.benchmarks.common import (  # noqa: E402
     save_results,
 )
 from auto2dlabel.benchmarks.datasets import (  # noqa: E402
+    ensure_imagenet1k_val,
     ensure_imagenet100,
+    load_imagenet1k_ground_truth,
     load_imagenet100_ground_truth,
 )
 from auto2dlabel.models.classification import create_classification_model  # noqa: E402
@@ -46,7 +51,7 @@ def run_classification(
 ) -> tuple[dict[str, list[dict[str, Any]]], float]:
     """批量分类，返回 (预测 top-K 列表, 推理耗时秒数)。
 
-    监督路径 candidates=[]（纯 1000 类 top-K）；零样本路径 candidates=100 类英文名。
+    监督路径 candidates=[]（纯 1000 类 top-K）；零样本路径 candidates=GT 类名集合。
     批量 OOM 时自动降级逐图（classify_batch_or_fallback）。
     """
     try:
@@ -121,10 +126,12 @@ def run_classification(
 # ============================================================
 
 def main() -> None:
-    parser = build_parser("ImageNet100 分类 Benchmark（监督 vs 零样本 top-K）")
+    parser = build_parser("ImageNet 分类 Benchmark（监督 vs 零样本 top-K）")
     parser.set_defaults(model="resnet18")
-    parser.add_argument("--dataset", default="imagenet100", choices=["imagenet100"],
-                        help="分类数据集（wnid 目录即标签）")
+    parser.add_argument("--dataset", default="imagenet100",
+                        choices=["imagenet100", "imagenet1k"],
+                        help="分类数据集：imagenet100（wnid 目录即标签）/ imagenet1k"
+                             "（ILSVRC2012 val 1000 类，--per-class 每类分层抽样）")
     parser.add_argument("--top-k", type=int, default=5, help="评测 top-K 值")
     parser.add_argument("--per-class", type=int, default=50, help="每类抽样解压张数")
     args = parser.parse_args()
@@ -137,8 +144,12 @@ def main() -> None:
 
     # 数据准备（每类均匀抽样解压，幂等）
     print(f"加载 {args.dataset}（每类 {args.per_class} 张）...")
-    dataset_root = ensure_imagenet100(per_class=args.per_class)
-    gt = load_imagenet100_ground_truth(dataset_root, max_images=args.max_images)
+    if args.dataset == "imagenet1k":
+        dataset_root = ensure_imagenet1k_val(per_class=args.per_class)
+        gt = load_imagenet1k_ground_truth(dataset_root, max_images=args.max_images)
+    else:
+        dataset_root = ensure_imagenet100(per_class=args.per_class)
+        gt = load_imagenet100_ground_truth(dataset_root, max_images=args.max_images)
     print(f"已加载 {len(gt)} 张图像\n")
     if not gt:
         print("GT 为空，请检查解压结果")
@@ -158,7 +169,7 @@ def main() -> None:
     if args.viz:
         from auto2dlabel.benchmarks.viz import visualize_dataset
         visualize_dataset(
-            "imagenet100", gt, predictions,
+            args.dataset, gt, predictions,
             lambda img_id, info: dataset_root / info["file_name"],
             gt_label_fn=lambda info: str(info["label"]),
         )

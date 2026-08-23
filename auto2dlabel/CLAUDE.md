@@ -49,9 +49,14 @@ auto2dlabel chat "分类为猫和狗，用 clip" --no-wait        # CLIP/SigLIP 
 auto2dlabel chat "分类为 cat 和 dog，用 convnext_large" --no-wait  # torchvision 监督分类（候选须英文）
 auto2dlabel chat "检测旋转框，用 yolo11n-obb.pt" --no-wait  # OBB → dota/yolo_obb 导出
 auto2dlabel chat "检测 /data/images 中的汽车" --batch-size 8 --num-workers 4  # 批量推理（未指定时交互询问，仍无则模型加载后自动实测最大 batch）
+auto2dlabel chat "检测 dir/ 中的汽车" --batch-strategy  # 批次级策略：抽样 ≤8 张 + LLM 每批 1 次调参（阈值覆写 + 模型建议）
 auto2dlabel run video.mp4 "检测行人" --track          # 跟踪模式：视频/帧目录逐帧检测 + ByteTrack ID + MOT 导出 + 轨迹可视化
 auto2dlabel run video.mp4 "检测行人" --track --bot-sort --reid-model google/siglip-base-patch16-224  # 精度档：ReID 外观关联 + ECC（密集场景降 IDSW）
 auto2dlabel run video.mp4 "跟踪穿红衣服的人" --track --llm     # 复杂指令：序列级一次性 LLM 解析（失败回退代码级）
+auto2dlabel run video.mp4 "检测左边红色的汽车" --track          # 指代约束 L1：属性(CLIP 逐框零样本)+方位(坐标分位)过滤，代码级解析零新权重
+auto2dlabel run video.mp4 "跟踪红车旁边的行人" --track --refer-l2   # 指代 L2（Florence-2）；关系词自动触发，L2 失败自动升级 L3
+auto2dlabel run video.mp4 "跟踪第二辆车后面的人" --track --refer-l3  # 指代 L3 直用（Qwen2-VL-7B 4bit，GPU；权重下载 weights/download_qwen_l3.sh）
+auto2dlabel run video.mp4 "检测行人" --track --roi 100,100,600,500  # 手动 ROI：只保留框中心在区域内的目标（矩形 x1,y1,x2,y2 或分号多边形）
 auto2dlabel chat "跟踪 video.mp4 中的行人和车辆，使用 ByteTrack" --no-wait   # chat 跟踪入口（planner 产 tracking 步 → 与 run --track 共用 TrackingTool 管线）
 auto2dlabel chat "跟踪 dir/ 中的行人、车辆和自行车，使用 BoT-SORT" --no-wait  # BoT-SORT 精度档：指令含 bot-sort 即触发（代码级扫描，LLM 不参与）
 auto2dlabel run video.mp4 "检测行人" --track --no-viz   # 测试/省磁盘：跳过逐帧 PNG 可视化（vis_outputs）；MOT/逐帧 JSON/成片视频不受影响
@@ -63,7 +68,8 @@ auto2dlabel run video.mp4 "检测行人" --track --no-viz   # 测试/省磁盘�
 
 - **Export 不暴露给 LLM**：导出由 CLI 代码直接调用（`tools/export.py`），避免 token 浪费。
 - **防重复调用**：Agent Loop 跟踪 `_detect_called`，LLM 第二次调 detect 直接 skip；`max_iterations=3`（`agent/orchestrator.py`）。
-- **质量评估分层**：代码级判据（0 框降阈值 ×0.5 重试一次、类别覆盖检查、>200 框警告）在 tool/编排层完成（`agent/evaluate.py`），三条检测路径（Agent Loop / chat / no-LLM baseline）共用；LLM Evaluate 节点仅在 `quality.ok == False` 时条件暴露（evaluate_quality 不进全局 registry，防跨图污染），动作 accept/flag_for_review/retry_lower_threshold（retry = conf×0.25，每图一次），迭代核算 ≤3。
+- **质量评估分层**：代码级判据（0 框降阈值 ×0.5 重试一次、类别覆盖检查、>200 框警告）在 tool/编排层完成（`agent/evaluate.py`），三条检测路径（Agent Loop / chat / no-LLM baseline）共用；LLM Evaluate 节点仅在 `quality.ok == False` 时条件暴露（evaluate_quality 不进全局 registry，防跨图污染），动作 accept/flag_for_review/retry_lower_threshold/retry_swap_model（retry = conf×0.25，swap = 备选模型同阈值重检，各每图一次），迭代核算 ≤3。
+- **3b 换模型/批次策略红线（2026-08-22）**：备选模型规则单一事实源 `pick_alternate_model`（yolo→fasterrcnn 高召回 / fasterrcnn·g-dino→yolo26x.pt / 未知→DEFAULT_MODEL）；换模型权重延迟到 LLM 实际选择该动作时加载；批次级策略（chat `--batch-strategy`）LLM 每批恰 1 次调用（`llm_tune_strategy` JSON 调参），抽样确定性步长 ≤8 张、异常按 0 框计入（宁多勿漏）；conf 建议立即覆写（钳位 [0.05,0.95]）但模型建议只进 model_hint（权重已加载不中途重建）；任何失败黄字降级代码级默认参数（无 key 零影响）。
 - **OBB 角度约定**：`Bbox.angle` 弧度、(-π/2, π/2]、width 轴相对 x 轴（与 ultralytics xywhr 零转换）；`to_dict` 恒输出；穿透点四处（to_dict / state._annotation_from_dict / export._make_bbox / visualize）漏一处静默丢角。
 - **分类结果存 `Annotation.labels`**（`list[ImageLabel]`），不是 metadata；模型名存 `metadata["model"]`。
 - **默认检测模型**：`schema/task_plan.DEFAULT_MODEL`（yolo26x.pt）为单一事实源，env `DETECTION_MODEL` 可覆盖；各模块不得硬编码其他默认值。
@@ -81,4 +87,7 @@ auto2dlabel run video.mp4 "检测行人" --track --no-viz   # 测试/省磁盘�
 - **ReID 特征只存 Tracklet 不进 Bbox（v0.4 BoT-SORT）**：`Tracklet.feature` + `update_feature`（EMA + L2 重归一化）；Bbox 无 embedding 字段——track_id 六处穿透点之外不再加特征穿透点；特征逐帧按索引对齐经 `update(bboxes, image, features)` 注入（预提取，跟踪算法本体零权重依赖，tracker 单测可注入合成特征）。
 - **BoT-SORT 对比同序列同窗口同 conf（v0.4 红线）**：MOTA/IDF1/IDSW 对比必须同一序列、同一帧窗口、同一 conf（`mot_tracking_benchmark.py --bot-sort` 与基线 ByteTrack 参数一致），且同时报检测 recall/precision——BoT-SORT 默认 track_high_thresh 0.6 / new_track_thresh 0.6（官方 0.7，2026-08-22 标注场景定案降为 0.6：与 track_high 对齐，[0.6,0.7) 未匹配框立即建轨迹，消除轨迹延迟输出；ByteTracker 仍 0.5/0.5），换 tracker 即换口径，勿混比。
 - **ReID 单测零真实权重（v0.4 铁律）**：test_reid_model.py / test_bot_sort.py 只用 FakeReIDModel（duck typing ReIDModel Protocol）注入合成特征，不构造 CLIP/SigLIP 实例；CLIP/SigLIP 构造零加载（`_load()` 幂等 + HF_HOME=weights/hf + ImportError 守卫）。
+- **约束过滤层（v0.4 3a 红线）**：`ReferentialConstraint` + 解析/过滤纯函数单一事实源在 `tools/constraints.py`（parse_referential / parse_roi / filter_by_spatial / filter_by_attributes），勿在调用方再散副本；属性过滤走 `AttributeScorer` Protocol（duck typing 注入，真实现 `ClipCropScorer`）——单测零真实权重铁律（FakeScorer，沿用 ReID 铁律）；约束只在跟踪管线挂接（TrackingTool 检测后过滤，DetectionTool 单图路径不挂——G-DINO 开放词汇已覆盖单图属性指代）；方位=坐标分位（左右各 1/3，中间 1/3），「前/后」深度语义无 2D 映射，需 ROI 兜底；属性候选对概率阈值 0.5，多属性 AND，过滤失败「宁多勿漏」保留全部框
+- **指代 L2/L3 阶梯（v0.5 红线）**：与 L1 同一调用点（`ReferentialResolver` Protocol，`resolve(image, phrase, bboxes) -> 原框子集`，宁多勿漏）；**序列级一次解析**（首帧锁定 + 轨迹匹配维持，绝无逐帧 VLM 调用）；L2 失败自动升级 L3 经 `last_failed` 属性（`CascadeReferentialResolver`，成本阶梯 L2 12.6s / L3 33.2s）；L3 GPU+权重双守卫（无 CUDA / 权重未就位快速失败提示下载脚本，绝不静默触发 16GB 下载）；transformers 5.x Qwen2-VL 必须经 `apply_chat_template` 注入 image token（直接 text prompt 会 "Image features and image tokens do not match"）；坐标 1000 网格/[0,1] 判别在 `parse_qwen_bboxes` 单一事实源
+- **自定义类别模型（v0.5 红线）**：`UltralyticsModel._parse_pred` 类别名优先用模型自身类别表（`model.names`，KITTI 微调 5 类），缺失回退 COCO 80 类——自定义微调权重不得按 COCO cls_id 硬映射；KITTI 域内微调 `tools/train_kitti.py`（label_2→YOLO 转换 + 微调，类别映射与 benchmark `KITTI_TO_COCO` 单一事实源、difficulty 判定复用 `kitti_difficulty`，images symlink 零复制，权重落 weights/kitti_finetune/）
 - **TrackingTool 不注册 LLM registry（v0.4 chat 跟踪）**：序列级工具（视频→逐帧→MOT）orchestrator 单图循环调不动；调用方 = execute_plan track 分支 + cli_track 薄壳（共用 `tools/tracking.py` 管线，错误只抛 ValueError、typer.Exit 收敛 CLI 层）；跟踪器选择 `detect_tracker_kind`（tools/tracking.py）为单一事实源——LLM 不参与，chat 在确认后用 plan.raw_instruction 代码级扫描，勿在 planner/execute_plan 再散副本；逐帧 JSON 在 export_format=mot 时映射回 coco（MOT 恒为序列级合并导出）；**视频源附带标注成片**（源视频同目录 `output_<原名>.mp4`，帧率随源视频、mp4v 编码，与 PNG 同一 draw_bboxes+draw_trajectories 绘制管线）——帧目录不产片（防污染数据集目录）。

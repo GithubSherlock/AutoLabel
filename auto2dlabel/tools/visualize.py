@@ -176,6 +176,48 @@ def draw_masks(
     return cv2.addWeighted(overlay, alpha, image, 1 - alpha, 0)
 
 
+# COCO 17 点骨架连接（(a, b) 为关键点下标）
+_COCO_SKELETON: list[tuple[int, int]] = [
+    (0, 1), (0, 2), (1, 3), (2, 4),        # 鼻-眼-耳 / 肩-肘
+    (5, 7), (7, 9), (6, 8), (8, 10),       # 腕 / 踝
+    (5, 6), (11, 12), (11, 13), (13, 15),  # 肩-髋 / 膝
+    (12, 14), (14, 16), (5, 11), (6, 12),  # 膝 / 躯干
+    (11, 12), (13, 14), (15, 16),          # 髋-膝-踝（补全冗余边）
+]
+
+
+def draw_keypoints(
+    image: np.ndarray,
+    bboxes: list[Bbox],
+    radius: int = 3,
+) -> np.ndarray:
+    """在图像上绘制 COCO 17 点骨架（线段 + 圆点）。
+
+    仅绘制 Bbox.keypoints 非空的框；v=0 的点跳过。
+    """
+    img = image.copy()
+    for bbox in bboxes:
+        if not bbox.keypoints:
+            continue
+        color = _get_color(bbox.label)
+        # 按原始 17 点下标建映射（v>0 才画；过滤后列表会与骨架下标错位）
+        pts = {
+            i: (float(x), float(y))
+            for i, (x, y, v) in enumerate(bbox.keypoints) if v > 0
+        }
+        for a, b in _COCO_SKELETON:
+            if a in pts and b in pts:
+                cv2.line(
+                    img,
+                    (int(pts[a][0]), int(pts[a][1])),
+                    (int(pts[b][0]), int(pts[b][1])),
+                    color, 2, cv2.LINE_AA,
+                )
+        for px, py in pts.values():
+            cv2.circle(img, (int(px), int(py)), radius, color, -1)
+    return img
+
+
 def visualize_annotation(
     image_path: Path,
     annotation: Annotation,
@@ -207,6 +249,7 @@ def visualize_annotation(
 
     if annotation.bboxes:
         image = draw_bboxes(image, annotation.bboxes)
+        image = draw_keypoints(image, annotation.bboxes)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), image)

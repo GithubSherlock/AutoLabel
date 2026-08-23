@@ -135,6 +135,10 @@ class ExportTool(Tool):
             confidence=d.get("confidence", 1.0),
             angle=d.get("angle", 0.0),
             track_id=d.get("track_id"),
+            keypoints=[
+                (float(k[0]), float(k[1]), float(k[2]))
+                for k in d.get("keypoints", [])
+            ],
         )
 
     @staticmethod

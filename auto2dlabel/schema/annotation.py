@@ -22,11 +22,18 @@ class Bbox:
     id: int | None = None
     angle: float = 0.0  # 旋转角度（弧度），width 轴相对 x 轴，(-π/2, π/2]；HBB 恒为 0
     track_id: int | None = None  # 跟踪 ID（ByteTrack 关联；None=未跟踪）
+    keypoints: list[tuple[float, float, float]] = field(default_factory=list)
+    # 姿态关键点 [x, y, v]（COCO 17 点语义，像素坐标，v=0 未标注/1 标注/2 不可见）；空 = 无姿态
 
     @property
     def xyxy(self) -> tuple[float, float, float, float]:
         """转换为 [x1, y1, x2, y2] 格式。"""
         return (self.x, self.y, self.x + self.width, self.y + self.height)
+
+    @property
+    def num_keypoints(self) -> int:
+        """可见关键点数量（v > 0）。"""
+        return sum(1 for _x, _y, v in self.keypoints if v > 0)
 
     @classmethod
     def from_xyxy(
@@ -54,6 +61,8 @@ class Bbox:
             d["id"] = self.id
         if self.track_id is not None:
             d["track_id"] = self.track_id
+        if self.keypoints:  # 非空才输出（防普通检测 JSON 膨胀）
+            d["keypoints"] = [list(k) for k in self.keypoints]
         return d
 
 

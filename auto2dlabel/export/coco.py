@@ -74,6 +74,9 @@ def build_coco_dict(annotations: list[Annotation]) -> dict[str, Any]:
             }
             if bbox.track_id is not None:
                 coco_ann["track_id"] = bbox.track_id
+            if bbox.keypoints:  # 姿态：COCO 官方 keypoints 展平 + num_keypoints
+                coco_ann["keypoints"] = [v for k in bbox.keypoints for v in k]
+                coco_ann["num_keypoints"] = bbox.num_keypoints
             coco["annotations"].append(coco_ann)
             next_ann_id += 1
 

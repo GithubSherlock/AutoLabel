@@ -52,6 +52,14 @@ h3 { margin: 16px 0 8px; color: #53a8b6; font-size: 14px; text-transform: upperc
   <label>📝 标注指令</label>
   <input type="text" id="instruction" value="car, person" placeholder="如: car, person, bicycle (逗号分隔)">
 
+  <label>🧩 任务类型</label>
+  <select id="taskType" onchange="onTaskTypeChange()">
+    <option value="detection">🎯 目标检测</option>
+    <option value="obb">📐 旋转框 OBB</option>
+    <option value="pose">🧍 姿态估计 Pose</option>
+    <option value="classification">🏷️ 图像分类</option>
+  </select>
+
   <label>🎯 检测模型
     <span id="modelTag" style="font-size:11px;margin-left:4px"></span>
   </label>
@@ -60,6 +68,13 @@ h3 { margin: 16px 0 8px; color: #53a8b6; font-size: 14px; text-transform: upperc
   </select>
   <div style="font-size:11px;color:#8899aa;margin:-8px 0 8px" id="modelInfo"></div>
 
+  <label>🏷️ 分类模型</label>
+  <select id="clsModel" style="display:none">
+    <option value="">加载中...</option>
+  </select>
+  <div style="font-size:11px;color:#8899aa;margin:-8px 0 8px;display:none" id="clsModelInfo"></div>
+
+  <div id="detOnly">
   <label>📊 置信度: <span id="confVal">0.10</span></label>
   <input type="range" id="conf" min="0.05" max="1" step="0.05" value="0.1" oninput="document.getElementById('confVal').textContent=Number(this.value).toFixed(2)">
 
@@ -67,6 +82,7 @@ h3 { margin: 16px 0 8px; color: #53a8b6; font-size: 14px; text-transform: upperc
   <input type="range" id="iou" min="0.1" max="0.9" step="0.1" value="0.3" oninput="document.getElementById('iouVal').textContent=Number(this.value).toFixed(2)">
 
   <label><input type="checkbox" id="withSeg" onchange="toggleSegSection()"> ✂️ 同时生成实例分割 mask</label>
+  </div>
 
   <div id="segSection">
     <label>🖌️ 分割模型</label>
@@ -132,12 +148,18 @@ function getColor(label) {
 // ── 模型加载 ──
 async function loadModels() {
   try {
-    const [detResp, segResp] = await Promise.all([
+    const [detResp, segResp, obbResp, poseResp, clsResp] = await Promise.all([
       fetch('/api/models'),
       fetch('/api/seg-models'),
+      fetch('/api/obb-models'),
+      fetch('/api/pose-models'),
+      fetch('/api/cls-models'),
     ]);
     const detData = await detResp.json();
     const segData = await segResp.json();
+    const obbData = await obbResp.json();
+    const poseData = await poseResp.json();
+    const clsData = await clsResp.json();
 
     // 展平检测模型
     detModels = [];
@@ -156,6 +178,7 @@ async function loadModels() {
       if (!items.length) continue;
       const optgroup = document.createElement('optgroup');
       optgroup.label = detLabels[cat];
+      optgroup.dataset.kind = 'det';
       for (const m of items) {
         const opt = document.createElement('option');
         opt.value = m.name;
@@ -165,6 +188,59 @@ async function loadModels() {
         modelMeta[m.name] = m.type;
       }
       detSel.appendChild(optgroup);
+    }
+
+    // OBB 旋转框模型（同一 select，任务类型切换时过滤显示）
+    if (obbData.models && obbData.models.length) {
+      const obbGroup = document.createElement('optgroup');
+      obbGroup.label = '📐 YOLO-OBB（旋转框）';
+      obbGroup.dataset.kind = 'obb';
+      for (const m of obbData.models) {
+        const opt = document.createElement('option');
+        opt.value = m.name;
+        opt.textContent = m.name;
+        obbGroup.appendChild(opt);
+        modelMeta[m.name] = m.type;
+      }
+      detSel.appendChild(obbGroup);
+    }
+
+    // 姿态估计模型（同一 select，任务类型切换时过滤显示）
+    if (poseData.models && poseData.models.length) {
+      const poseGroup = document.createElement('optgroup');
+      poseGroup.label = '🧍 YOLO-pose（COCO 17 点）';
+      poseGroup.dataset.kind = 'pose';
+      for (const m of poseData.models) {
+        const opt = document.createElement('option');
+        opt.value = m.name;
+        opt.textContent = m.name;
+        poseGroup.appendChild(opt);
+        modelMeta[m.name] = m.type;
+      }
+      detSel.appendChild(poseGroup);
+    }
+
+    // 展平分类模型
+    const clsSel = document.getElementById('clsModel');
+    clsSel.innerHTML = '';
+    const clsOrder = ['hf_zero_shot', 'torchvision', 'custom'];
+    const clsLabels = {
+      hf_zero_shot: '🌐 CLIP / SigLIP（零样本）',
+      torchvision: '🔬 torchvision ImageNet',
+      custom: '📦 自定义权重',
+    };
+    for (const cat of clsOrder) {
+      const items = clsData.models[cat] || [];
+      if (!items.length) continue;
+      const optgroup = document.createElement('optgroup');
+      optgroup.label = clsLabels[cat];
+      for (const m of items) {
+        const opt = document.createElement('option');
+        opt.value = m.name;
+        opt.textContent = m.name;
+        optgroup.appendChild(opt);
+      }
+      clsSel.appendChild(optgroup);
     }
 
     // 展平分割模型
@@ -272,15 +348,22 @@ async function runAnnotation() {
   document.getElementById('resultCount').textContent = '';
   deletedIds.clear();
 
+  const taskType = document.getElementById('taskType').value;
+
   const form = new FormData();
   form.append('image', file);
   form.append('instruction', document.getElementById('instruction').value);
   form.append('conf', document.getElementById('conf').value);
   form.append('iou', document.getElementById('iou').value);
-  form.append('model', document.getElementById('model').value);
-  form.append('with_seg', document.getElementById('withSeg').checked);
-  if (document.getElementById('withSeg').checked) {
-    form.append('seg_model', document.getElementById('segModel').value);
+  form.append('task_type', taskType);
+  form.append('model', taskType === 'classification'
+    ? document.getElementById('clsModel').value
+    : document.getElementById('model').value);
+  if (taskType === 'detection') {
+    form.append('with_seg', document.getElementById('withSeg').checked);
+    if (document.getElementById('withSeg').checked) {
+      form.append('seg_model', document.getElementById('segModel').value);
+    }
   }
 
   try {
@@ -309,26 +392,31 @@ async function runAnnotation() {
     };
     img.src = data.image_base64;
 
-    // 摘要
-    const segInfo = data.summary.with_seg ? ` | 🖌️ 分割: ${data.summary.seg_model}` : '';
-    document.getElementById('summary').innerHTML = `
-      <div class="summary">
-        <b>${data.summary.total}</b> 个目标 &nbsp;|&nbsp;
-        类别: ${data.summary.classes.join(', ') || '无'}<br>
-        <small>均置信度: ${(data.summary.avg_conf * 100).toFixed(1)}% &nbsp;|&nbsp; 模型: ${data.summary.model}${segInfo}</small>
-      </div>`;
+    // 摘要（分类任务渲染 labels，检测/OBB 渲染框统计）
+    const labels = data.labels || [];
+    let summaryHtml;
+    if (taskType === 'classification') {
+      const labelText = labels.map(l =>
+        `<span class="badge" style="background:#16578a">${l.label} ${(l.score * 100).toFixed(1)}%</span>`
+      ).join(' ') || '无结果';
+      summaryHtml = `
+        <div class="summary">
+          🏷️ 分类结果（${labels.length} 候选）: ${labelText}<br>
+          <small>模型: ${data.summary.model}</small>
+        </div>`;
+    } else {
+      const segInfo = data.summary.with_seg ? ` | 🖌️ 分割: ${data.summary.seg_model}` : '';
+      summaryHtml = `
+        <div class="summary">
+          <b>${data.summary.total}</b> 个目标 &nbsp;|&nbsp;
+          类别: ${data.summary.classes.join(', ') || '无'}<br>
+          <small>均置信度: ${(data.summary.avg_conf * 100).toFixed(1)}% &nbsp;|&nbsp; 模型: ${data.summary.model}${segInfo}</small>
+        </div>`;
+    }
+    document.getElementById('summary').innerHTML = summaryHtml;
 
     // 结果列表
-    document.getElementById('resultCount').textContent = `(${data.bboxes.length} 项)`;
-    let html = '';
-    data.bboxes.forEach((b, i) => {
-      const color = getColor(b.label);
-      html += `<div class="result-item" id="item-${i}" onclick="toggleDelete(${i})">
-        <span><span class="badge" style="background:${color};color:#fff">${b.label}</span> ${b.label}</span>
-        <span>${(b.confidence*100).toFixed(1)}%</span>
-      </div>`;
-    });
-    document.getElementById('results').innerHTML = html || '<p style="color:#8899aa">未检测到目标</p>';
+    renderResultList();
     document.getElementById('dlBtn').style.display = 'block';
     document.getElementById('dlVis').style.display = 'block';
     document.getElementById('maskToggle').style.display = (data.masks && data.masks.length) ? 'block' : 'none';
@@ -348,7 +436,16 @@ function drawBoxes(ctx) {
     const color = getColor(b.label);
     ctx.strokeStyle = color;
     ctx.lineWidth = 2.5;
-    ctx.strokeRect(b.x, b.y, b.width, b.height);
+    if (b.angle && Math.abs(b.angle) > 1e-4) {
+      // 旋转框：绕中心旋转绘制（Bbox.angle 弧度，width 轴相对 x 轴）
+      ctx.save();
+      ctx.translate(b.x + b.width / 2, b.y + b.height / 2);
+      ctx.rotate(b.angle);
+      ctx.strokeRect(-b.width / 2, -b.height / 2, b.width, b.height);
+      ctx.restore();
+    } else {
+      ctx.strokeRect(b.x, b.y, b.width, b.height);
+    }
 
     // 标签背景
     const text = `${b.label} ${(b.confidence*100).toFixed(0)}%`;
@@ -360,6 +457,160 @@ function drawBoxes(ctx) {
     ctx.fillRect(tx, ty, tm.width + 8, th + 4);
     ctx.fillStyle = '#fff';
     ctx.fillText(text, tx + 4, ty + th - 2);
+
+    // 姿态任务：COCO 17 点骨架（无 keypoints 自动跳过）
+    drawKeypoints(ctx, b);
+  });
+}
+
+// ── COCO 17 点骨架（与 tools/visualize.py 同一线对集，含冗余髋-膝-踝边） ──
+const COCO_SKELETON = [
+  [0,1],[0,2],[1,3],[2,4],[5,7],[7,9],[6,8],[8,10],[5,6],[11,12],
+  [11,13],[13,15],[12,14],[14,16],[5,11],[6,12],[11,12],[13,14],[15,16],
+];
+
+function drawKeypoints(ctx, b) {
+  if (!b.keypoints || !b.keypoints.length) return;
+  const color = getColor(b.label);
+  const kp = b.keypoints;  // [[x, y, v], ...] v=0 未标注
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  COCO_SKELETON.forEach(([a, c]) => {
+    const pa = kp[a], pb = kp[c];
+    if (!pa || !pb || pa[2] <= 0 || pb[2] <= 0) return;
+    ctx.beginPath();
+    ctx.moveTo(pa[0], pa[1]);
+    ctx.lineTo(pb[0], pb[1]);
+    ctx.stroke();
+  });
+  ctx.fillStyle = color;
+  kp.forEach(k => {
+    if (k[2] <= 0) return;
+    ctx.beginPath();
+    ctx.arc(k[0], k[1], 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+// ── 结果列表渲染（标注 / 复核共用） ──
+function renderResultList() {
+  if (!currentData) return;
+  document.getElementById('resultCount').textContent = `(${currentData.bboxes.length} 项)`;
+  let html = '';
+  currentData.bboxes.forEach((b, i) => {
+    const color = getColor(b.label);
+    html += `<div class="result-item" id="item-${i}" onclick="toggleDelete(${i})">
+      <span><span class="badge" style="background:${color};color:#fff">${b.label}</span> ${b.label}</span>
+      <span>${(b.confidence*100).toFixed(1)}%</span>
+    </div>`;
+  });
+  document.getElementById('results').innerHTML = html || '<p style="color:#8899aa">未检测到目标</p>';
+}
+
+// ── 任务类型切换 ──
+function onTaskTypeChange() {
+  const type = document.getElementById('taskType').value;
+  const modelSel = document.getElementById('model');
+  const modelLabel = modelSel.previousElementSibling;
+  const clsSel = document.getElementById('clsModel');
+  const clsInfo = document.getElementById('clsModelInfo');
+  const detOnly = document.getElementById('detOnly');
+  const segSection = document.getElementById('segSection');
+  const instr = document.getElementById('instruction');
+
+  // 模型 select 按任务过滤 optgroup（det 组 / obb 组 / pose 组）
+  const kindOf = t => (t === 'obb' ? 'obb' : t === 'pose' ? 'pose' : 'det');
+  Array.from(modelSel.querySelectorAll('optgroup')).forEach(g => {
+    g.style.display = (g.dataset.kind === kindOf(type)) ? '' : 'none';
+  });
+  if (type === 'obb') modelSel.value = 'yolo11n-obb.pt';
+  if (type === 'pose') modelSel.value = 'yolo11n-pose.pt';
+
+  modelLabel.style.display = type === 'classification' ? 'none' : '';
+  modelSel.style.display = type === 'classification' ? 'none' : '';
+  clsSel.style.display = type === 'classification' ? '' : 'none';
+  clsInfo.style.display = type === 'classification' ? '' : 'none';
+  detOnly.style.display = type === 'classification' ? 'none' : '';
+  segSection.style.display = (type === 'detection' && document.getElementById('withSeg').checked) ? 'block' : 'none';
+
+  // 指令提示
+  if (type === 'classification') {
+    if (instr.value === 'car, person' || instr.value === '检测 car 和 person') {
+      instr.value = 'cat, dog, car, person';
+    }
+    instr.placeholder = '候选标签，如: cat, dog, car (逗号分隔，零样本任意语言)';
+  } else {
+    instr.placeholder = '如: car, person, bicycle (逗号分隔)';
+  }
+}
+
+// ── bbox 拖拽 + 双击改标签 ──
+function canvasPos(e) {
+  const c = document.getElementById('canvas');
+  const rect = c.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (c.width / rect.width),
+    y: (e.clientY - rect.top) * (c.height / rect.height),
+  };
+}
+
+function hitBox(p, b) {
+  const cx = b.x + b.width / 2, cy = b.y + b.height / 2;
+  if (b.angle && Math.abs(b.angle) > 1e-4) {
+    // 旋转框命中近似：中心距离 ≤ 外接半径
+    return Math.hypot(p.x - cx, p.y - cy) <= Math.max(b.width, b.height) / 2;
+  }
+  return p.x >= b.x && p.x <= b.x + b.width && p.y >= b.y && p.y <= b.y + b.height;
+}
+
+function findBox(p) {
+  if (!currentData) return -1;
+  for (let i = currentData.bboxes.length - 1; i >= 0; i--) {
+    if (!deletedIds.has(i) && hitBox(p, currentData.bboxes[i])) return i;
+  }
+  return -1;
+}
+
+function bindCanvasEditing() {
+  const c = document.getElementById('canvas');
+  let drag = null;
+  c.addEventListener('mousedown', e => {
+    if (!currentData) return;
+    const i = findBox(canvasPos(e));
+    if (i < 0) return;
+    const p = canvasPos(e);
+    const b = currentData.bboxes[i];
+    drag = { i, dx: b.x - p.x, dy: b.y - p.y };
+  });
+  c.addEventListener('mousemove', e => {
+    if (!drag || !currentData) return;
+    const p = canvasPos(e);
+    const b = currentData.bboxes[drag.i];
+    const nx = Math.max(0, p.x + drag.dx);
+    const ny = Math.max(0, p.y + drag.dy);
+    const dx = nx - b.x, dy = ny - b.y;
+    b.x = nx;
+    b.y = ny;
+    // 关键点随框平移（绝对像素坐标）
+    if (b.keypoints) {
+      b.keypoints = b.keypoints.map(k => [k[0] + dx, k[1] + dy, k[2]]);
+    }
+    currentData.edited = true;
+    redraw();
+  });
+  c.addEventListener('mouseup', () => { drag = null; });
+  c.addEventListener('mouseleave', () => { drag = null; });
+  c.addEventListener('dblclick', e => {
+    if (!currentData) return;
+    const i = findBox(canvasPos(e));
+    if (i < 0) return;
+    const b = currentData.bboxes[i];
+    const label = prompt('修改标签:', b.label);
+    if (label === null || !label.trim()) return;
+    b.label = label.trim();
+    currentData.edited = true;
+    renderResultList();
+    redraw();
   });
 }
 
@@ -547,16 +798,10 @@ async function loadReviewFile(name) {
     };
     img.src = imgUrl;
 
-    document.getElementById('resultCount').textContent = `(${currentData.bboxes.length} 项)`;
-    let html = '';
-    currentData.bboxes.forEach((b, i) => {
-      const color = getColor(b.label);
-      html += `<div class="result-item" id="item-${i}" onclick="toggleDelete(${i})">
-        <span><span class="badge" style="background:${color};color:#fff">${b.label}</span> ${b.label}</span>
-        <span>${(b.confidence*100).toFixed(1)}%</span>
-      </div>`;
-    });
-    document.getElementById('results').innerHTML = html || '<p style="color:#8899aa">无待复核标注</p>';
+    renderResultList();
+    if (!currentData.bboxes.length) {
+      document.getElementById('results').innerHTML = '<p style="color:#8899aa">无待复核标注</p>';
+    }
     document.getElementById('summary').innerHTML = `
       <div class="summary">
         <b>${currentData.bboxes.length}</b> 个待复核目标<br>
@@ -571,10 +816,13 @@ async function loadReviewFile(name) {
 async function saveReview() {
   if (!reviewFileName) return;
   try {
+    const kept = currentData ? currentData.bboxes.filter((b, i) => !deletedIds.has(i)) : [];
+    const body = { queue_file: reviewFileName, deleted_indices: [...deletedIds] };
+    if (currentData && currentData.edited) body.edited = kept;  // 修正框全量重建
     const resp = await fetch('/api/review-save', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ queue_file: reviewFileName, deleted_indices: [...deletedIds] }),
+      body: JSON.stringify(body),
     });
     const data = await resp.json();
     if (!resp.ok || data.error) {
@@ -611,6 +859,8 @@ async function downloadReviewJSON() {
 
 // ── 初始化 ──
 loadModels();
+onTaskTypeChange();
+bindCanvasEditing();
 </script>
 </body>
 </html>

@@ -24,6 +24,7 @@ from typing import Any
 
 from auto2dlabel.cli_common import console, display_results, triage_and_export
 from auto2dlabel.models.detection import DetectionModel, create_detection_model
+from auto2dlabel.models.referential import ReferentialResolver
 from auto2dlabel.models.tracking import (
     BotSORTTracker,
     ByteTracker,
@@ -38,9 +39,55 @@ from auto2dlabel.schema.task_plan import (
     DEFAULT_MODEL,
 )
 from auto2dlabel.tools.base import Tool
+from auto2dlabel.tools.constraints import (
+    AttributeScorer,
+    ReferentialConstraint,
+    filter_by_attributes,
+    filter_by_spatial,
+)
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv"}
 DEFAULT_REID_MODEL = "openai/clip-vit-base-patch32"
+
+# 指代 L2 后续帧匹配阈值 = max(50px, 短边/2)（与 models/referential.py
+# 默认阈值同构——Florence 首帧框与原框中心偏移同一判据）
+_LOCKED_MATCH_DIST_BASE = 50.0
+
+
+def match_dets_to_locked(
+    bboxes: list[Bbox],
+    locked_positions: dict[int, tuple[float, float]],
+) -> list[Bbox]:
+    """指代 L2 后续帧：检测框 → 锁定轨迹匹配（贪心最近中心距，保原框）。
+
+    首帧 Florence-2 解析锁定目标后，后续帧不再调用 L2（CPU 成本红线），
+    以锁定轨迹最近位置与候选检测框一一匹配（轨迹位置为 anchor，检测框
+    为候选）；未匹配框丢弃——指代目标集合首帧已定，不建新轨迹。
+    """
+    if not locked_positions:
+        return []
+    import math
+
+    positions = list(locked_positions.values())
+    centers = [(b.x + b.width / 2, b.y + b.height / 2) for b in bboxes]
+    used = [False] * len(centers)
+    out: list[Bbox] = []
+    for tx, ty in positions:
+        best_i, best_d = -1, math.inf
+        for i, (cx, cy) in enumerate(centers):
+            if used[i]:
+                continue
+            d = math.hypot(cx - tx, cy - ty)
+            if d < best_d:
+                best_i, best_d = i, d
+        if best_i < 0:
+            continue
+        b = bboxes[best_i]
+        if best_d > max(_LOCKED_MATCH_DIST_BASE, min(b.width, b.height) / 2):
+            continue
+        used[best_i] = True
+        out.append(b)
+    return out
 
 
 def collect_frames(source: Path, output: Path) -> list[Path]:
@@ -115,6 +162,10 @@ class TrackingTool(Tool):
         output_dir: str = "outputs",
         export_format: str = "coco",
         viz: bool = True,
+        constraint: ReferentialConstraint | None = None,
+        attribute_scorer: AttributeScorer | None = None,
+        referential: ReferentialResolver | None = None,
+        referential_phrase: str | None = None,
     ) -> None:
         self._model = model
         self._model_name = model_name
@@ -129,6 +180,15 @@ class TrackingTool(Tool):
         self.export_format = export_format
         # viz=False：跳过逐帧 PNG 可视化（vis_outputs 大头）；MOT/JSON/HITL/成片视频不受影响
         self.viz = viz
+        # v0.4 3a 约束过滤层：类别之外的附加约束（属性 CLIP 逐框 / ROI 多边形 /
+        # 方位词分位），过滤后目标才进 tracker；None = 纯类别跟踪（向后兼容）
+        self.constraint = constraint
+        self._attribute_scorer = attribute_scorer
+        # v0.5 指代 L2（Florence-2 兜底）：非 None 时首帧 resolve 锁定目标、
+        # 后续帧轨迹匹配维持（替代 L1 属性/方位链，ROI 仍叠加）；
+        # None = 纯 L1 约束/类别跟踪（向后兼容）
+        self._referential = referential
+        self._referential_phrase = referential_phrase
 
     @property
     def model(self) -> DetectionModel:
@@ -142,6 +202,47 @@ class TrackingTool(Tool):
         if self._reid_model is None:
             self._reid_model = create_reid_model(self._reid_model_name)
         return self._reid_model
+
+    @property
+    def attribute_scorer(self) -> AttributeScorer:
+        """属性打分器懒加载（仅约束含属性时触发；测试注入 Fake，零真实权重铁律）。"""
+        if self._attribute_scorer is None:
+            from auto2dlabel.models.classification import ClipCropScorer
+
+            self._attribute_scorer = ClipCropScorer()
+        return self._attribute_scorer
+
+    def _apply_constraints(
+        self,
+        im: Any | None,  # PIL Image（打开失败 None）
+        bboxes: list[Bbox],
+    ) -> list[Bbox]:
+        """约束过滤层（v0.4 3a）：属性（CLIP 逐框）→ 空间（ROI/方位）。
+
+        PIL 打开失败时属性过滤与方位过滤无法执行——按标注「宁多勿漏」原则
+        跳过并保留全部框（仅警告）；ROI 多边形不依赖图像可照常过滤。
+        """
+        if self.constraint is None or self.constraint.is_plain:
+            return bboxes
+        c = self.constraint
+        if c.attributes:
+            if im is None:
+                console.print("[yellow]⚠ PIL 打开失败，跳过属性过滤（保留全部框）[/yellow]")
+            else:
+                bboxes = filter_by_attributes(im, bboxes, c.attributes, self.attribute_scorer)
+        if c.roi is not None or c.position is not None:
+            if c.position is not None and im is None:
+                console.print("[yellow]⚠ PIL 打开失败，跳过方位过滤（保留全部框）[/yellow]")
+                if c.roi is not None:
+                    bboxes = filter_by_spatial(bboxes, roi=c.roi)
+            else:
+                bboxes = filter_by_spatial(
+                    bboxes,
+                    roi=c.roi,
+                    position=c.position if im is not None else None,
+                    image_size=(im.width, im.height) if im is not None else None,
+                )
+        return bboxes
 
     @property
     def input_schema(self) -> dict[str, Any]:
@@ -279,6 +380,12 @@ class TrackingTool(Tool):
                     video_writer = None
                     video_path = None
 
+        # v0.5 指代 L2 状态：首帧 Florence-2 解析锁定目标 ID；后续帧以锁定
+        # 轨迹最近位置匹配候选检测框（不再调用 L2，CPU 成本红线）
+        refer_active = self._referential is not None and self._referential_phrase is not None
+        locked_ids: set[int] | None = None
+        locked_positions: dict[int, tuple[float, float]] = {}
+
         try:
             for frame_path, dets in zip(frames, dets_per_frame):
                 bboxes = [
@@ -294,7 +401,7 @@ class TrackingTool(Tool):
                 ]
 
                 ann = Annotation(image_path=str(frame_path))
-                im: Any | None = None  # PIL Image，BoT-SORT 分支复用；打开失败 None
+                im: Any | None = None  # PIL Image，BoT-SORT/属性过滤分支复用；打开失败 None
                 try:
                     from PIL import Image as _Image
 
@@ -302,6 +409,29 @@ class TrackingTool(Tool):
                     ann.image_size = (im.width, im.height)
                 except Exception:
                     pass
+
+                # 指代 L2（v0.5）：首帧序列级一次解析（失败宁多勿漏返回全部），
+                # 后续帧锁定轨迹匹配（不再调 L2）
+                if refer_active:
+                    if locked_ids is None:
+                        assert self._referential is not None  # refer_active 蕴含（pyright 窄化）
+                        bboxes = self._referential.resolve(
+                            str(frame_path), self._referential_phrase or "", bboxes
+                        )
+                        console.print(
+                            f"[dim]指代 L2 (Florence-2): 首帧解析锁定 {len(bboxes)} 目标[/dim]"
+                        )
+                    else:
+                        bboxes = match_dets_to_locked(bboxes, locked_positions)
+
+                # 约束过滤层（v0.4 3a）：属性/ROI/方位约束 → 过滤后才进 tracker；
+                # 指代 L2 输出即保留框（替代属性/方位链），ROI 多边形仍叠加
+                if self.constraint is not None and not self.constraint.is_plain:
+                    if refer_active:
+                        if self.constraint.roi is not None:
+                            bboxes = filter_by_spatial(bboxes, roi=self.constraint.roi)
+                    else:
+                        bboxes = self._apply_constraints(im, bboxes)
 
                 # BoT-SORT：复用上面打开的帧图（RGB→BGR 供 ECC），高分框批量提 ReID
                 # 特征注入融合关联；任一前置缺失（PIL 失败等）降级纯 ByteTrack 语义
@@ -315,6 +445,21 @@ class TrackingTool(Tool):
                     tracker.update(bboxes, image=np.asarray(im)[:, :, ::-1], features=feats)
                 else:
                     tracker.update(bboxes)
+
+                # 指代 L2 锁定集合维护：tracker.update 就地赋 track_id 后，
+                # 首帧锁定目标 ID；后续帧匹配框（含轨迹断裂重建的新 ID）并入，
+                # 并刷新各锁定 ID 的最新中心位置供下一帧匹配
+                if refer_active:
+                    if locked_ids is None:
+                        locked_ids = set()
+                    for b in bboxes:
+                        if b.track_id is None:
+                            continue
+                        locked_ids.add(b.track_id)
+                        locked_positions[b.track_id] = (
+                            b.x + b.width / 2, b.y + b.height / 2,
+                        )
+
                 for b in bboxes:
                     ann.add_bbox(b)
                     if b.confidence < threshold:

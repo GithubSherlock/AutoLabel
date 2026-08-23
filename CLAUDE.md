@@ -5,8 +5,8 @@ Agentic 数据标注工具：自然语言指令 → LLM Agent 规划 → 多模�
 ## 当前进度（2026-08）
 
 - **Auto2dLabel**：v0.1–v0.3 ✅ 完成——检测（3 引擎 × 29 模型）+ 实例分割 + 图像分类（CLIP/SigLIP + torchvision 14 款）+ OBB（YOLO-OBB 15 款）+ 语义分割（torchvision 6 款）+ cityscapes 域内 Mask R-CNN（全量 500 图 mAP 0.5149）+ Web 审核闭环 + Agentic 闭环，**共 84 个模型**；11 数据集 Benchmark（检测 5 + OBB 1 + 分割 4 + 分类 ImageNet100）
-- v0.4 📋 **3D 基石版**（Tracking + KITTI 域 2D + Agentic 收尾，里程碑见 `auto2dlabel/milestone/v0.4.md`）→ v0.5 📋 Pose 等非 3D 内容；**战略：Auto2dLabel 为 Auto3dLabel 做基石，优先交付支撑 3D 的内容**
-- **Auto3dLabel**：调研 ✅，MVP 路线定案（2D → 3D 提升）；**主推进**——v0.1 单帧 MVP 已立项（见 `auto3dlabel/milestone/v0.1.md`，选型速查见 `auto3dlabel/CLAUDE.md`），KITTI object 数据已就位（`Documents/datasets/KITTI/object`，从 `/autodl-pub/data/KITTI/object` 补齐），与 Auto2dLabel v0.4 双线并行
+- v0.4 ✅ **3D 基石版**（Tracking + KITTI 域 2D + Agentic 收尾，里程碑见 `auto2dlabel/milestone/v0.4.md`）→ v0.5 ✅ Pose 等非 3D 内容（Pose + 指代 L2/L3 + 自动车道 ROI + ILSVRC2012 + KITTI 微调等 GPU 项 2026-08-23 收尾）；**战略：Auto2dLabel 为 Auto3dLabel 做基石，优先交付支撑 3D 的内容**
+- **Auto3dLabel**：调研 ✅，MVP 路线定案（2D → 3D 提升）；**主推进**——v0.1 单帧 MVP 已立项（见 `auto3dlabel/milestone/v0.1.md`，选型速查见 `auto3dlabel/CLAUDE.md`），KITTI object 数据已就位（`Documents/datasets/KITTI/object`，从 `/autodl-pub/data/KITTI/object` 补齐），与 Auto2dLabel v0.4/v0.5 双线并行（v0.4 已于 2026-08-23 全 Phase 完成）
 - 里程碑定义与完成记录见 `auto2dlabel/milestone/`；实测数据见 `auto2dlabel/tests/test-v0.X.md`
 
 ## 项目结构

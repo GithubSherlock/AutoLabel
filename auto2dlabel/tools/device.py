@@ -20,7 +20,6 @@ def get_device() -> str:
     """
     try:
         import torch
-
         if torch.cuda.is_available():
             return "cuda"
         elif torch.backends.mps.is_available():

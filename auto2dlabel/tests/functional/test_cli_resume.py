@@ -29,7 +29,13 @@ class _FakeOrchestrator:
         self.calls = calls
         self.raised = raised  # 跨 CLI 调用共享（每次 invoke 新建实例）
 
-    def run(self, image_path: str, instruction: str, confidence_threshold: float) -> AgentState:
+    def run(
+        self,
+        image_path: str,
+        instruction: str,
+        confidence_threshold: float,
+        initial_state: AgentState | None = None,
+    ) -> AgentState:
         self.calls.append(image_path)
         # img_bad 首次运行抛错（模拟模型崩溃），续跑时恢复（模拟已修复）
         if "img_bad" in image_path and "img_bad" not in self.raised:

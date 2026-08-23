@@ -9,6 +9,7 @@ import typer
 
 from auto2dlabel.agent.llm import create_client
 from auto2dlabel.agent.orchestrator import AgentOrchestrator
+from auto2dlabel.agent.state import AgentState
 from auto2dlabel.cli_common import (
     collect_images,
     console,
@@ -41,6 +42,9 @@ def run_command(
     bot_sort: bool = False,
     reid_model: str = "openai/clip-vit-base-patch32",
     viz: bool = True,
+    roi: str | None = None,
+    refer_l2: bool = False,
+    refer_l3: bool = False,
 ) -> None:
     """`run` 命令实现：续跑/新建清单 → 逐图编排 → 导出/可视化/HITL 分流。"""
     setup_logging(verbose)
@@ -69,10 +73,14 @@ def run_command(
             use_bot_sort=bot_sort,
             reid_model_name=reid_model,
             viz=viz,
+            roi=roi,
+            refer_l2=refer_l2,
+            refer_l3=refer_l3,
         )
         return
 
     # ---- 续跑模式：清单为单一事实源（图像列表/指令/参数均从清单读取） ----
+    restored: dict[str, AgentState] = {}  # 快照恢复表（仅 resume 分支填充）
     if resume:
         from auto2dlabel.tools.batch import load_manifest, resume_targets
 
@@ -87,11 +95,30 @@ def run_command(
         provider = str(cfg.get("provider", provider))
         model = cfg.get("model", model) or None
         sahi = bool(cfg.get("sahi", sahi))
-        image_files = [Path(e.path) for e in resume_targets(manifest) if Path(e.path).exists()]
-        if not image_files:
+        targets = [e for e in resume_targets(manifest) if Path(e.path).exists()]
+        if not targets:
             console.print("[green]清单中无待重跑图像（全部 ok 或文件已不存在）[/green]")
             return
-        console.print(f"[dim]续跑模式: 清单 {resume} → 重跑 {len(image_files)} 张[/dim]")
+
+        # 快照恢复（v0.4 Phase 3）：带 state_file 的条目从 AgentState 快照续跑
+        # （跳过已完成的 Agent Loop 迭代，防重复检测红线不破）；损坏快照回退整图重跑
+        restored = {}
+        for e in targets:
+            if not e.state_file or not Path(e.state_file).is_file():
+                continue
+            try:
+                st = AgentState.from_dict(
+                    json.loads(Path(e.state_file).read_text(encoding="utf-8"))
+                )
+                restored[e.path] = st
+            except Exception:
+                console.print(f"[yellow]快照损坏，将整图重跑: {e.state_file}[/yellow]")
+
+        image_files = [Path(e.path) for e in targets]
+        console.print(
+            f"[dim]续跑模式: 清单 {resume} → 重跑 {len(image_files)} 张"
+            f"（快照续跑 {len(restored)} 张）[/dim]"
+        )
         manifest_path = resume
     else:
         if not image:
@@ -164,6 +191,7 @@ def run_command(
                 image_path=str(img_path),
                 instruction=instruction,
                 confidence_threshold=threshold,
+                initial_state=restored.get(str(img_path.resolve())),
             )
         except Exception as e:
             error_msg = str(e)
@@ -232,7 +260,7 @@ def run_command(
         # HITL 置信度分流
         triage_and_export(state, img_path, threshold, _ts)
 
-        # 写 AgentState 快照 + 更新清单（快照仅供调试/审计，from_dict 恢复未实现）
+        # 写 AgentState 快照 + 更新清单（快照供 --resume 的 from_dict 续跑与调试审计）
         state_file = f"{output}/{img_path.stem}_{_ts}_state.json"
         Path(output).mkdir(parents=True, exist_ok=True)
         Path(state_file).write_text(json.dumps(state.to_dict(), indent=2, ensure_ascii=False))

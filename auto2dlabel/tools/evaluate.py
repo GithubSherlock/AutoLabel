@@ -23,7 +23,8 @@ class EvaluateTool(Tool):
     description = (
         "质量评估未通过时选择处置动作: accept(接受现状) / "
         "flag_for_review(整图转入人工复核队列) / "
-        "retry_lower_threshold(以更低置信度阈值重新检测一次)"
+        "retry_lower_threshold(以更低置信度阈值重新检测一次) / "
+        "retry_swap_model(换一个备选检测模型重新检测一次)"
     )
 
     def __init__(
@@ -32,11 +33,15 @@ class EvaluateTool(Tool):
         retry_used: bool,
         base_threshold: float,
         detect_fn: Callable[[float], list[Any]] | None = None,
+        model_retried: bool = False,
+        swap_fn: Callable[[], list[Any]] | None = None,
     ) -> None:
         self.report = report
         self.retry_used = retry_used
         self.base_threshold = base_threshold
         self.detect_fn = detect_fn
+        self.model_retried = model_retried
+        self.swap_fn = swap_fn
 
     @property
     def input_schema(self) -> dict[str, Any]:
@@ -45,7 +50,10 @@ class EvaluateTool(Tool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["accept", "flag_for_review", "retry_lower_threshold"],
+                    "enum": [
+                        "accept", "flag_for_review",
+                        "retry_lower_threshold", "retry_swap_model",
+                    ],
                     "description": "处置动作（只能调用一次）",
                 },
             },
@@ -61,4 +69,6 @@ class EvaluateTool(Tool):
             retry_used=self.retry_used,
             base_threshold=self.base_threshold,
             detect_fn=self.detect_fn,
+            model_retried=self.model_retried,
+            swap_fn=self.swap_fn,
         )

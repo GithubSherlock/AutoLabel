@@ -72,6 +72,23 @@ def run(
         False, "--no-viz",
         help="跟踪模式：跳过逐帧 PNG 可视化（vis_outputs），省磁盘；MOT/JSON/成片视频不受影响",
     ),
+    roi: str = typer.Option(
+        None, "--roi",
+        help="跟踪模式空间约束（ROI）：矩形 'x1,y1,x2,y2' 或分号多边形 'x1,y1;x2,y2;...'，"
+        "只保留框中心点在区域内的目标（如车道区域）；'auto' 自动检测自车车道多边形"
+        "（首帧 UFLD 车道线模型，权重下载 auto2dlabel/weights/download_lane_weights.sh）",
+    ),
+    refer_l2: bool = typer.Option(
+        False, "--refer-l2",
+        help="指代 L2（Florence-2 兜底）：关系/复合指代（如「红车旁边的行人」）首帧"
+        "解析锁定目标（指令含 旁边/附近/之间 等关系词时自动触发）",
+    ),
+    refer_l3: bool = typer.Option(
+        False, "--refer-l3",
+        help="指代 L3（Qwen2-VL-7B，GPU）：复杂上下文指代直用 L3 首帧解析"
+        "（默认指代路径为阶梯升级——L2 失败自动升级 L3；权重下载 "
+        "auto2dlabel/weights/download_qwen_l3.sh）",
+    ),
 ) -> None:
     """对图像运行 Agentic 标注。"""
     run_command(
@@ -95,6 +112,9 @@ def run(
         bot_sort=bot_sort,
         reid_model=reid_model,
         viz=not no_viz,
+        roi=roi,
+        refer_l2=refer_l2,
+        refer_l3=refer_l3,
     )
 
 
@@ -137,6 +157,20 @@ def chat(
         False, "--no-viz",
         help="跟踪指令：跳过逐帧 PNG 可视化（vis_outputs），省磁盘；MOT/JSON/成片视频不受影响",
     ),
+    batch_strategy: bool = typer.Option(
+        False, "--batch-strategy",
+        help="批量检测：抽样统计后让 LLM 一次性调参（阈值覆写 + 模型建议；每批 1 次 LLM 调用）",
+    ),
+    refer_l2: bool = typer.Option(
+        False, "--refer-l2",
+        help="指代 L2（Florence-2 兜底）：跟踪指令含关系词（旁边/附近/之间）自动触发，"
+        "也可显式启用——首帧解析锁定目标",
+    ),
+    refer_l3: bool = typer.Option(
+        False, "--refer-l3",
+        help="指代 L3（Qwen2-VL-7B，GPU）：复杂上下文指代直用 L3 首帧解析"
+        "（默认指代路径为阶梯升级——L2 失败自动升级 L3）",
+    ),
 ) -> None:
     """自然语言驱动的 Agentic 标注——无需记忆 CLI 参数。
 
@@ -144,6 +178,8 @@ def chat(
         auto2dlabel chat "检测 000860.png 中的汽车和行人，conf=0.5"
         auto2dlabel chat "检测汽车和行人" -d rtdetr-x.pt --no-wait
         auto2dlabel chat "检测汽车和行人" --batch-size 8 --num-workers 4
+        auto2dlabel chat "检测汽车和行人" --batch-strategy  # 大批量：抽样 + LLM 调参
+        auto2dlabel chat "跟踪 video.mp4 中红车旁边的行人" --no-wait  # 关系指代 → L2 自动触发
         auto2dlabel chat  →  进入交互对话模式
     """
     chat_command(
@@ -157,6 +193,9 @@ def chat(
         batch_size=batch_size,
         num_workers=num_workers,
         viz=not no_viz,
+        batch_strategy=batch_strategy,
+        refer_l2=refer_l2,
+        refer_l3=refer_l3,
     )
 
 

@@ -574,12 +574,210 @@ def load_imagenet100_ground_truth(
 
 
 # ================================================================
+# ImageNet1k（ILSVRC2012 val，1000 类）
+# ================================================================
+
+IMAGENET1K_VAL_TAR = ARCHIVE_ROOT / "ImageNet" / "ILSVRC2012" / "ILSVRC2012_img_val.tar"
+IMAGENET1K_DEVKIT = ARCHIVE_ROOT / "ImageNet" / "ILSVRC2012" / "ILSVRC2012_devkit_t12.tar.gz"
+
+
+def parse_imagenet1k_validation_gt(
+    devkit_archive: Path | None = None,
+) -> dict[str, int]:
+    """devkit ILSVRC2012_validation_ground_truth.txt → {文件名: ILSVRC2012_ID}。
+
+    兼容两种行格式：官方两列 "ILSVRC2012_val_00000001.JPEG 490"；本归档副本
+    仅单列类 ID（行序即图序，第 i 行 ↔ ILSVRC2012_val_{i:08d}.JPEG，已实测）。
+    流式读取 tar 内成员，不落盘。
+    """
+    if devkit_archive is None:
+        devkit_archive = IMAGENET1K_DEVKIT
+    if not devkit_archive.exists():
+        raise FileNotFoundError(f"devkit 未找到: {devkit_archive}")
+
+    with tarfile.open(devkit_archive, "r:gz") as tf:
+        member = next(
+            (m for m in tf.getnames() if m.endswith("ILSVRC2012_validation_ground_truth.txt")),
+            None,
+        )
+        if member is None:
+            raise FileNotFoundError(f"devkit 中未找到 GT 文件: {devkit_archive}")
+        raw = tf.extractfile(member)
+        if raw is None:
+            raise FileNotFoundError(f"无法读取 {member}（空成员）")
+        lines = raw.read().decode("utf-8").splitlines()
+
+    gt: dict[str, int] = {}
+    for i, line in enumerate(lines, start=1):
+        parts = line.split()
+        if len(parts) == 2:
+            fname, cid = parts[0], int(parts[1])
+        elif len(parts) == 1:
+            fname, cid = f"ILSVRC2012_val_{i:08d}.JPEG", int(parts[0])
+        else:
+            continue
+        gt[fname] = cid
+    return gt
+
+
+def load_imagenet1k_meta(
+    devkit_archive: Path | None = None,
+) -> dict[str, str]:
+    """meta.mat → {ILSVRC2012_ID(str): 英文类名}（仅 1k 类，ID 1-1000）。
+
+    meta.mat 含 1860 synset（ID 1001+ 为非 1k 附加集，不取）；words 形如
+    "kit fox, Vulpes macrotis"，取逗号前第一个词（与 load_imagenet100_meta
+    同模式，已实测与 torchvision 类名 100/100 匹配）。流式读取不落盘。
+
+    Returns:
+        {"1": "kit fox", ..., "1000": "..."} 映射。
+    """
+    from io import BytesIO
+
+    if devkit_archive is None:
+        devkit_archive = IMAGENET1K_DEVKIT
+    if not devkit_archive.exists():
+        raise FileNotFoundError(f"devkit 未找到: {devkit_archive}")
+
+    import scipy.io as sio
+
+    with tarfile.open(devkit_archive, "r:gz") as tf:
+        member = next((m for m in tf.getnames() if m.endswith("meta.mat")), None)
+        if member is None:
+            raise FileNotFoundError(f"devkit 中未找到 meta.mat: {devkit_archive}")
+        raw = tf.extractfile(member)
+        if raw is None:
+            raise FileNotFoundError(f"无法读取 {member}（空成员）")
+        mat = sio.loadmat(BytesIO(raw.read()))
+
+    synsets = mat["synsets"][:, 0]
+    mapping: dict[str, str] = {}
+    for s in synsets:
+        iid = int(s["ILSVRC2012_ID"][0, 0])
+        if not (1 <= iid <= 1000):
+            continue  # 非 1k synset（ID 0 与 1001+）
+        wnid = str(s["WNID"][0])
+        words = str(s["words"][0])
+        mapping[str(iid)] = words.split(",")[0].strip() or wnid  # 空名回退 wnid
+    return mapping
+
+
+def select_imagenet1k_members(
+    tar_path: Path,
+    gt: dict[str, int],
+    per_class: int,
+) -> list[str]:
+    """val tar 成员按类分层确定性抽样（类内按文件名排序取前 per_class 张）。
+
+    Args:
+        tar_path: 纯 tar（非 gz）路径。
+        gt: parse_imagenet1k_validation_gt 输出。
+        per_class: 每类张数（0 = 全部）。
+
+    Returns:
+        选中成员名列表（全局文件名排序，确定性）。
+    """
+    with tarfile.open(tar_path) as tf:
+        names = [m.name for m in tf.getmembers() if m.isfile()]
+
+    by_cls: dict[int, list[str]] = {}
+    for n in names:
+        cid = gt.get(Path(n).name)  # 取 basename 保险（val tar 扁平命名）
+        if cid is None:
+            continue
+        by_cls.setdefault(cid, []).append(n)
+
+    selected: list[str] = []
+    for cid in sorted(by_cls):
+        members = sorted(by_cls[cid])
+        selected.extend(members if per_class == 0 else members[:per_class])
+    return selected
+
+
+def ensure_imagenet1k_val(per_class: int = 2) -> Path:
+    """幂等选择性解压 ILSVRC2012 val（1000 类分层抽样）。
+
+    val tar 6.7GB / 5 万图，不整解压——按 devkit GT 每类确定性取 per_class 张
+    （1→1000 张冒烟档 / 2→2000 张默认 / 0 或 50→全量 5 万）。选名单写入
+    manifest（_selected_pc{per_class}.txt），再次调用免扫 6.7GB tar 索引。
+
+    Returns:
+        DATASETS_ROOT/imagenet1k/val/
+    """
+    dest = DATASETS_ROOT / "imagenet1k" / "val"
+    dest.mkdir(parents=True, exist_ok=True)
+
+    gt = parse_imagenet1k_validation_gt()
+    manifest = dest / f"_selected_pc{per_class}.txt"
+    if manifest.exists():
+        selected = manifest.read_text().splitlines()
+    else:
+        if not IMAGENET1K_VAL_TAR.exists():
+            raise FileNotFoundError(f"ImageNet1k val 归档未找到: {IMAGENET1K_VAL_TAR}")
+        selected = select_imagenet1k_members(IMAGENET1K_VAL_TAR, gt, per_class)
+        manifest.write_text("\n".join(selected))
+
+    missing = [m for m in selected if not (dest / m).exists()]
+    if not missing:
+        print(f"  ✓ 已存在 {len(selected)} 张图（每类 {per_class}）: {dest}")
+        return dest
+
+    print(f"📦 解压 ImageNet1k val（本次 {len(missing)}/{len(selected)} 张）...")
+    with tarfile.open(IMAGENET1K_VAL_TAR) as tf:
+        for m in missing:
+            tf.extract(m, dest)
+    print(f"  ✓ ImageNet1k val: {dest}")
+    return dest
+
+
+def load_imagenet1k_ground_truth(
+    dataset_root: Path,
+    max_images: int = 0,
+) -> dict[str, dict[str, Any]]:
+    """加载 ImageNet1k GT（扁平 val JPEG → devkit GT 类 ID → 英文类名）。
+
+    Args:
+        dataset_root: ensure_imagenet1k_val 返回的目录。
+        max_images: 最多图像数（0=全部）；跨类均匀截断（每类按比例取），
+            避免排序截断只覆盖少数类。
+
+    Returns:
+        {image_id(相对路径): {"file_name": str, "label": 英文名}}（单标签）
+    """
+    meta = load_imagenet1k_meta()
+    gt_orig = parse_imagenet1k_validation_gt()
+    gt: dict[str, dict[str, Any]] = {}
+    for img in sorted(dataset_root.iterdir()):
+        if not img.is_file() or img.name.startswith("_"):  # 跳过 manifest
+            continue
+        if img.suffix.lower() not in (".jpeg", ".jpg", ".png"):
+            continue
+        cid = gt_orig.get(img.name)
+        if cid is None:
+            continue
+        gt[img.name] = {"file_name": img.name, "label": meta.get(str(cid), f"class_{cid}")}
+
+    if max_images > 0 and len(gt) > max_images:
+        # 跨类均匀截断：每类按比例取前 N 张（确定性），再按全局排序截断
+        by_cls: dict[str, list[str]] = {}
+        for img_id, info in gt.items():
+            by_cls.setdefault(str(info["label"]), []).append(img_id)
+        per_cls = max(1, max_images // len(by_cls))
+        picked: list[str] = []
+        for ids in by_cls.values():
+            picked.extend(ids[:per_cls])
+        picked.sort()
+        gt = {i: gt[i] for i in picked[:max_images]}
+    return gt
+
+
+# ================================================================
 # 便捷函数：确保所有数据集
 # ================================================================
 
 
 def ensure_all() -> dict[str, Path]:
-    """确保所有 10 个数据集已解压。
+    """确保所有 11 个数据集已解压。
 
     Returns:
         {name: path} 映射。
@@ -595,4 +793,5 @@ def ensure_all() -> dict[str, Path]:
         "mot17": ensure_mot17_frcnn(),
         "mot20": ensure_mot20(),
         "imagenet100": ensure_imagenet100(),
+        "imagenet1k": ensure_imagenet1k_val(),
     }

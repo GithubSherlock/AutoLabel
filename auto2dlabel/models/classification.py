@@ -7,7 +7,7 @@ classify(image_path, candidates, top_k) -> list[ImageLabel]。
 
 from __future__ import annotations
 
-from typing import Any, Protocol, get_args
+from typing import Any, Protocol, cast, get_args
 
 from auto2dlabel.models import Image, os
 from auto2dlabel.models.detection import _match_prompt
@@ -305,6 +305,66 @@ class TorchVisionClassifier:
             logits = model(batch)
         scores = logits.softmax(dim=-1).detach().cpu().tolist()
         return [_topk_labels(s, self._class_names, top_k, candidates) for s in scores]
+
+
+class ClipCropScorer:
+    """CLIP 裁剪图打分器 —— 指代约束属性过滤的真实现（v0.4 3a）。
+
+    输入 PIL 裁剪图列表（tools/constraints 逐框裁剪产物，不落盘）+
+    文本候选，返回概率矩阵 scores[i][j]（候选原序，softmax 归一化）。
+    与 ClipModel 共享 HF_HOME 缓存与懒加载模式；单图协议（classify/
+    classify_batch 签名冻结）不受影响——约束层走独立接口。
+    """
+
+    def __init__(
+        self,
+        model_name: str = "openai/clip-vit-base-patch32",
+        device: str | None = None,
+    ) -> None:
+        self._model_name = model_name
+        self._device = device or get_device()
+        self._model: Any = None  # transformers 为可选依赖，类型按 Any 处理
+        self._processor: Any = None
+
+    def _load(self) -> Any:
+        """加载模型与处理器（幂等）。transformers 为可选依赖，类型按 Any 处理。"""
+        if self._model is not None:
+            return self._model
+        os.environ.setdefault("HF_HOME", str(WEIGHTS_DIR / "hf"))
+        try:
+            from transformers import CLIPModel, CLIPProcessor  # pyright: ignore[reportMissingImports]  # isort: skip
+        except ImportError:
+            raise ImportError("transformers 未安装，请运行: pip install transformers")
+
+        self._model = CLIPModel.from_pretrained(self._model_name)
+        self._processor = CLIPProcessor.from_pretrained(self._model_name)
+        self._model.to(self._device)
+        return self._model
+
+    def score_crops(
+        self,
+        images: list[Any],
+        candidates: list[str],
+    ) -> list[list[float]]:
+        """裁剪图 × 候选 → 概率矩阵（候选原序）。空输入返回空列表。"""
+        if not images or not candidates:
+            return []
+        self._load()
+        processor = self._processor
+        assert processor is not None  # _load 已初始化 processor
+
+        import torch
+
+        rgb = [im.convert("RGB") for im in images]
+        inputs = processor(text=candidates, images=rgb, return_tensors="pt", padding=True)
+        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            outputs = self._model(**inputs)
+        return cast(
+            list[list[float]],
+            outputs.logits_per_image.softmax(dim=-1).detach().cpu().tolist(),
+        )
 
 
 def create_classification_model(

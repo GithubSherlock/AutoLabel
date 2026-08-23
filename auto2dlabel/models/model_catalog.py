@@ -176,6 +176,21 @@ ULTRALYTICS_OBB_MODELS = [
 ]
 
 # ============================================================
+# 姿态估计模型（Ultralytics YOLO-pose，COCO 17 点）
+# ============================================================
+POSE_MODELS = [
+    # YOLO11-pose（COCO person keypoints 预训练）
+    "yolo11n-pose.pt", "yolo11s-pose.pt", "yolo11m-pose.pt",
+    "yolo11l-pose.pt", "yolo11x-pose.pt",
+    # YOLO12-pose（COCO person keypoints 预训练）
+    "yolo12n-pose.pt", "yolo12s-pose.pt", "yolo12m-pose.pt",
+    "yolo12l-pose.pt", "yolo12x-pose.pt",
+    # YOLO26-pose（COCO person keypoints 预训练）
+    "yolo26n-pose.pt", "yolo26s-pose.pt", "yolo26m-pose.pt",
+    "yolo26l-pose.pt", "yolo26x-pose.pt",
+]
+
+# ============================================================
 # 权重下载目录
 # ============================================================
 WEIGHTS_DIR = Path(__file__).resolve().parent.parent / "weights"
@@ -191,6 +206,7 @@ _CATALOG_SUMMARY_GROUPS: list[tuple[str, list[str], str]] = [
      "任意类别文本 prompt"),
     ("object_detection [PyTorch Vision, COCO80]", PYTORCH_DETECTION_MODELS, "高召回"),
     ("obb_detection [YOLO-OBB, DOTAv1]", ULTRALYTICS_OBB_MODELS, "航拍旋转框"),
+    ("pose_estimation [YOLO-pose, COCO17]", POSE_MODELS, "人体关键点，keypoints 随 bbox 输出"),
     ("instance_segmentation", SEGMENTATION_MODELS,
      "sam3/maskrcnn/fcn*/deeplabv3*/lraspp* 自带检测"),
     ("classification [零样本]", CLASSIFICATION_MODELS, "多候选 softmax top-K"),

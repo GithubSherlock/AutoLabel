@@ -164,6 +164,28 @@ async def list_segmentation_models():
     })
 
 
+@app.get("/api/obb-models")
+async def list_obb_models() -> JSONResponse:
+    """列出所有 YOLO-OBB 旋转框模型。"""
+    from auto2dlabel.models.model_catalog import ULTRALYTICS_OBB_MODELS
+
+    return JSONResponse({
+        "models": [{"name": m, "type": "yolo_obb"} for m in ULTRALYTICS_OBB_MODELS],
+        "total": len(ULTRALYTICS_OBB_MODELS),
+    })
+
+
+@app.get("/api/pose-models")
+async def list_pose_models() -> JSONResponse:
+    """列出所有 YOLO-pose 姿态估计模型。"""
+    from auto2dlabel.models.model_catalog import POSE_MODELS
+
+    return JSONResponse({
+        "models": [{"name": m, "type": "yolo_pose"} for m in POSE_MODELS],
+        "total": len(POSE_MODELS),
+    })
+
+
 @app.get("/api/cls-models")
 async def list_classification_models() -> JSONResponse:
     """列出所有可用分类模型，按类别分组（hf 零样本 / torchvision / custom）。"""
@@ -259,12 +281,18 @@ def _mask_to_dict(mask: Mask, ann: Annotation) -> dict[str, Any]:
 
 
 def _bbox_from_dict(d: dict[str, Any]) -> Bbox:
-    """从前端传来的 bbox dict 重建 Bbox。"""
+    """从前端传来的 bbox dict 重建 Bbox（含 angle/track_id/keypoints，旋转框与姿态不丢字段）。"""
     return Bbox(
         x=float(d["x"]), y=float(d["y"]),
         width=float(d["width"]), height=float(d["height"]),
         label=str(d.get("label", "")),
         confidence=float(d.get("confidence", 1.0)),
+        angle=float(d.get("angle", 0.0)),
+        track_id=d.get("track_id"),
+        keypoints=[
+            (float(k[0]), float(k[1]), float(k[2]))
+            for k in d.get("keypoints", [])
+        ],
     )
 
 
@@ -291,6 +319,7 @@ async def annotate(
     conf: float = Form(0.1),
     iou: float = Form(0.3),
     model: str = Form(DEFAULT_MODEL),
+    task_type: str = Form("detection"),
     with_seg: str = Form("false"),
     seg_model: str = Form("sam2_l.pt"),
     box_threshold: float = Form(0.3),
@@ -300,11 +329,15 @@ async def annotate(
 
     Args:
         image: 上传的图像文件。
-        instruction: 中文逗号/英文逗号分隔的检测目标，如 "car, person, bicycle"。
+        instruction: 中文逗号/英文逗号分隔的目标，如 "car, person, bicycle"。
         conf: 置信度阈值 (0-1)。
         iou: IoU 阈值 (0-1)。
-        model: 检测模型名，支持 model_catalog 中所有模型 + 自定义权重文件名。
-        with_seg: 是否同时进行实例分割 ("true" / "false")。
+        model: 模型名——task_type=detection 用检测模型，obb 用 YOLO-OBB
+            权重，classification 用分类模型（CLIP/SigLIP/torchvision），
+            pose 用 YOLO-pose 权重。
+        task_type: 任务类型 detection（默认）/ obb（旋转框）/ classification（图像分类）
+            / pose（姿态估计，keypoints 随 bbox 输出）。
+        with_seg: 是否同时进行实例分割 ("true" / "false"，仅 detection）。
         seg_model: 分割模型名，支持所有 SEGMENTATION_MODELS。
         box_threshold: Grounding DINO 的 box 阈值。
         text_threshold: Grounding DINO 的文本阈值。
@@ -324,31 +357,58 @@ async def annotate(
         tmp_path = tmp.name
 
     try:
-        # ── 2. 构建模型参数 ──
-        model_kwargs: dict = {"iou_threshold": iou}
-
-        # Grounding DINO 专属参数
-        if "/" in model or model in GROUNDING_DINO_MODELS:
-            model_kwargs["box_threshold"] = box_threshold
-            model_kwargs["text_threshold"] = text_threshold
-
-        # ── 3. 检测 ──
         instructions = [s.strip() for s in instruction.replace("，", ",").split(",") if s.strip()]
-        det_model = create_detection_model(model, **model_kwargs)
-        results = det_model.detect(tmp_path, instructions, confidence_threshold=conf)
-
-        # 构建 Annotation
         ann = Annotation(image_path=image.filename or "upload.jpg")
         ann.image_size = (img.width, img.height)
-        for r in results:
-            ann.add_bbox(Bbox(
-                x=r.x, y=r.y, width=r.width, height=r.height,
-                label=r.label, confidence=r.confidence,
-            ))
 
-        # ── 4. 可选分割 ──
-        do_seg = with_seg.lower() in ("true", "on", "1", "yes")
-        masks_out: list[dict] = []
+        # ── 2. 按任务类型执行 ──
+        if task_type == "obb":
+            # 旋转框：OBBResult (cx, cy, w, h, angle) → Bbox (x=cx-w/2, y=cy-h/2)
+            from auto2dlabel.models.obb import create_obb_model
+
+            obb_model = create_obb_model(model, iou_threshold=iou)
+            for r in obb_model.detect_obb(tmp_path, instructions, confidence_threshold=conf):
+                ann.add_bbox(Bbox(
+                    x=r.cx - r.width / 2, y=r.cy - r.height / 2,
+                    width=r.width, height=r.height, angle=r.angle,
+                    label=r.label, confidence=r.confidence,
+                ))
+        elif task_type == "classification":
+            # 图像分类：候选 = instruction 逗号分隔 → ann.labels（零 bbox）
+            from auto2dlabel.models.classification import create_classification_model
+
+            cls_model = create_classification_model(model)
+            ann.labels.extend(cls_model.classify(tmp_path, instructions, top_k=5))
+        elif task_type == "pose":
+            # 姿态估计：PoseResult → Bbox(keypoints)，COCO 17 点 [x, y, v]
+            from auto2dlabel.models.pose import create_pose_model
+
+            pose_model = create_pose_model(model, iou_threshold=iou)
+            for pr in pose_model.detect_pose(tmp_path, instructions, confidence_threshold=conf):
+                ann.add_bbox(Bbox(
+                    x=pr.x, y=pr.y, width=pr.width, height=pr.height,
+                    label=pr.label, confidence=pr.confidence, keypoints=pr.keypoints,
+                ))
+        else:
+            # 检测（默认路径）
+            model_kwargs: dict[str, Any] = {"iou_threshold": iou}
+
+            # Grounding DINO 专属参数
+            if "/" in model or model in GROUNDING_DINO_MODELS:
+                model_kwargs["box_threshold"] = box_threshold
+                model_kwargs["text_threshold"] = text_threshold
+
+            det_model = create_detection_model(model, **model_kwargs)
+            det_results = det_model.detect(tmp_path, instructions, confidence_threshold=conf)
+            for det in det_results:
+                ann.add_bbox(Bbox(
+                    x=det.x, y=det.y, width=det.width, height=det.height,
+                    label=det.label, confidence=det.confidence,
+                ))
+
+        # ── 3. 可选分割（仅 detection） ──
+        do_seg = task_type == "detection" and with_seg.lower() in ("true", "on", "1", "yes")
+        masks_out: list[dict[str, Any]] = []
 
         if do_seg:
             from auto2dlabel.models.segmentation import create_segmentation_model
@@ -362,18 +422,20 @@ async def annotate(
                     ann.add_mask(m)
                 masks_out = [_mask_to_dict(m, ann) for m in ann.masks]
 
-        # ── 5. 生成可视化 ──
+        # ── 4. 生成可视化 ──
         import cv2
 
         vis_img = img_np.copy()
         vis_bgr = cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR)
 
-        from auto2dlabel.tools.visualize import draw_bboxes, draw_masks
+        from auto2dlabel.tools.visualize import draw_bboxes, draw_keypoints, draw_masks
 
         if ann.masks:
             vis_bgr = draw_masks(vis_bgr, ann.masks)
         if ann.bboxes:
             vis_bgr = draw_bboxes(vis_bgr, ann.bboxes)
+            # 姿态任务：bboxes 含 keypoints 时叠加 COCO 17 点骨架（无 keypoints 自动跳过）
+            vis_bgr = draw_keypoints(vis_bgr, ann.bboxes)
 
         vis_rgb = cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB)
 
@@ -384,11 +446,13 @@ async def annotate(
         # 类别统计
         classes = list({b.label for b in ann.bboxes})
         avg_conf = round(sum(b.confidence for b in ann.bboxes) / max(len(ann.bboxes), 1), 3)
+        labels_out = [lab.to_dict() for lab in ann.labels]
 
         return JSONResponse({
             "image_base64": f"data:image/png;base64,{vis_b64}",
             "image_path": image.filename or "upload.jpg",
             "bboxes": [b.to_dict() for b in ann.bboxes],
+            "labels": labels_out,
             "masks": masks_out,
             "summary": {
                 "total": len(ann.bboxes),
@@ -397,6 +461,8 @@ async def annotate(
                 "with_seg": do_seg and len(ann.masks) > 0,
                 "model": model,
                 "seg_model": seg_model if do_seg else None,
+                "task_type": task_type,
+                "labels": labels_out,
             },
         })
 
@@ -503,7 +569,12 @@ async def get_review_image(path: str = "") -> JSONResponse | FileResponse:
 
 @app.post("/api/review-save")
 async def save_review(payload: dict[str, Any] = Body(...)) -> JSONResponse:
-    """保存人工复核修正：过滤删除框 → 写 COCO → 源队列文件标记 .reviewed。"""
+    """保存人工复核修正：过滤删除框 → 写 COCO → 源队列文件标记 .reviewed。
+
+    payload 支持两种模式（互斥，edited 优先）：
+    - edited: 修正后的框全量重建（拖拽/改标签后的完整 bbox 列表）
+    - deleted_indices: 仅删除框下标（旧模式，向后兼容）
+    """
     name = str(payload.get("queue_file", ""))
     if not name.endswith("_review.json") or "/" in name or "\\" in name:
         return JSONResponse({"error": f"非法队列文件: {name}"}, status_code=400)
@@ -518,8 +589,14 @@ async def save_review(payload: dict[str, Any] = Body(...)) -> JSONResponse:
         return JSONResponse({"error": f"队列文件损坏: {name}"}, status_code=400)
 
     annotations = list(data.get("annotations", []))
-    deleted = {int(i) for i in payload.get("deleted_indices", [])}
-    kept = [a for i, a in enumerate(annotations) if i not in deleted]
+    edited = payload.get("edited")
+    if edited is not None:
+        kept = list(edited)  # 修正框全量重建（含拖拽/标签编辑）
+        deleted_count = len(annotations) - len(kept)
+    else:
+        deleted = {int(i) for i in payload.get("deleted_indices", [])}
+        kept = [a for i, a in enumerate(annotations) if i not in deleted]
+        deleted_count = len(deleted)
 
     stem = name.removesuffix("_review.json")
     ann = Annotation(
@@ -540,7 +617,7 @@ async def save_review(payload: dict[str, Any] = Body(...)) -> JSONResponse:
         "ok": True,
         "saved_path": str(out),
         "kept": len(kept),
-        "deleted": len(deleted),
+        "deleted": deleted_count,
     })
 
 

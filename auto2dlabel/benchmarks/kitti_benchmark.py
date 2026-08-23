@@ -46,14 +46,57 @@ KITTI_TO_COCO = {
 # 1. GT 加载
 # ================================================================
 
-def load_kitti_ground_truth(image_dir: Path, label_dir: Path, max_images: int = 0) -> dict[int, dict[str, Any]]:
+def kitti_difficulty(truncated: float, occluded: int, height: float) -> str | None:
+    """KITTI 官方 difficulty 判据（height = bbox 像素高度 y2-y1）。
+
+    - easy:     h ≥ 40 且 trunc ≤ 0.15 且 occ == 0
+    - moderate: h ≥ 25 且 trunc ≤ 0.3  且 occ ≤ 1
+    - hard:     h ≥ 25 且 trunc ≤ 0.5  且 occ ≤ 2
+    - 其余（过小/遮挡过重/截断过重）→ None（不参与评测）
+    """
+    if height >= 40 and truncated <= 0.15 and occluded == 0:
+        return "easy"
+    if height >= 25 and truncated <= 0.3 and occluded <= 1:
+        return "moderate"
+    if height >= 25 and truncated <= 0.5 and occluded <= 2:
+        return "hard"
+    return None
+
+
+def filter_gt_by_difficulty(
+    gt: dict[int, dict[str, Any]], difficulty: str,
+) -> dict[int, dict[str, Any]]:
+    """按难度档过滤 GT（对象须带 difficulty 标签；无该档对象的图保留空列表）。
+
+    预测不按难度过滤（检测结果无难度语义）——分层评测 = 分层 GT × 全量预测，
+    与 KITTI 官方口径一致。
+    """
+    return {
+        idx: {
+            "file_name": info["file_name"],
+            "objects": [o for o in info["objects"] if o.get("difficulty") == difficulty],
+        }
+        for idx, info in gt.items()
+    }
+
+
+def load_kitti_ground_truth(
+    image_dir: Path,
+    label_dir: Path,
+    max_images: int = 0,
+    difficulty: str | None = None,
+) -> dict[int, dict[str, Any]]:
     """加载 KITTI 标注。
 
     KITTI txt 格式每行:
       class truncated occluded alpha x1 y1 x2 y2 h w l x y z rot_y
 
+    difficulty: None = 全量（每个对象带 difficulty 标签）；指定 easy/moderate/hard
+    时只保留该档对象（其余档与 ignore 类对象剔除）。
+
     Returns:
-        {idx: {"file_name": str, "objects": [{"name": "car", "bbox": [x1,y1,x2,y2]}]}}
+        {idx: {"file_name": str, "objects": [{"name": "car", "bbox": [x1,y1,x2,y2],
+               "difficulty": "easy"}]}}
     """
     label_files = sorted(label_dir.glob("*.txt"))
     if max_images > 0:
@@ -82,9 +125,20 @@ def load_kitti_ground_truth(image_dir: Path, label_dir: Path, max_images: int = 
                 continue
 
             x1, y1, x2, y2 = float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])
-            objects.append({"name": coco_name, "bbox": [x1, y1, x2, y2]})
+            truncated = float(parts[1])
+            occluded = int(parts[2])
+            diff = kitti_difficulty(truncated, occluded, y2 - y1)
+            if diff is None:
+                continue  # 不满足任何难度档（ignore 语义），不参与评测
+            objects.append({
+                "name": coco_name, "bbox": [x1, y1, x2, y2],
+                "difficulty": diff,
+            })
 
         gt[i] = {"file_name": img_name, "objects": objects}
+
+    if difficulty:
+        gt = filter_gt_by_difficulty(gt, difficulty)
 
     if skipped:
         print(f"跳过 {skipped} 张缺少图片的标注")
@@ -174,6 +228,10 @@ def run_detection(
 def main():
     parser = build_parser("KITTI object Detection Benchmark")
     parser.set_defaults(model="yolo26x.pt")
+    parser.add_argument(
+        "--difficulty", choices=["all", "easy", "moderate", "hard"], default="all",
+        help="难度分层：all=overall+三档同报；easy/moderate/hard=单档（KITTI 官方判据）",
+    )
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -205,32 +263,61 @@ def main():
                           lambda img_id, info: image_dir / info["file_name"])
         print()
 
-    # 评估
+    # 评估（--difficulty all = overall + 三档分层同报；分层 = 分层 GT × 全量预测）
     print(f"计算指标（IoU@{IOU_MATCH_THRESHOLD}）...\n")
-    all_cats = sorted(set(o["name"] for g in gt.values() for o in g["objects"]))
-    results = {}
-    for cls in all_cats:
-        results[cls] = evaluate_per_class(gt, predictions, cls, IOU_MATCH_THRESHOLD)
+    if args.difficulty == "all":
+        tiers = [("overall", gt)] + [
+            (t, filter_gt_by_difficulty(gt, t)) for t in ("easy", "moderate", "hard")
+        ]
+    else:
+        tiers = [(args.difficulty, filter_gt_by_difficulty(gt, args.difficulty))]
 
-    summary = format_result_table(results, all_cats, top_n=args.top_classes)
-    print(summary)
+    per_tier: dict[str, dict[str, Any]] = {}
+    primary_summary = ""
+    for tier_name, tier_gt in tiers:
+        tier_cats = sorted(set(o["name"] for g in tier_gt.values() for o in g["objects"]))
+        tier_results = {
+            cls: evaluate_per_class(tier_gt, predictions, cls, IOU_MATCH_THRESHOLD)
+            for cls in tier_cats
+        }
+        map_tier = float(np.mean([tier_results[c]["ap"] for c in tier_cats])) if tier_cats else 0.0
+        per_tier[tier_name] = {
+            "mAP@0.5": round(map_tier, 4),
+            "gt_objects": sum(len(g["objects"]) for g in tier_gt.values()),
+            "per_class": tier_results,
+        }
+        if tier_name == tiers[0][0]:  # 主表：overall 或指定单档
+            primary_summary = format_result_table(tier_results, tier_cats, top_n=args.top_classes)
+
+    print(primary_summary)
     print()
+    if args.difficulty == "all":
+        for tier_name in ("easy", "moderate", "hard"):
+            t = per_tier[tier_name]
+            print(f"  {tier_name:>8}: mAP@0.5 = {t['mAP@0.5']:.4f}（{t['gt_objects']} GT 目标）")
+        print()
 
     # 保存
-    mAP = float(np.mean([results[cls]["ap"] for cls in all_cats if cls in results]))
+    primary = per_tier[tiers[0][0]]
     result_data = {
         "timestamp": ts, "dataset": "KITTI object",
         "model": args.model, "confidence_threshold": args.conf,
         "iou_match_threshold": IOU_MATCH_THRESHOLD, "image_count": len(gt),
-        "summary": {"mAP@0.5": round(mAP, 4)},
-        "per_class": {cls: results[cls] for cls in all_cats},
+        "difficulty": args.difficulty,
+        "summary": {
+            "mAP@0.5": primary["mAP@0.5"],
+            "per_difficulty": {t: v["mAP@0.5"] for t, v in per_tier.items()},
+        },
+        "per_class": primary["per_class"],
     }
 
     json_path, md_path = save_results(result_data, "kitti", args.model, ts)
+    diff_line = " | ".join(f"{t} {v['mAP@0.5']:.4f}" for t, v in per_tier.items())
     md_path.write_text("\n".join([
         f"# KITTI object Benchmark",
-        f"- **模型**: {args.model} | **conf**: {args.conf} | **mAP@0.5**: {mAP:.4f}",
-        f"```\n{summary}\n```",
+        f"- **模型**: {args.model} | **conf**: {args.conf} | **mAP@0.5**: {primary['mAP@0.5']:.4f}",
+        f"- **难度分层**: {diff_line}",
+        f"```\n{primary_summary}\n```",
     ]))
     print(f"结果: {json_path}")
     print(f"报告: {md_path}")

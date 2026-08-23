@@ -9,7 +9,7 @@
 | 数据集 | 模块 | 规模（评测子集） | 已解压（datasets/） | 归档源（/root/autodl-pub） | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | ImageNet100 | 分类 | 100 类（wnid 目录） | `imagenet100/`（每类 50 张抽样解压 = 5000 图 / 566MB） | `ImageNet100/imagenet100.zip`（14GB） | ✅ 抽样解压就绪（`--per-class` 可调） |
-| ILSVRC2012 val | 分类 | 50,000 图 / 1,000 类 | — | `ImageNet/ILSVRC2012/ILSVRC2012_img_val.tar`（6.7GB）+ devkit GT | 📦 归档可用，未解压 |
+| ILSVRC2012 val | 分类 | 50,000 图 / 1,000 类 | `imagenet1k/val/`（不整解压，devkit GT 每类分层抽样，默认 2 张/类 = 2000 图；manifest 幂等） | `ImageNet/ILSVRC2012/ILSVRC2012_img_val.tar`（6.7GB）+ devkit GT | ✅ 接入（2026-08-23，`classification_benchmark --dataset imagenet1k`，实测见 `tests/test-v0.5.md`） |
 | cifar-10 / cifar-100 | 分类 | 10 / 100 类，32×32 | — | `cifar-10/`、`cifar-100/`（各 ~170MB） | 📦 归档可用（冒烟用） |
 | CUB200-2011 | 分类 | 200 类细粒度 | — | `CUB200-2011/CUB_200_2011.tgz`（1.1GB） | 📦 归档可用，未解压 |
 | PASCAL VOC 2007 | 检测 | 4,952 图（test）/ 20 类 | `VOCdevkit/`（904MB） | `VOCdevkit/` | ✅ 就绪 |

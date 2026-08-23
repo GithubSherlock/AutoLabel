@@ -75,6 +75,9 @@ def chat_command(
     batch_size: int | None = None,
     num_workers: int | None = None,
     viz: bool = True,
+    batch_strategy: bool = False,
+    refer_l2: bool = False,
+    refer_l3: bool = False,
 ) -> None:
     """`chat` 命令实现：自然语言解析 → 缺失参数追问 → 确认 → 执行 TaskPlan。"""
     setup_logging(verbose)
@@ -149,6 +152,28 @@ def chat_command(
 
     use_bot_sort = detect_tracker_kind(plan.raw_instruction) == "bot_sort"
 
+    # ---- Step 4.6: 指代约束解析（v0.4 3a，代码级；非跟踪步骤时无副作用）----
+    from auto2dlabel.tools.constraints import has_relation, parse_referential
+
+    constraint = None
+    if any(s.task_type == "tracking" for s in plan.steps):
+        try:
+            constraint = parse_referential(plan.raw_instruction)
+            if not constraint.is_plain:
+                console.print(
+                    f"[dim]指代约束: 属性 {constraint.attributes}  方位 {constraint.position}[/dim]"
+                )
+        except ValueError:
+            pass  # 无类别关键词时 planner 已兜底，约束保持 None
+
+    # ---- Step 4.7: 指代 L2/L3 触发（v0.5；显式 flag 或关系词自动）----
+    use_l2 = refer_l2 or has_relation(plan.raw_instruction)
+    use_l3 = refer_l3  # L3 仅显式直用；默认指代路径为阶梯升级（L2 失败自动升级 L3）
+    if use_l3:
+        console.print("[dim]指代 L3 (Qwen2-VL-7B): 跟踪首帧解析锁定目标[/dim]")
+    elif use_l2:
+        console.print("[dim]指代 L2 (Florence-2, 失败升级 L3): 跟踪首帧解析锁定目标[/dim]")
+
     # ---- Step 5: 执行 TaskPlan ----
     console.print(f"\n[bold]开始执行 {len(plan.steps)} 步任务...[/bold]\n")
     execute_plan(
@@ -158,6 +183,11 @@ def chat_command(
         explicit_num_workers=num_workers,
         use_bot_sort=use_bot_sort,
         viz=viz,
+        constraint=constraint,
+        batch_strategy=batch_strategy,
+        llm=llm,
+        refer_l2=use_l2,
+        refer_l3=use_l3,
     )
 
     console.print("\n[bold green]✓ 全部任务完成[/bold green]")

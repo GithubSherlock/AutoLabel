@@ -78,6 +78,11 @@ BENCHMARKS = {
         "model": "resnet18",
         "default_args": "--dataset imagenet100 --max-images 50 --per-class 50",
     },
+    "imagenet1k": {
+        "script": "classification_benchmark.py",
+        "model": "resnet18",
+        "default_args": "--dataset imagenet1k --per-class 2 --max-images 200",
+    },
 }
 
 OUTPUT_DIR = _PROJECT_ROOT / "benchmarks_outputs"

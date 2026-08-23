@@ -1,4 +1,4 @@
-"""TaskPlan 执行器 —— chat 命令 Step 5 的实现（检测/分割/分类/OBB/跟踪五类任务）。"""
+"""TaskPlan 执行器 —— chat 命令 Step 5 的实现（检测/分割/分类/OBB/姿态/跟踪六类任务）。"""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from auto2dlabel.cli_common import collect_images, console, display_results, tri
 from auto2dlabel.models.model_catalog import SEGMENTATION_MODELS, TORCHVISION_SEG_MODELS
 from auto2dlabel.schema.annotation import Annotation, Bbox
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL, TaskPlan, TaskStep
+from auto2dlabel.tools.constraints import ReferentialConstraint
 from auto2dlabel.tools.tracking import DEFAULT_REID_MODEL
 
 if TYPE_CHECKING:
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from auto2dlabel.models.classification import ClassificationModel
     from auto2dlabel.models.detection import DetectionModel
     from auto2dlabel.models.obb import OBBModel
+    from auto2dlabel.models.pose import PoseModel
 
 
 def execute_plan(
@@ -31,6 +33,11 @@ def execute_plan(
     reid_model_name: str = DEFAULT_REID_MODEL,
     output_dir: str = "outputs",
     viz: bool = True,
+    constraint: ReferentialConstraint | None = None,
+    batch_strategy: bool = False,
+    llm: Any | None = None,
+    refer_l2: bool = False,
+    refer_l3: bool = False,
 ) -> None:
     """顺序执行 TaskPlan 的每个步骤。
 
@@ -39,6 +46,14 @@ def execute_plan(
     use_bot_sort/reid_model_name/output_dir：tracking 步骤的跟踪器选择、
     ReID 特征模型与输出目录（run --track 与 chat 共用 TrackingTool 管线）。
     viz：tracking 步骤是否输出逐帧 PNG 可视化（--no-viz 关闭，省磁盘）。
+    constraint：tracking 步骤的指代约束（v0.4 3a——chat 从 raw_instruction
+    代码级解析；None = 纯类别跟踪）。
+    batch_strategy：多图检测步骤抽样统计 + LLM 一次性调参（3b；LLM 每批
+    1 次调用，逐图仍零 LLM）；llm 为 chat 已建的客户端（None = 无 key，跳过）。
+    refer_l2：tracking 步骤启用 v0.5 指代 L2（Florence-2 首帧解析锁定目标；
+    chat 由关系词自动触发或 --refer-l2 显式启用）。
+    refer_l3：tracking 步骤直用 v0.5 指代 L3（Qwen2-VL-7B，GPU）；refer_l2
+    路径默认阶梯升级（L2 失败自动升级 L3）。
     """
     _plan_t0 = _time.time()
     steps_results: list[dict[str, Any]] = []
@@ -63,6 +78,10 @@ def execute_plan(
                 explicit_num_workers=explicit_num_workers,
                 steps_results=steps_results,
                 viz=viz,
+                constraint=constraint,
+                refer_l2=refer_l2,
+                refer_l3=refer_l3,
+                raw_instruction=plan.raw_instruction,
             )
             continue
 
@@ -88,7 +107,7 @@ def execute_plan(
 
             seg_model = create_segmentation_model(seg_name)
 
-        # OBB/分类模型步骤级复用（原每块重建——同上，权重加载只发生一次）
+        # OBB/分类/姿态模型步骤级复用（原每块重建——同上，权重加载只发生一次）
         obb_model: Any | None = None
         if step.task_type == "obb_detection":
             from auto2dlabel.models.obb import create_obb_model
@@ -99,11 +118,20 @@ def execute_plan(
             from auto2dlabel.models.classification import create_classification_model
 
             cls_model = create_classification_model(step.model_name)
+        pose_model: Any | None = None
+        if step.task_type == "pose_estimation":
+            from auto2dlabel.models.pose import create_pose_model
+
+            pose_model = create_pose_model(step.model_name, iou_threshold=step.iou_threshold)
+
+        # 批次级策略（3b）：多图检测步骤抽样统计 + LLM 一次性调参（失败降级零影响）
+        if batch_strategy and step.task_type == "object_detection" and det_name and len(images) > 1:
+            _apply_batch_strategy(step, images, model, llm, plan.raw_instruction)
 
         # 批量推理超参数：显式 > 动态实测（模型加载后探针测单图峰值）> 静态表
         batch_size, num_workers = _resolve_step_batch(
             step, images, det_name, seg_name, model, seg_model, obb_model, cls_model,
-            sahi, explicit_batch_size, explicit_num_workers,
+            pose_model, sahi, explicit_batch_size, explicit_num_workers,
         )
         console.print(f"  批量: batch_size={batch_size}  num_workers={num_workers}")
         # 分块执行；批量路径 OOM 时剩余图降级逐图（batch=1 历史已验证路径）
@@ -113,7 +141,8 @@ def execute_plan(
                 _execute_chunk(
                     step, images[i:i + batch_size], det_name, seg_name, model, seg_model,
                     sahi, _t0, _ts, steps_results,
-                    obb_model=obb_model, cls_model=cls_model, num_workers=num_workers,
+                    obb_model=obb_model, cls_model=cls_model, pose_model=pose_model,
+                    num_workers=num_workers,
                 )
                 idx = i + batch_size
         except RuntimeError as e:
@@ -127,7 +156,8 @@ def execute_plan(
                 _execute_chunk(
                     step, [img], det_name, seg_name, model, seg_model,
                     sahi, _t0, _ts, steps_results,
-                    obb_model=obb_model, cls_model=cls_model, num_workers=num_workers,
+                    obb_model=obb_model, cls_model=cls_model, pose_model=pose_model,
+                    num_workers=num_workers,
                 )
 
     _log_plan(plan, steps_results, _plan_t0)
@@ -142,18 +172,47 @@ def _execute_tracking_step(
     explicit_num_workers: int | None,
     steps_results: list[dict[str, Any]],
     viz: bool = True,
+    constraint: ReferentialConstraint | None = None,
+    refer_l2: bool = False,
+    refer_l3: bool = False,
+    raw_instruction: str = "",
 ) -> None:
     """tracking 步骤：委托 TrackingTool 序列管线（与 run --track 同一实现）。
 
     batch/workers 取「CLI 显式 > step 字段」（与其余任务一致的优先级）；
     逐帧 JSON 用通用检测格式（step.export_format=mot 时映射回 coco——
     MOT 恒为序列级独立合并导出）；失败（ValueError）红字提示后跳过本步。
+    constraint：指代约束（chat 从 raw_instruction 解析，含属性/方位；--roi
+    由 run 路径注入）→ TrackingTool 过滤层。refer_l2/refer_l3 启用 v0.5
+    指代 L2/L3（首帧解析锁定，替代属性/方位链、ROI 仍叠加）；refer_l3
+    直用 L3（GPU），refer_l2 为阶梯升级（L2 失败自动升级 L3）。
     """
     from auto2dlabel.tools.tracking import TrackingTool
 
     batch_size = explicit_batch_size if explicit_batch_size is not None else step.batch_size
     num_workers = explicit_num_workers if explicit_num_workers is not None else step.num_workers
     per_frame_format = "coco" if step.export_format == "mot" else step.export_format
+
+    # 指代 L2/L3：解析器 + 英文短语（chat 从原始指令构造）
+    referential = None
+    referential_phrase: str | None = None
+    if (refer_l2 or refer_l3) and constraint is not None:
+        from auto2dlabel.tools.constraints import build_referential_phrase
+
+        referential_phrase = build_referential_phrase(raw_instruction, constraint)
+        if refer_l3:
+            from auto2dlabel.models.referential_l3 import (
+                create_referential_l3_resolver,
+            )
+
+            referential = create_referential_l3_resolver()
+        else:
+            from auto2dlabel.models.referential_l3 import (
+                create_cascade_referential_resolver,
+            )
+
+            referential = create_cascade_referential_resolver()
+
     tool = TrackingTool(
         model_name=step.model_name,
         iou_threshold=step.iou_threshold,
@@ -165,6 +224,9 @@ def _execute_tracking_step(
         output_dir=output_dir,
         export_format=per_frame_format,
         viz=viz,
+        constraint=constraint,
+        referential=referential,
+        referential_phrase=referential_phrase,
     )
     try:
         summary = tool.forward(
@@ -186,6 +248,48 @@ def _execute_tracking_step(
             "video_path": summary.get("video_path"),
         }
     )
+
+
+def _apply_batch_strategy(
+    step: Any,  # TaskStep（测试可用 duck-typed SimpleNamespace）
+    images: list[Path],
+    model: Any,
+    llm: Any,
+    instruction: str,
+) -> dict[str, Any] | None:
+    """批次级策略三步：抽样统计 → LLM 单轮调参 → 覆写步骤参数。
+
+    任何异常（无 LLM / 无 key / 输出非法）黄字降级代码级默认参数，返回 None。
+    抽样复用本步已加载的检测模型（model 可能为 None → 按步名自建）。
+    """
+    from auto2dlabel.agent.batch_strategy import (
+        apply_strategy,
+        llm_tune_strategy,
+        sample_stats,
+    )
+
+    if llm is None:
+        console.print("[dim]批次策略: 无 LLM 客户端，跳过（沿用代码级默认参数）[/dim]")
+        return None
+    try:
+        stats = sample_stats(
+            images, step.prompts, step.confidence_threshold,
+            model=model, det_model_name=step.model_name,
+        )
+        strategy = llm_tune_strategy(llm, instruction, stats)
+        applied = apply_strategy(step, strategy)
+    except Exception as e:
+        console.print(f"[yellow]批次策略失败，沿用代码级默认参数: {e}[/yellow]")
+        return None
+
+    console.print(
+        f"[dim]批次策略: conf {applied['old_confidence_threshold']}"
+        f"→{applied['confidence_threshold']}"
+        + (f"  建议模型: {applied['suggest_model']}" if applied.get("suggest_model") else "")
+        + (f"  （{applied['note']}）" if applied.get("note") else "")
+        + "[/dim]"
+    )
+    return applied
 
 
 def _print_step_header(step: TaskStep) -> None:
@@ -237,8 +341,8 @@ def _route_model(step: TaskStep) -> tuple[str | None, str | None]:
     if _is_self_detect_seg(step.model_name):
         det_name = None  # 信号：跳过检测
 
-    # 分类/旋转框任务不创建普通检测模型
-    if step.task_type in ("classification", "obb_detection"):
+    # 分类/旋转框/姿态任务不创建普通检测模型
+    if step.task_type in ("classification", "obb_detection", "pose_estimation"):
         det_name = None
 
     return det_name, seg_name
@@ -252,6 +356,7 @@ def _build_tune_infer_fn(
     seg_model: Any,
     obb_model: Any,
     cls_model: Any,
+    pose_model: Any,
     sahi: bool,
 ) -> Callable[[list[str]], Any] | None:
     """按任务构建动态实测闭包（批量推理探针）；无批量能力 → None（回退静态表）。
@@ -270,6 +375,12 @@ def _build_tune_infer_fn(
         if obb_model is None or not hasattr(obb_model, "detect_obb_batch"):
             return None
         return lambda paths: obb_model.detect_obb_batch(
+            paths, step.prompts, step.confidence_threshold, 0,
+        )
+    if step.task_type == "pose_estimation":
+        if pose_model is None or not hasattr(pose_model, "detect_pose_batch"):
+            return None
+        return lambda paths: pose_model.detect_pose_batch(
             paths, step.prompts, step.confidence_threshold, 0,
         )
     if step.task_type in ("instance_segmentation", "semantic_segmentation"):
@@ -299,6 +410,7 @@ def _resolve_step_batch(
     seg_model: Any,
     obb_model: Any,
     cls_model: Any,
+    pose_model: Any,
     sahi: bool,
     explicit_batch_size: int | None,
     explicit_num_workers: int | None,
@@ -320,7 +432,7 @@ def _resolve_step_batch(
 
     # batch 未定：动态实测（模型已加载；无批量能力/无 CUDA 回退静态表）
     infer_fn = _build_tune_infer_fn(
-        step, det_name, seg_name, model, seg_model, obb_model, cls_model, sahi,
+        step, det_name, seg_name, model, seg_model, obb_model, cls_model, pose_model, sahi,
     )
     bs, _ = resolve_batch_params(
         step.task_type, infer_fn, [str(p) for p in images[:20]],
@@ -344,15 +456,17 @@ def _execute_image(
     det_quality: QualityReport | None = None,
     cls_labels: list[Any] | None = None,
     obb_results: list[Any] | None = None,
+    pose_results: list[Any] | None = None,
     seg_masks: list[Any] | None = None,
     cls_model: Any = None,
     obb_model: Any = None,
+    pose_model: Any = None,
 ) -> None:
-    """执行单图：分类/OBB 分支直接产出；其余走 检测 → 可选分割 → 后处理。
+    """执行单图：分类/OBB/姿态分支直接产出；其余走 检测 → 可选分割 → 后处理。
 
-    批量路径经 det_results/det_quality/cls_labels/obb_results/seg_masks 注入预计算结果，
-    对应模型调用在块级完成（None = 本图自行推理）。
-    cls_model/obb_model 步骤级复用（None 时各步自行创建，旧行为）。
+    批量路径经 det_results/det_quality/cls_labels/obb_results/pose_results/seg_masks
+    注入预计算结果，对应模型调用在块级完成（None = 本图自行推理）。
+    cls_model/obb_model/pose_model 步骤级复用（None 时各步自行创建，旧行为）。
     """
     ann = Annotation(image_path=str(img_path))
     try:
@@ -376,6 +490,14 @@ def _execute_image(
         _obb_step(
             step, img_path, ann, _ts, step_t0, steps_results,
             obb_results=obb_results, obb_model=obb_model,
+        )
+        return
+
+    # 姿态估计任务：YOLO-pose → Bbox(keypoints) → coco 导出（keypoints 内嵌）
+    if step.task_type == "pose_estimation":
+        _pose_step(
+            step, img_path, ann, _ts, step_t0, steps_results,
+            pose_results=pose_results, pose_model=pose_model,
         )
         return
 
@@ -413,12 +535,13 @@ def _execute_chunk(
     steps_results: list[dict[str, Any]],
     obb_model: Any = None,
     cls_model: Any = None,
+    pose_model: Any = None,
     num_workers: int = 0,
 ) -> None:
     """执行一个图像块：支持批量推理的任务走模型 *_batch 方法，否则逐图回退。
 
     batch_size=1 时 chunk 恒为单图，自然落入逐图路径（与旧行为一致）。
-    obb_model/cls_model 步骤级复用（execute_plan 已创建）；None 时块内创建。
+    obb_model/cls_model/pose_model 步骤级复用（execute_plan 已创建）；None 时块内创建。
     """
     num_workers = max(0, num_workers)
     batch = len(chunk) > 1
@@ -431,7 +554,7 @@ def _execute_chunk(
                 _execute_image(
                     step, img_path, det_name, seg_name, model, seg_model, sahi,
                     step_t0, _ts, steps_results, cls_labels=labels,
-                    obb_model=obb_model, cls_model=cls_model,
+                    obb_model=obb_model, cls_model=cls_model, pose_model=pose_model,
                 )
             return
 
@@ -443,7 +566,19 @@ def _execute_chunk(
                 _execute_image(
                     step, img_path, det_name, seg_name, model, seg_model, sahi,
                     step_t0, _ts, steps_results, obb_results=obb_results,
-                    obb_model=obb_model, cls_model=cls_model,
+                    obb_model=obb_model, cls_model=cls_model, pose_model=pose_model,
+                )
+            return
+
+    # 姿态批量（ultralytics 原生 batch）
+    if step.task_type == "pose_estimation" and batch:
+        pose_per_img = _pose_batch(step, chunk, num_workers, pose_model)
+        if pose_per_img is not None:
+            for img_path, pose_results in zip(chunk, pose_per_img):
+                _execute_image(
+                    step, img_path, det_name, seg_name, model, seg_model, sahi,
+                    step_t0, _ts, steps_results, pose_results=pose_results,
+                    obb_model=obb_model, cls_model=cls_model, pose_model=pose_model,
                 )
             return
 
@@ -458,7 +593,7 @@ def _execute_chunk(
                     step, img_path, det_name, seg_name, model, seg_model, sahi,
                     step_t0, _ts, steps_results,
                     det_results=det_results, det_quality=det_quality,
-                    obb_model=obb_model, cls_model=cls_model,
+                    obb_model=obb_model, cls_model=cls_model, pose_model=pose_model,
                 )
             return
 
@@ -470,7 +605,7 @@ def _execute_chunk(
                 _execute_image(
                     step, img_path, det_name, seg_name, model, seg_model, sahi,
                     step_t0, _ts, steps_results, seg_masks=masks,
-                    obb_model=obb_model, cls_model=cls_model,
+                    obb_model=obb_model, cls_model=cls_model, pose_model=pose_model,
                 )
             return
 
@@ -479,7 +614,7 @@ def _execute_chunk(
         _execute_image(
             step, img_path, det_name, seg_name, model, seg_model, sahi,
             step_t0, _ts, steps_results,
-            obb_model=obb_model, cls_model=cls_model,
+            obb_model=obb_model, cls_model=cls_model, pose_model=pose_model,
         )
 
 
@@ -556,6 +691,28 @@ def _obb_batch(
     if detect_obb_batch is None:
         return None
     return detect_obb_batch(
+        [str(p) for p in chunk], step.prompts, step.confidence_threshold, num_workers,
+    )
+
+
+def _pose_batch(
+    step: TaskStep, chunk: list[Path], num_workers: int, pose_model: Any = None,
+) -> list[list[Any]] | None:
+    """块内姿态批量推理；模型无 detect_pose_batch 返回 None（逐图回退）。
+
+    pose_model 步骤级复用（execute_plan 已创建）；None 时块内创建（向后兼容）。
+    """
+    if pose_model is None:
+        from auto2dlabel.models.pose import create_pose_model
+
+        pose_model = create_pose_model(step.model_name, iou_threshold=step.iou_threshold)
+    detect_pose_batch = cast(
+        "Callable[..., list[list[Any]]] | None",
+        getattr(pose_model, "detect_pose_batch", None),
+    )
+    if detect_pose_batch is None:
+        return None
+    return detect_pose_batch(
         [str(p) for p in chunk], step.prompts, step.confidence_threshold, num_workers,
     )
 
@@ -736,6 +893,106 @@ def _obb_step(
         "prompts": step.prompts,
         "bbox_count": len(ann.bboxes),
         "obb_count": len(obb_results),
+        "quality": quality.to_dict(),
+    })
+
+
+def _pose_step(
+    step: TaskStep,
+    img_path: Path,
+    ann: Annotation,
+    _ts: str,
+    step_t0: float,
+    steps_results: list[dict[str, Any]],
+    pose_results: list[Any] | None = None,
+    pose_model: PoseModel | None = None,
+) -> None:
+    """姿态估计：YOLO-pose → Bbox(keypoints) → coco 导出（keypoints 内嵌，三档分流照旧）。
+
+    pose_results 非 None 时跳过推理（批量路径块级预计算结果）。
+    pose_model 步骤级复用（execute_plan 已创建）；None 时每图创建（旧行为）。
+    """
+    from auto2dlabel.agent.evaluate import evaluate_detections
+    from auto2dlabel.models.detection import _match_prompt
+
+    if pose_results is None:
+        if pose_model is None:
+            from auto2dlabel.models.pose import create_pose_model
+
+            pose_model = create_pose_model(step.model_name, iou_threshold=step.iou_threshold)
+        pose_results = pose_model.detect_pose(
+            str(img_path), step.prompts,
+            confidence_threshold=step.confidence_threshold,
+        )
+    for r in pose_results:
+        ann.add_bbox(Bbox(
+            x=r.x, y=r.y, width=r.width, height=r.height,
+            label=r.label, confidence=r.confidence, keypoints=r.keypoints,
+        ))
+        if r.confidence < step.confidence_threshold:
+            ann.flag_for_review(len(ann.bboxes) - 1)
+    console.print(f"[dim]姿态估计: {len(pose_results)} 个人体（含 keypoints）[/dim]")
+
+    quality = evaluate_detections(
+        pose_results, step.prompts, step.confidence_threshold, str(img_path),
+        prompt_matcher=_match_prompt,
+    )
+    if quality.warnings:
+        console.print(f"[yellow]质量警告: {'; '.join(quality.warnings)}[/yellow]")
+
+    state = AgentState(image_path=str(img_path))
+    state.annotations = [ann]
+    if quality:
+        state.metadata["quality_report"] = quality.to_dict()
+    display_results(state)
+
+    # keypoints 语义只在 COCO 有意义 → 恒 coco 导出（防 planner 误给其他格式丢字段）
+    from auto2dlabel.tools.export import ExportTool
+
+    export_tool = ExportTool()
+    out_json = export_tool.forward(
+        annotations=[ann.to_dict()],
+        output_path=f"outputs/{img_path.stem}_{_ts}.json",
+        format="coco",
+    )
+    console.print(f"[green]✓ 导出: {out_json}[/green]")
+
+    from auto2dlabel.tools.visualize import visualize_annotation
+
+    vis_dir = Path("vis_outputs")
+    vis_dir.mkdir(exist_ok=True)
+    vis_path = vis_dir / f"vis_{img_path.stem}_{_ts}.png"
+    # visualize_annotation 已内置 draw_keypoints（bboxes 含 keypoints 自动绘骨架）
+    visualize_annotation(img_path, ann, vis_path, draw_mask=False)
+    console.print(f"[green]✓ 可视化: {vis_path}[/green]")
+
+    triage_and_export(state, img_path, step.confidence_threshold, _ts)
+
+    from auto2dlabel.tools.log import log_python_api_call
+
+    log_python_api_call(
+        image_path=str(img_path),
+        prompts=step.prompts,
+        results=[{
+            "label": r.label, "conf": r.confidence,
+            "bbox": [r.x, r.y, r.width, r.height],
+            "num_keypoints": sum(1 for k in r.keypoints if k[2] > 0),
+        } for r in pose_results],
+        elapsed=round(_time.time() - step_t0, 3),
+        model_name=step.model_name,
+        confidence_threshold=step.confidence_threshold,
+        iou_threshold=step.iou_threshold,
+        annotation_type="pose_estimation",
+        timestamp=_ts,
+        quality=quality.to_dict(),
+    )
+    steps_results.append({
+        "step_id": step.step_id,
+        "source": step.source,
+        "model": step.model_name,
+        "prompts": step.prompts,
+        "bbox_count": len(ann.bboxes),
+        "keypoint_count": sum(b.num_keypoints for b in ann.bboxes),
         "quality": quality.to_dict(),
     })
 

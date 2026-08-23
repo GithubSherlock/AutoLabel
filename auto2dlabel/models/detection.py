@@ -153,7 +153,7 @@ class UltralyticsModel:
         self._model_name = model_name
         self._device = device
         self._iou = iou_threshold
-        self._model = None
+        self._model: Any = None  # ultralytics stub 导出不稳定，类型按 Any 处理
         self._is_world = "world" in model_name.lower()
 
     def _load(self) -> Any:
@@ -246,9 +246,11 @@ class UltralyticsModel:
             if self._is_world:
                 label = prompts[cls_id] if cls_id < len(prompts) else str(cls_id)
             else:
-                # 标准 YOLO：用 COCO 类别名，按 prompt 过滤
-                if cls_id < len(COCO_CLASSES):
-                    label = COCO_CLASSES[cls_id]
+                # 类别名用模型自身类别表（自定义微调模型的自有类别，如 KITTI
+                # 5 类）；缺失时回退 COCO 80 类（pose._parse_pred 同款先例）
+                names = cast(Any, self._model).names or COCO_CLASSES
+                if cls_id < len(names):
+                    label = names[cls_id]
                     if not _match_prompt(label, prompts):
                         continue  # 跳过不匹配的类别
                 else:
@@ -487,10 +489,13 @@ def create_detection_model(model_name: str | None = None, **kwargs) -> Detection
         model_name = os.environ.get("DETECTION_MODEL", DEFAULT_MODEL)
 
     kwargs.setdefault("iou_threshold", 0.5)
-    if "/" in model_name:
-        return GroundingDINOModel(model_name=model_name, **kwargs)
-    elif model_name.endswith(".pt"):
+    # .pt 判定先于 "/"：自定义权重完整路径含 "/"（如微调产物
+    # weights/kitti_finetune/.../best.pt），误判为 HF repo id 会走
+    # GroundingDINO 分支（AutoProcessor 报 OSError）
+    if model_name.endswith(".pt"):
         return UltralyticsModel(model_name=model_name, **kwargs)
+    elif "/" in model_name:
+        return GroundingDINOModel(model_name=model_name, **kwargs)
     elif _is_pytorch_model(model_name):
         return PyTorchVisionModel(model_name=model_name, **kwargs)
     else:

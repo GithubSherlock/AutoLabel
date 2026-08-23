@@ -88,6 +88,7 @@ class AgentState:
             "annotations": [a.to_dict() for a in self.annotations],
             "messages": self.messages,
             "tool_calls": self.tool_calls,
+            "max_iterations": self.max_iterations,
             "iteration": self.iteration,
             "done": self.done,
             "metadata": self.metadata,
@@ -103,6 +104,7 @@ class AgentState:
         )
         state.messages = data.get("messages", [])
         state.tool_calls = data.get("tool_calls", [])
+        state.max_iterations = int(data.get("max_iterations", 10))
         state.iteration = data.get("iteration", 0)
         state.done = data.get("done", False)
         state.metadata = data.get("metadata", {})
@@ -126,6 +128,10 @@ def _annotation_from_dict(d: dict[str, Any]) -> Annotation:
             confidence=b.get("confidence", 1.0),
             angle=b.get("angle", 0.0),
             track_id=b.get("track_id"),
+            keypoints=[
+                (float(k[0]), float(k[1]), float(k[2]))
+                for k in b.get("keypoints", [])
+            ],
         )
         for b in d.get("bboxes", [])
     ]
@@ -138,6 +144,10 @@ def _annotation_from_dict(d: dict[str, Any]) -> Annotation:
                 confidence=m["bbox"].get("confidence", 1.0),
                 angle=m["bbox"].get("angle", 0.0),
                 track_id=m["bbox"].get("track_id"),
+                keypoints=[
+                    (float(k[0]), float(k[1]), float(k[2]))
+                    for k in m["bbox"].get("keypoints", [])
+                ],
             ),
             segmentation=m.get("segmentation", []),
             area=m.get("area", 0.0),

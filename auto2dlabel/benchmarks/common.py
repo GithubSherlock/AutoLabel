@@ -558,7 +558,10 @@ def save_results(
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     ts = ts or datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    prefix = f"{dataset}_{model}_{ts}"
+    # 模型名可能是含 "/" 的完整路径（微调产物 best.pt）或 HF repo id——
+    # 直接拼进文件名会形成非法嵌套目录；统一替换为 "_" 保持单层输出
+    safe_model = model.replace("/", "_").replace("\\", "_")
+    prefix = f"{dataset}_{safe_model}_{ts}"
 
     json_path = OUTPUT_DIR / f"{prefix}.json"
     json_path.write_text(json.dumps(result_data, indent=2, ensure_ascii=False))
