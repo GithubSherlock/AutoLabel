@@ -54,7 +54,7 @@ all = [
 auto2dlabel = "auto2dlabel.cli:app"
 
 [tool.setuptools.packages.find]
-include = ["auto2dlabel*"]
+include = ["auto2dlabel*", "auto3dlabel*"]
 
 [tool.ruff]
 line-length = 100
@@ -68,22 +68,31 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.ruff.lint.per-file-ignores]
 # LLM system prompt 长行刻意保留（拆行会改变注入 LLM 的 prompt 内容）
 "auto2dlabel/agent/planner.py" = ["E501"]
+# calib 数据行 = 真实 calib_000000.txt 逐字提取（拆行破坏数据原文与可核对性）
+"auto3dlabel/tests/helpers/synth.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.10"
 strict = true
 ignore_missing_imports = true
 # exclude 只对递归发现（`mypy .`）生效，显式目录 `mypy auto2dlabel/` 走 overrides
-exclude = ["auto2dlabel/models/vendor_florence2"]
+# cvat = 本地 CVAT 调研克隆（.gitignore 排除，不入库不检查）
+exclude = ["auto2dlabel/models/vendor_florence2", "cvat"]
 
 [[tool.mypy.overrides]]
 module = "auto2dlabel.models.vendor_florence2.*"
 ignore_errors = true
 
+[[tool.mypy.overrides]]
+# numpy 密集代码统一不写 ndarray 泛型参数（auto2dlabel 基线 74 个同款错误不追溯）
+module = "auto3dlabel.*"
+disable_error_code = ["type-arg"]
+
 [tool.pyright]
 typeCheckingMode = "basic"
-exclude = ["auto2dlabel/models/vendor_florence2"]
+# cvat = 本地 CVAT 调研克隆（.gitignore 排除，不入库不检查）
+exclude = ["auto2dlabel/models/vendor_florence2", "cvat"]
 
 [tool.pytest.ini_options]
-testpaths = ["auto2dlabel/tests"]
+testpaths = ["auto2dlabel/tests", "auto3dlabel/tests"]
 python_files = ["test_*.py"]

@@ -165,3 +165,101 @@ def test_review_save_rejects_bad_names(review_dir: Path) -> None:
         "queue_file": "missing_review.json", "deleted_indices": [],
     })
     assert resp.status_code == 404
+
+
+# ── 已复核列表与 issues（v0.5 Web 增强） ──────────────────────
+
+def test_review_files_reviewed_list(review_dir: Path) -> None:
+    """保存修正后 review-files 响应含 reviewed 列表（供重开复查）。"""
+    _write_review_file(review_dir, "img_01_review.json", _sample_queue())
+    resp = client.post("/api/review-save", json={
+        "queue_file": "img_01_review.json", "deleted_indices": [],
+    })
+    assert resp.status_code == 200
+
+    data = client.get("/api/review-files").json()
+    assert data["files"] == []  # 原队列已出队
+    assert [r["name"] for r in data["reviewed"]] == ["img_01_reviewed.json"]
+    assert data["reviewed"][0]["count"] == 2
+    assert data["reviewed"][0]["image_path"] == "/data/img_01.png"
+    assert data["reviewed"][0]["image_stem"] == "img_01"
+
+
+def test_review_files_reviewed_corrupt_tolerated(review_dir: Path) -> None:
+    """损坏的 *_reviewed.json 在 reviewed 扫描中跳过不炸。"""
+    _write_review_file(review_dir, "img_01_review.json", _sample_queue())
+    (review_dir / "bad_reviewed.json").write_text("{broken", encoding="utf-8")
+    data = client.get("/api/review-files").json()
+    assert data["reviewed"] == []
+    assert len(data["files"]) == 1  # 正常待复核文件不受影响
+
+
+def test_review_save_issues_persisted(review_dir: Path) -> None:
+    """payload 带 issues → *_reviewed.json 顶层 issues + image_path 落盘。"""
+    _write_review_file(review_dir, "img_01_review.json", _sample_queue())
+    issues = [{"id": 1, "x": 1, "y": 1, "width": 5, "height": 5, "text": "重标", "status": "open"}]
+    resp = client.post("/api/review-save", json={
+        "queue_file": "img_01_review.json", "deleted_indices": [], "issues": issues,
+    })
+    assert resp.status_code == 200
+    out = json.loads((review_dir / "img_01_reviewed.json").read_text(encoding="utf-8"))
+    assert out["issues"] == issues
+    assert out["image_path"] == "/data/img_01.png"  # 顶层 image_path 供重开显示原图
+
+
+def test_review_save_edited_with_issues_both_applied(review_dir: Path) -> None:
+    """edited 全量重建 + issues 同时生效（互不干扰）。"""
+    _write_review_file(review_dir, "img_01_review.json", _sample_queue())
+    resp = client.post("/api/review-save", json={
+        "queue_file": "img_01_review.json",
+        "edited": [{"x": 1, "y": 2, "width": 3, "height": 4, "label": "car", "confidence": 0.5}],
+        "issues": [{"id": 1, "x": 0, "y": 0, "width": 1, "height": 1,
+                    "text": "漏检", "status": "open"}],
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kept"] == 1 and body["deleted"] == 1
+    out = json.loads((review_dir / "img_01_reviewed.json").read_text(encoding="utf-8"))
+    assert len(out["annotations"]) == 1
+    assert len(out["issues"]) == 1
+
+
+def test_review_save_resave_reviewed(review_dir: Path) -> None:
+    """重开已复核文件修正后保存：COCO 源归一化（category_id→label）+ 原地覆写。"""
+    _write_review_file(review_dir, "img_01_review.json", _sample_queue())
+    client.post("/api/review-save", json={
+        "queue_file": "img_01_review.json", "deleted_indices": [],
+    })
+
+    # 重开 reviewed 文件：deleted_indices 模式（COCO 源需归一化）
+    resp = client.post("/api/review-save", json={
+        "queue_file": "img_01_reviewed.json", "deleted_indices": [1],
+    })
+    assert resp.status_code == 200
+    assert resp.json()["kept"] == 1
+
+    out = json.loads((review_dir / "img_01_reviewed.json").read_text(encoding="utf-8"))
+    assert len(out["annotations"]) == 1
+    assert out["annotations"][0]["bbox"] == [10, 20, 100, 200]  # car 保留，归一化正确
+    assert out["images"][0]["width"] == 640  # 图像尺寸经 images[0] 回退不丢
+    # 无 .reviewed.reviewed 重复标记
+    assert not (review_dir / "img_01_reviewed.json.reviewed").exists()
+    # 仍出现在 reviewed 列表
+    data = client.get("/api/review-files").json()
+    assert [r["name"] for r in data["reviewed"]] == ["img_01_reviewed.json"]
+
+
+def test_review_file_get_reviewed_format(review_dir: Path) -> None:
+    """GET /api/review-file 读 *_reviewed.json（COCO dict + issues 顶层键）。"""
+    _write_review_file(review_dir, "img_01_review.json", _sample_queue())
+    client.post("/api/review-save", json={
+        "queue_file": "img_01_review.json", "deleted_indices": [],
+        "issues": [{"id": 1, "x": 0, "y": 0, "width": 1, "height": 1,
+                    "text": "t", "status": "open"}],
+    })
+    resp = client.get("/api/review-file", params={"name": "img_01_reviewed.json"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["annotations"]) == 2
+    assert data["annotations"][0]["bbox"] == [10, 20, 100, 200]  # COCO bbox 数组
+    assert data["issues"][0]["text"] == "t"

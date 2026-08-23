@@ -1,6 +1,6 @@
 # v0.5 实测数据
 
-> v0.5 内容（Pose / 指代 L2 / 自动车道 ROI / ILSVRC2012 val）实测记录。功能定义与完成标记见 `../milestone/v0.5.md`。测试环境：32 核 CPU，torch 2.13.0。Pose 冒烟时无 GPU（纯 CPU）；指代 L2 冒烟时会话中期 GPU 已可用（fp16 加载），CPU 可行性由 Pose 冒烟与 vendor 早期 CPU 端到端生成验证佐证。
+> v0.5 内容（Pose / 指代 L2 / 自动车道 ROI / ILSVRC2012 val / Web 复核交互增强）实测记录。功能定义与完成标记见 `../milestone/v0.5.md`。测试环境：32 核 CPU，torch 2.13.0。Pose 冒烟时无 GPU（纯 CPU）；指代 L2 冒烟时会话中期 GPU 已可用（fp16 加载），CPU 可行性由 Pose 冒烟与 vendor 早期 CPU 端到端生成验证佐证。
 
 ## Pose 姿态估计冒烟（YOLO-pose，2026-08-23）
 
@@ -110,3 +110,25 @@ GPU 到位后按计划复测全量（`--per-class 50 --max-images 0` → 50000 �
 | 产物 | `benchmarks_outputs/imagenet1k_resnet18_2026-08-23-11-04-47.json/.md` | 12 数据集全量档闭环 |
 
 **结论**：ILSVRC2012 val 全量基准完成——resnet18 与官方精度一致，分类扩展 v0.5 项完整闭环（12 数据集 Benchmark）。
+
+## Web 交互增强冒烟（jsdom + 端到端 API，2026-08-23）
+
+目标：验证 Web 复核界面 CVAT 式增强（P0 未保存确认/快捷键/undo + P1 手柄/列表/过滤/右键 + P2 区域 issue + edited_by_human 数据回路 + 已复核重开）全链路可用。无真实浏览器环境（AutoDL 无头容器），采用三层替代验证：
+
+| 层 | 方式 | 规模 | 说明 |
+| --- | --- | --- | --- |
+| 单测 | pytest `test_web_annotate.py` + `test_web_review.py` | **26 passed** | edited_by_human 保真/条件输出、issues 落盘/双生效、reviewed 列表/损坏容错、COCO 重开原地覆盖（TestClient + monkeypatch REVIEW_DIR，零模型） |
+| 前端 | jsdom 冒烟 `smoke_web.js`（Node + jsdom 加载真实 app.js） | **76/76 passed** | 全键盘/鼠标事件驱动断言：渲染、undo 6 类、OBB 缩放/旋转数学、列表委托、过滤、隐藏锁定、右键、issues 状态机、saveReview body、空态/分类回归 |
+| 服务 | 隔离服务器端到端（`AUTOLABEL_PORT=8799`，相对 REVIEW_DIR） | **5/5** | index 引用 app.js → 队列扫描 → edited+issues 保存落盘（`edited_by_human: True` 注入 annotation + 顶层 `issues`/`image_path`）→ reviewed 列表 → 重开原地覆盖无重复 `.reviewed` 标记 |
+
+冒烟暴露并修复 3 个前端 bug（均被断言捕获）：
+
+| bug | 根因 | 修复 |
+| --- | --- | --- |
+| undo 后再次 undo 崩溃 | `commitDrag` 的 undo 闭包捕获模块级 `drag` 变量（置 null 后解引用报错） | 闭包改捕获 mousedown 快照的局部解构 `const {i, before, type} = drag` |
+| issueMode 下点击已有 issue 无效 | mousedown 分派未先测 issue 命中（点击开新草稿而非翻转状态） | issueMode 分支加 `findIssueAt` 优先命中检查 |
+| resize 参考点错误 | 旧公式 `w1 = 2·\|p−C0\|` 假设中心不动，实测对角点漂移 | 旋转系内「对角固定 F + 手柄吸附指针」解：`w1 = sx·(plx−fx)`、`C_new = (p+F)/2`（edge 手柄 sx=0 轴不变），θ=0 与 θ=π/4 数值断言双验证 |
+
+关键数值断言（`smoke_web.js` ⑤节）：θ=0 拖左上角手柄 (10,10)→(0,0)，对角 (40,40) 固定 → 框 (0,0,40,40)；θ=π/4 框 (w0=141.4, h0=70.7) 拖右下角手柄到局部 (100,40) → w1=170.7、h1=75.35、对角点不动、keypoints 仿射随动（1e-6 容差）。
+
+**结论**：Web 增强全链路闭环——AI 初稿 → 人工修正（`edited_by_human` 落盘形成数据回路）→ issues 区域反馈 → 已复核重开。回归运行：`cd auto2dlabel/tests/helpers && node smoke_web.js`（需 `npm i jsdom`，脚本不入 pytest 体系）。

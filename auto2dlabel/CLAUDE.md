@@ -64,6 +64,18 @@ auto2dlabel run video.mp4 "检测行人" --track --no-viz   # 测试/省磁盘�
 ```
 
 
+## Web 复核界面速查（v0.5 Web 增强，CVAT 借鉴）
+
+- **文件分工**：`web/static/index.html` 只留 CSS+DOM（零内联 JS）；`web/static/app.js` 承载全部逻辑，按注释分区（A 状态/B 工具/C 模型/D 会话/E 渲染/F 谓词/G 拖拽/H 键盘/I undo/J 列表/K 右键/L 保存/M issues/N 初始化），事件委托 + 无构建链；server.py 已挂载 /static。
+- **快捷键**：Tab/Shift+Tab 循环选中（居中，zOrder 序环绕）、Del 删除（locked 拒）、Ctrl+Z/Ctrl+Shift+Z undo/redo、Ctrl+S 保存、Esc 三态（退出 issueMode → 关右键菜单 → 取消选中）、N 框选问题区域。表单控件守卫（input/select/textarea 跳过，Ctrl+S/Esc 例外）。
+- **索引与状态**：五集合（deletedIds/hiddenIds/lockedIds/selectedIndex/zOrder）全按 bbox 下标键，`resetSessionState()` 唯一清场入口（runAnnotation/loadReviewFile 成功、switchMode 确认后、saveReview 尾部）；**bboxes 从不重排序、删除不剔除索引**（撤销只动 deletedIds，索引永远有效）；可见性谓词单一事实源（canvas 含 confFilter，列表不含 hidden）。
+- **undo/redo**：`pushUndo(name, undoFn, redoFn)` 闭包栈 MAX 32，快照 JSON 深拷贝；**闭包必须捕获局部解构值**（曾捕获模块级 `drag` 变量致二次 undo 崩溃）；hidden/locked/confFilter/issues 不可撤销（记录决策）；新操作清 redoStack。
+- **resize/rotate 数学（OBB 同路径，θ=0 退化验证）**：旋转系内「对角固定 F + 手柄吸附指针」——`w1 = sx·(plx−fx)`、`C_new = (p+F)/2`（edge 手柄 sx=0 该轴不变），MIN_BOX=4，sign 于 mousedown 固定；rotate `θ = atan2 + π/2` 归一化 (-π/2, π/2]；**keypoints 从 mousedown 快照仿射随动，绝不增量累积**。数值断言见 tests/helpers/smoke_web.js ⑤⑥节。
+- **dirty 语义**：`isDirty() = !!currentData && (currentData.edited || deletedIds.size>0)`；三处检查（switchMode/loadReviewFile/beforeunload）+ saveReview 成功尾部清 dirty（防「保存后仍报未保存」误报）。
+- **协议**：review-save payload `{queue_file, deleted_indices?, edited?, issues?}`（双模式互斥）；`*_reviewed.json` = COCO + 可选顶层键 `issues`/`image_path`（**空则完全不写**，旧文件缺键向后兼容）；重开 reviewed 走 COCO 转换分支（categories id→name、bbox 数组→x/y/width/height、images[0] 回退尺寸），保存原地覆盖**无重复 .reviewed 标记**。
+- **edited_by_human 红线**：Bbox 可选字段，`to_dict` 仅 True 时条件输出（防 JSON 膨胀）；server 侧 build_coco_dict 后逐 annotation zip 注入（export/coco.py 零改动，/api/export-coco 纯净回归）；四操作置位（move/resize/rotate/改标签），删除不置（走 deleted_indices 通道）——漏一处即破坏「AI 初稿→人工修正」数据回路。
+- **测试铁律**：pytest 零模型（TestClient + monkeypatch REVIEW_DIR）；前端零浏览器（`tests/helpers/smoke_web.js`，jsdom 事件驱动 76 断言，`npm i jsdom && node smoke_web.js`）；前端改动后必跑该冒烟防静默回归。
+
 ## 设计原则与红线
 
 - **Export 不暴露给 LLM**：导出由 CLI 代码直接调用（`tools/export.py`），避免 token 浪费。

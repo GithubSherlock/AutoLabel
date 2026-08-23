@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoLabel Web v0.3</title>
+<title>AutoLabel Web v0.5</title>
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; height: 100vh; }
@@ -14,9 +14,19 @@ input, select, button, textarea { width: 100%; padding: 8px 12px; margin: 4px 0 
 button { background: #0f3460; cursor: pointer; font-weight: bold; transition: background .2s; }
 button:hover { background: #16578a; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
-.result-item { padding: 8px; margin: 4px 0; background: #1a1a2e; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; transition: opacity .2s; }
+.result-item { padding: 6px 8px; margin: 4px 0; background: #1a1a2e; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 6px; }
 .result-item:hover { background: #0f3460; }
-.result-item.deleted { opacity: 0.3; text-decoration: line-through; }
+.result-item.selected { outline: 2px solid #53a8b6; }
+.result-item.dimmed { opacity: 0.45; }
+.result-item .row-main { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+.result-item .row-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.result-item .conf { font-size: 12px; color: #8899aa; white-space: nowrap; }
+.icon-btn { width: auto !important; padding: 2px 6px !important; margin: 0 !important; font-size: 12px; background: transparent !important; border: 1px solid #0f3460 !important; }
+.icon-btn:hover { background: #16578a !important; }
+.label-sel { width: auto !important; padding: 2px 4px !important; margin: 0 !important; font-size: 12px; flex: 1; min-width: 0; }
+.edited-tag { font-size: 11px; }
+.dim-tag { font-size: 11px; color: #8899aa; }
+#sortBtn { width: auto !important; padding: 2px 8px !important; margin: 0 !important; font-size: 11px; }
 h3 { margin: 16px 0 8px; color: #53a8b6; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-right: 4px; }
 .summary { padding: 12px; background: #0f3460; border-radius: 8px; margin-bottom: 12px; line-height: 1.6; }
@@ -33,12 +43,26 @@ h3 { margin: 16px 0 8px; color: #53a8b6; font-size: 14px; text-transform: upperc
 .mode-tabs { display: flex; gap: 8px; margin-bottom: 12px; }
 .mode-tabs button { margin: 0; flex: 1; }
 .mode-tabs button.mode-active { background: #16578a; }
+/* ── v0.5 Web 增强（CVAT 借鉴） ── */
+#ctxMenu { position: fixed; z-index: 1000; background: #16213e; border: 1px solid #0f3460; border-radius: 6px; padding: 4px 0; display: none; min-width: 150px; box-shadow: 0 4px 12px rgba(0,0,0,.5); }
+#ctxMenu .menu-item { padding: 6px 14px; font-size: 13px; cursor: pointer; }
+#ctxMenu .menu-item:hover { background: #16578a; }
+#ctxMenu .menu-item.danger { color: #fca5a5; }
+#issueModal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; z-index: 1001; }
+#issueModal .panel { background: #16213e; padding: 20px; border-radius: 8px; width: 380px; max-width: 90vw; }
+#issueModal .panel h3 { margin: 0 0 12px; }
+#issueModal textarea { height: 80px; resize: vertical; margin-bottom: 12px; }
+#issueModal .btns { display: flex; gap: 8px; }
+#issueModal .btns button { flex: 1; margin: 0; }
+#issueBtn.active { background: #5c4a1f; color: #ffd43b; }
+#issueHint { display: none; font-size: 12px; color: #ffd43b; margin: -8px 0 8px; }
+#issuesSummary { font-size: 12px; color: #ffd43b; margin: -8px 0 8px; }
 </style>
 </head>
 <body>
 <div class="sidebar">
   <h2>🔍 AutoLabel Web</h2>
-  <p style="color:#8899aa;font-size:13px;margin-bottom:12px">v0.3 — 支持全部检测 & 分割模型</p>
+  <p style="color:#8899aa;font-size:13px;margin-bottom:12px">v0.5 — AI 预标注 + 人工修正（CVAT 式交互增强）</p>
 
   <div class="mode-tabs">
     <button id="tabAnnotate" class="mode-active" onclick="switchMode('annotate')">🎯 标注</button>
@@ -107,760 +131,31 @@ h3 { margin: 16px 0 8px; color: #53a8b6; font-size: 14px; text-transform: upperc
     <button onclick="loadReviewFiles()" style="background:#2d6a4f">🔄 刷新队列</button>
     <div id="reviewFiles"></div>
     <div id="reviewActions" style="display:none">
-      <button onclick="saveReview()" style="background:#2d6a4f">💾 保存修正</button>
+      <label>🎚 置信度过滤: <span id="confFilterVal">全部</span></label>
+      <input type="range" id="confFilter" min="0" max="1" step="0.01" value="0" oninput="onConfFilterChange()">
+      <button onclick="toggleIssueMode()" id="issueBtn" title="快捷键 N">🖍 框选问题区域</button>
+      <div id="issueHint">在画布上拖拽框出问题区域，松手后输入说明</div>
+      <div id="issuesSummary"></div>
+      <button onclick="saveReview()" id="saveReviewBtn" style="background:#2d6a4f">💾 保存修正</button>
       <button onclick="downloadReviewJSON()" style="background:#1b4965">⬇ 下载修正 COCO</button>
     </div>
   </div>
 </div>
 <div class="main">
   <canvas id="canvas"></canvas>
+  <div id="ctxMenu"></div>
+  <div id="issueModal">
+    <div class="panel">
+      <h3>📝 问题说明</h3>
+      <textarea id="issueText" placeholder="如: 此处车辆漏检 / 框偏大 / 标签错误"></textarea>
+      <div class="btns">
+        <button onclick="confirmIssue()" style="background:#2d6a4f">✓ 添加问题</button>
+        <button onclick="cancelIssue()">取消</button>
+      </div>
+    </div>
+  </div>
 </div>
 
-<script>
-// ── 全局状态 ──
-let currentData = null;
-let deletedIds = new Set();
-let reviewFileName = null;   // 当前复核的队列文件名
-let lastReviewedName = null; // 最近保存的修正文件名
-let detModels = [];
-let segModels = [];
-let modelMeta = {};  // name → {type}
-
-// ── 颜色生成（确定性哈希） ──
-function getColor(label) {
-  let hash = 0;
-  for (let i = 0; i < label.length; i++) {
-    hash = label.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  const h = Math.abs(hash) % 360;
-  const s = 0.7, l = 0.55;
-  const a = s * Math.min(l, 1 - l);
-  const f = n => {
-    const k = (n + h / 30) % 12;
-    return l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
-  };
-  const r = Math.round(f(0) * 255);
-  const g = Math.round(f(8) * 255);
-  const b = Math.round(f(4) * 255);
-  return `#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${b.toString(16).padStart(2,'0')}`;
-}
-
-// ── 模型加载 ──
-async function loadModels() {
-  try {
-    const [detResp, segResp, obbResp, poseResp, clsResp] = await Promise.all([
-      fetch('/api/models'),
-      fetch('/api/seg-models'),
-      fetch('/api/obb-models'),
-      fetch('/api/pose-models'),
-      fetch('/api/cls-models'),
-    ]);
-    const detData = await detResp.json();
-    const segData = await segResp.json();
-    const obbData = await obbResp.json();
-    const poseData = await poseResp.json();
-    const clsData = await clsResp.json();
-
-    // 展平检测模型
-    detModels = [];
-    modelMeta = {};
-    const detOrder = ['grounding_dino', 'ultralytics', 'pytorch_vision', 'custom'];
-    const detLabels = {
-      grounding_dino: '🌐 Grounding DINO（开放词汇）',
-      ultralytics: '🚀 Ultralytics YOLO',
-      pytorch_vision: '🔬 PyTorch Vision',
-      custom: '📦 自定义权重',
-    };
-    const detSel = document.getElementById('model');
-    detSel.innerHTML = '';
-    for (const cat of detOrder) {
-      const items = detData.models[cat] || [];
-      if (!items.length) continue;
-      const optgroup = document.createElement('optgroup');
-      optgroup.label = detLabels[cat];
-      optgroup.dataset.kind = 'det';
-      for (const m of items) {
-        const opt = document.createElement('option');
-        opt.value = m.name;
-        opt.textContent = m.name;
-        optgroup.appendChild(opt);
-        detModels.push(m.name);
-        modelMeta[m.name] = m.type;
-      }
-      detSel.appendChild(optgroup);
-    }
-
-    // OBB 旋转框模型（同一 select，任务类型切换时过滤显示）
-    if (obbData.models && obbData.models.length) {
-      const obbGroup = document.createElement('optgroup');
-      obbGroup.label = '📐 YOLO-OBB（旋转框）';
-      obbGroup.dataset.kind = 'obb';
-      for (const m of obbData.models) {
-        const opt = document.createElement('option');
-        opt.value = m.name;
-        opt.textContent = m.name;
-        obbGroup.appendChild(opt);
-        modelMeta[m.name] = m.type;
-      }
-      detSel.appendChild(obbGroup);
-    }
-
-    // 姿态估计模型（同一 select，任务类型切换时过滤显示）
-    if (poseData.models && poseData.models.length) {
-      const poseGroup = document.createElement('optgroup');
-      poseGroup.label = '🧍 YOLO-pose（COCO 17 点）';
-      poseGroup.dataset.kind = 'pose';
-      for (const m of poseData.models) {
-        const opt = document.createElement('option');
-        opt.value = m.name;
-        opt.textContent = m.name;
-        poseGroup.appendChild(opt);
-        modelMeta[m.name] = m.type;
-      }
-      detSel.appendChild(poseGroup);
-    }
-
-    // 展平分类模型
-    const clsSel = document.getElementById('clsModel');
-    clsSel.innerHTML = '';
-    const clsOrder = ['hf_zero_shot', 'torchvision', 'custom'];
-    const clsLabels = {
-      hf_zero_shot: '🌐 CLIP / SigLIP（零样本）',
-      torchvision: '🔬 torchvision ImageNet',
-      custom: '📦 自定义权重',
-    };
-    for (const cat of clsOrder) {
-      const items = clsData.models[cat] || [];
-      if (!items.length) continue;
-      const optgroup = document.createElement('optgroup');
-      optgroup.label = clsLabels[cat];
-      for (const m of items) {
-        const opt = document.createElement('option');
-        opt.value = m.name;
-        opt.textContent = m.name;
-        optgroup.appendChild(opt);
-      }
-      clsSel.appendChild(optgroup);
-    }
-
-    // 展平分割模型
-    segModels = [];
-    const segOrder = ['fastsam', 'sam', 'sam2', 'sam3', 'maskrcnn', 'torchvision', 'custom'];
-    const segLabels = {
-      fastsam: '⚡ FastSAM',
-      sam: '🎯 SAM',
-      sam2: '🎯 SAM2',
-      sam3: '🎯 SAM3',
-      maskrcnn: '🔬 Mask R-CNN',
-      torchvision: '🔬 torchvision 语义分割 (VOC)',
-      custom: '📦 自定义权重',
-    };
-    const segSel = document.getElementById('segModel');
-    segSel.innerHTML = '';
-    for (const cat of segOrder) {
-      const items = segData.models[cat] || [];
-      if (!items.length) continue;
-      const optgroup = document.createElement('optgroup');
-      optgroup.label = segLabels[cat];
-      for (const m of items) {
-        const opt = document.createElement('option');
-        opt.value = m.name;
-        opt.textContent = m.name;
-        optgroup.appendChild(opt);
-        segModels.push(m.name);
-      }
-      segSel.appendChild(optgroup);
-    }
-
-    // 如果分割模型列表为空，添加默认项
-    if (segSel.children.length === 0) {
-      const opt = document.createElement('option');
-      opt.value = 'FastSAM-s.pt';
-      opt.textContent = 'FastSAM-s.pt';
-      segSel.appendChild(opt);
-      segModels.push('FastSAM-s.pt');
-    }
-
-    console.log(`加载 ${detModels.length} 个检测模型, ${segModels.length} 个分割模型`);
-  } catch (e) {
-    console.error('模型列表加载失败:', e);
-    // 降级：使用硬编码默认值
-    const detSel = document.getElementById('model');
-    detSel.innerHTML = `
-      <option value="yolo26x.pt">yolo26x.pt</option>
-      <option value="yolo12n.pt">yolo12n.pt</option>
-      <option value="fasterrcnn_resnet50_fpn_v2">fasterrcnn_resnet50_fpn_v2</option>
-      <option value="IDEA-Research/grounding-dino-tiny">grounding-dino-tiny</option>
-    `;
-    detModels = ['yolo26x.pt', 'yolo12n.pt', 'fasterrcnn_resnet50_fpn_v2', 'IDEA-Research/grounding-dino-tiny'];
-    modelMeta = {
-      'yolo26x.pt': 'coco_classes',
-      'yolo12n.pt': 'coco_classes',
-      'fasterrcnn_resnet50_fpn_v2': 'coco_classes',
-      'IDEA-Research/grounding-dino-tiny': 'open_vocabulary',
-    };
-  }
-}
-
-// ── 模型选中更新 ──
-document.getElementById('model').addEventListener('change', function() {
-  const name = this.value;
-  const type = modelMeta[name] || 'unknown';
-  const tag = document.getElementById('modelTag');
-  const info = document.getElementById('modelInfo');
-  if (type === 'open_vocabulary') {
-    tag.innerHTML = '<span class="info-tag open">开放词汇</span>';
-    info.textContent = '✅ 支持任意类别名，无需 COCO 预定义';
-  } else if (type === 'coco_classes') {
-    tag.innerHTML = '<span class="info-tag coco">COCO 80类</span>';
-    info.textContent = '⚠️ 仅检测 COCO 80 类中的目标，按 prompt 过滤';
-  } else {
-    tag.innerHTML = '<span class="info-tag custom">自定义</span>';
-    info.textContent = '📦 本地权重文件';
-  }
-
-  // 按模型类型设置合适的默认 instruction
-  const instr = document.getElementById('instruction');
-  if (type === 'coco_classes' && (instr.value === '检测 car 和 person' || instr.value === 'car, person')) {
-    // 保持不变
-  }
-});
-
-// ── 分割开关 ──
-function toggleSegSection() {
-  const seg = document.getElementById('segSection');
-  seg.style.display = document.getElementById('withSeg').checked ? 'block' : 'none';
-}
-
-// ── 运行标注 ──
-async function runAnnotation() {
-  const file = document.getElementById('imageInput').files[0];
-  if (!file) { alert('请先选择图像'); return; }
-
-  const runBtn = document.getElementById('runBtn');
-  const errorBox = document.getElementById('errorBox');
-  errorBox.innerHTML = '';
-  runBtn.disabled = true;
-  runBtn.innerHTML = '<span class="spinner"></span>正在标注...';
-
-  document.getElementById('results').innerHTML = '';
-  document.getElementById('summary').innerHTML = '';
-  document.getElementById('resultCount').textContent = '';
-  deletedIds.clear();
-
-  const taskType = document.getElementById('taskType').value;
-
-  const form = new FormData();
-  form.append('image', file);
-  form.append('instruction', document.getElementById('instruction').value);
-  form.append('conf', document.getElementById('conf').value);
-  form.append('iou', document.getElementById('iou').value);
-  form.append('task_type', taskType);
-  form.append('model', taskType === 'classification'
-    ? document.getElementById('clsModel').value
-    : document.getElementById('model').value);
-  if (taskType === 'detection') {
-    form.append('with_seg', document.getElementById('withSeg').checked);
-    if (document.getElementById('withSeg').checked) {
-      form.append('seg_model', document.getElementById('segModel').value);
-    }
-  }
-
-  try {
-    const resp = await fetch('/api/annotate', { method: 'POST', body: form });
-    const data = await resp.json();
-
-    if (!resp.ok || data.error) {
-      errorBox.innerHTML = `<div class="error-box">❌ ${data.error || '未知错误'}</div>`;
-      runBtn.disabled = false;
-      runBtn.innerHTML = '🚀 开始标注';
-      return;
-    }
-
-    currentData = data;
-
-    // 显示图像
-    const img = new Image();
-    img.onload = () => {
-      const c = document.getElementById('canvas');
-      c.width = img.width;
-      c.height = img.height;
-      const ctx = c.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      drawMasks(ctx);
-      drawBoxes(ctx);
-    };
-    img.src = data.image_base64;
-
-    // 摘要（分类任务渲染 labels，检测/OBB 渲染框统计）
-    const labels = data.labels || [];
-    let summaryHtml;
-    if (taskType === 'classification') {
-      const labelText = labels.map(l =>
-        `<span class="badge" style="background:#16578a">${l.label} ${(l.score * 100).toFixed(1)}%</span>`
-      ).join(' ') || '无结果';
-      summaryHtml = `
-        <div class="summary">
-          🏷️ 分类结果（${labels.length} 候选）: ${labelText}<br>
-          <small>模型: ${data.summary.model}</small>
-        </div>`;
-    } else {
-      const segInfo = data.summary.with_seg ? ` | 🖌️ 分割: ${data.summary.seg_model}` : '';
-      summaryHtml = `
-        <div class="summary">
-          <b>${data.summary.total}</b> 个目标 &nbsp;|&nbsp;
-          类别: ${data.summary.classes.join(', ') || '无'}<br>
-          <small>均置信度: ${(data.summary.avg_conf * 100).toFixed(1)}% &nbsp;|&nbsp; 模型: ${data.summary.model}${segInfo}</small>
-        </div>`;
-    }
-    document.getElementById('summary').innerHTML = summaryHtml;
-
-    // 结果列表
-    renderResultList();
-    document.getElementById('dlBtn').style.display = 'block';
-    document.getElementById('dlVis').style.display = 'block';
-    document.getElementById('maskToggle').style.display = (data.masks && data.masks.length) ? 'block' : 'none';
-
-  } catch (e) {
-    errorBox.innerHTML = `<div class="error-box">❌ 请求失败: ${e.message}</div>`;
-  } finally {
-    runBtn.disabled = false;
-    runBtn.innerHTML = '🚀 开始标注';
-  }
-}
-
-function drawBoxes(ctx) {
-  if (!currentData) return;
-  currentData.bboxes.forEach((b, i) => {
-    if (deletedIds.has(i)) return;
-    const color = getColor(b.label);
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2.5;
-    if (b.angle && Math.abs(b.angle) > 1e-4) {
-      // 旋转框：绕中心旋转绘制（Bbox.angle 弧度，width 轴相对 x 轴）
-      ctx.save();
-      ctx.translate(b.x + b.width / 2, b.y + b.height / 2);
-      ctx.rotate(b.angle);
-      ctx.strokeRect(-b.width / 2, -b.height / 2, b.width, b.height);
-      ctx.restore();
-    } else {
-      ctx.strokeRect(b.x, b.y, b.width, b.height);
-    }
-
-    // 标签背景
-    const text = `${b.label} ${(b.confidence*100).toFixed(0)}%`;
-    ctx.font = 'bold 13px -apple-system, sans-serif';
-    const tm = ctx.measureText(text);
-    const th = 16;
-    const tx = b.x, ty = Math.max(b.y - th - 2, 2);
-    ctx.fillStyle = color;
-    ctx.fillRect(tx, ty, tm.width + 8, th + 4);
-    ctx.fillStyle = '#fff';
-    ctx.fillText(text, tx + 4, ty + th - 2);
-
-    // 姿态任务：COCO 17 点骨架（无 keypoints 自动跳过）
-    drawKeypoints(ctx, b);
-  });
-}
-
-// ── COCO 17 点骨架（与 tools/visualize.py 同一线对集，含冗余髋-膝-踝边） ──
-const COCO_SKELETON = [
-  [0,1],[0,2],[1,3],[2,4],[5,7],[7,9],[6,8],[8,10],[5,6],[11,12],
-  [11,13],[13,15],[12,14],[14,16],[5,11],[6,12],[11,12],[13,14],[15,16],
-];
-
-function drawKeypoints(ctx, b) {
-  if (!b.keypoints || !b.keypoints.length) return;
-  const color = getColor(b.label);
-  const kp = b.keypoints;  // [[x, y, v], ...] v=0 未标注
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
-  COCO_SKELETON.forEach(([a, c]) => {
-    const pa = kp[a], pb = kp[c];
-    if (!pa || !pb || pa[2] <= 0 || pb[2] <= 0) return;
-    ctx.beginPath();
-    ctx.moveTo(pa[0], pa[1]);
-    ctx.lineTo(pb[0], pb[1]);
-    ctx.stroke();
-  });
-  ctx.fillStyle = color;
-  kp.forEach(k => {
-    if (k[2] <= 0) return;
-    ctx.beginPath();
-    ctx.arc(k[0], k[1], 2.5, 0, Math.PI * 2);
-    ctx.fill();
-  });
-}
-
-// ── 结果列表渲染（标注 / 复核共用） ──
-function renderResultList() {
-  if (!currentData) return;
-  document.getElementById('resultCount').textContent = `(${currentData.bboxes.length} 项)`;
-  let html = '';
-  currentData.bboxes.forEach((b, i) => {
-    const color = getColor(b.label);
-    html += `<div class="result-item" id="item-${i}" onclick="toggleDelete(${i})">
-      <span><span class="badge" style="background:${color};color:#fff">${b.label}</span> ${b.label}</span>
-      <span>${(b.confidence*100).toFixed(1)}%</span>
-    </div>`;
-  });
-  document.getElementById('results').innerHTML = html || '<p style="color:#8899aa">未检测到目标</p>';
-}
-
-// ── 任务类型切换 ──
-function onTaskTypeChange() {
-  const type = document.getElementById('taskType').value;
-  const modelSel = document.getElementById('model');
-  const modelLabel = modelSel.previousElementSibling;
-  const clsSel = document.getElementById('clsModel');
-  const clsInfo = document.getElementById('clsModelInfo');
-  const detOnly = document.getElementById('detOnly');
-  const segSection = document.getElementById('segSection');
-  const instr = document.getElementById('instruction');
-
-  // 模型 select 按任务过滤 optgroup（det 组 / obb 组 / pose 组）
-  const kindOf = t => (t === 'obb' ? 'obb' : t === 'pose' ? 'pose' : 'det');
-  Array.from(modelSel.querySelectorAll('optgroup')).forEach(g => {
-    g.style.display = (g.dataset.kind === kindOf(type)) ? '' : 'none';
-  });
-  if (type === 'obb') modelSel.value = 'yolo11n-obb.pt';
-  if (type === 'pose') modelSel.value = 'yolo11n-pose.pt';
-
-  modelLabel.style.display = type === 'classification' ? 'none' : '';
-  modelSel.style.display = type === 'classification' ? 'none' : '';
-  clsSel.style.display = type === 'classification' ? '' : 'none';
-  clsInfo.style.display = type === 'classification' ? '' : 'none';
-  detOnly.style.display = type === 'classification' ? 'none' : '';
-  segSection.style.display = (type === 'detection' && document.getElementById('withSeg').checked) ? 'block' : 'none';
-
-  // 指令提示
-  if (type === 'classification') {
-    if (instr.value === 'car, person' || instr.value === '检测 car 和 person') {
-      instr.value = 'cat, dog, car, person';
-    }
-    instr.placeholder = '候选标签，如: cat, dog, car (逗号分隔，零样本任意语言)';
-  } else {
-    instr.placeholder = '如: car, person, bicycle (逗号分隔)';
-  }
-}
-
-// ── bbox 拖拽 + 双击改标签 ──
-function canvasPos(e) {
-  const c = document.getElementById('canvas');
-  const rect = c.getBoundingClientRect();
-  return {
-    x: (e.clientX - rect.left) * (c.width / rect.width),
-    y: (e.clientY - rect.top) * (c.height / rect.height),
-  };
-}
-
-function hitBox(p, b) {
-  const cx = b.x + b.width / 2, cy = b.y + b.height / 2;
-  if (b.angle && Math.abs(b.angle) > 1e-4) {
-    // 旋转框命中近似：中心距离 ≤ 外接半径
-    return Math.hypot(p.x - cx, p.y - cy) <= Math.max(b.width, b.height) / 2;
-  }
-  return p.x >= b.x && p.x <= b.x + b.width && p.y >= b.y && p.y <= b.y + b.height;
-}
-
-function findBox(p) {
-  if (!currentData) return -1;
-  for (let i = currentData.bboxes.length - 1; i >= 0; i--) {
-    if (!deletedIds.has(i) && hitBox(p, currentData.bboxes[i])) return i;
-  }
-  return -1;
-}
-
-function bindCanvasEditing() {
-  const c = document.getElementById('canvas');
-  let drag = null;
-  c.addEventListener('mousedown', e => {
-    if (!currentData) return;
-    const i = findBox(canvasPos(e));
-    if (i < 0) return;
-    const p = canvasPos(e);
-    const b = currentData.bboxes[i];
-    drag = { i, dx: b.x - p.x, dy: b.y - p.y };
-  });
-  c.addEventListener('mousemove', e => {
-    if (!drag || !currentData) return;
-    const p = canvasPos(e);
-    const b = currentData.bboxes[drag.i];
-    const nx = Math.max(0, p.x + drag.dx);
-    const ny = Math.max(0, p.y + drag.dy);
-    const dx = nx - b.x, dy = ny - b.y;
-    b.x = nx;
-    b.y = ny;
-    // 关键点随框平移（绝对像素坐标）
-    if (b.keypoints) {
-      b.keypoints = b.keypoints.map(k => [k[0] + dx, k[1] + dy, k[2]]);
-    }
-    currentData.edited = true;
-    redraw();
-  });
-  c.addEventListener('mouseup', () => { drag = null; });
-  c.addEventListener('mouseleave', () => { drag = null; });
-  c.addEventListener('dblclick', e => {
-    if (!currentData) return;
-    const i = findBox(canvasPos(e));
-    if (i < 0) return;
-    const b = currentData.bboxes[i];
-    const label = prompt('修改标签:', b.label);
-    if (label === null || !label.trim()) return;
-    b.label = label.trim();
-    currentData.edited = true;
-    renderResultList();
-    redraw();
-  });
-}
-
-// ── 分割 mask 叠加（polygon 半透明填充 + 描边） ──
-function drawMasks(ctx) {
-  if (!currentData || !currentData.masks || !currentData.masks.length) return;
-  if (!document.getElementById('showMasks').checked) return;
-  currentData.masks.forEach(m => {
-    // 对应 bbox 被删除时跳过该 mask
-    if (m.bbox_index !== undefined && m.bbox_index >= 0 && deletedIds.has(m.bbox_index)) return;
-    const color = getColor(m.bbox.label);
-    (m.segmentation || []).forEach(poly => {
-      if (!poly || poly.length < 6) return;
-      const path = new Path2D();
-      path.moveTo(poly[0], poly[1]);
-      for (let i = 2; i < poly.length; i += 2) path.lineTo(poly[i], poly[i + 1]);
-      path.closePath();
-      ctx.fillStyle = color + '55';
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.fill(path);
-      ctx.stroke(path);
-    });
-  });
-}
-
-// ── 重绘（图像 + mask + 框） ──
-function redraw() {
-  if (!currentData) return;
-  const c = document.getElementById('canvas');
-  const ctx = c.getContext('2d');
-  const img = new Image();
-  img.onload = () => { ctx.drawImage(img, 0, 0); drawMasks(ctx); drawBoxes(ctx); };
-  img.src = currentData.image_url || currentData.image_base64;
-}
-
-function toggleDelete(i) {
-  if (deletedIds.has(i)) { deletedIds.delete(i); }
-  else { deletedIds.add(i); }
-  document.getElementById('item-'+i)?.classList.toggle('deleted');
-  redraw();
-}
-
-async function downloadJSON() {
-  if (!currentData) return;
-  const kept = currentData.bboxes.filter((b, i) => !deletedIds.has(i));
-  const keptMasks = (currentData.masks || []).filter(m =>
-    m.bbox_index === undefined || m.bbox_index < 0 || !deletedIds.has(m.bbox_index));
-
-  const payload = {
-    image_path: currentData.image_path || 'upload.jpg',
-    image_width: document.getElementById('canvas').width,
-    image_height: document.getElementById('canvas').height,
-    bboxes: kept,
-    masks: keptMasks,
-    model: currentData.summary?.model,
-  };
-
-  try {
-    const resp = await fetch('/api/export-coco', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await resp.json();
-    if (!resp.ok || data.error) {
-      alert('导出失败: ' + (data.error || resp.status));
-      return;
-    }
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'annotations.json';
-    a.click();
-  } catch (e) {
-    alert('导出失败: ' + e.message);
-  }
-}
-
-function downloadVis() {
-  if (!currentData?.image_base64) return;
-  const a = document.createElement('a');
-  a.href = currentData.image_base64;
-  a.download = 'autolabel_visualization.png';
-  a.click();
-}
-
-// ── 标注 / 复核队列 模式切换 ──
-function switchMode(mode) {
-  const annotateOn = mode === 'annotate';
-  document.getElementById('annotateSection').style.display = annotateOn ? 'block' : 'none';
-  document.getElementById('reviewSection').style.display = annotateOn ? 'none' : 'block';
-  document.getElementById('tabAnnotate').classList.toggle('mode-active', annotateOn);
-  document.getElementById('tabReview').classList.toggle('mode-active', !annotateOn);
-
-  // 清空当前数据，避免跨模式串扰
-  currentData = null;
-  reviewFileName = null;
-  deletedIds.clear();
-  document.getElementById('results').innerHTML = '';
-  document.getElementById('summary').innerHTML = '';
-  document.getElementById('resultCount').textContent = '';
-  document.getElementById('errorBox').innerHTML = '';
-  document.getElementById('dlBtn').style.display = 'none';
-  document.getElementById('dlVis').style.display = 'none';
-  document.getElementById('maskToggle').style.display = 'none';
-  document.getElementById('reviewActions').style.display = 'none';
-  if (!annotateOn) loadReviewFiles();
-}
-
-// ── 复核队列 ──
-async function loadReviewFiles() {
-  const box = document.getElementById('reviewFiles');
-  box.innerHTML = '<p style="color:#8899aa">加载中...</p>';
-  try {
-    const resp = await fetch('/api/review-files');
-    const data = await resp.json();
-    if (!data.files || !data.files.length) {
-      box.innerHTML = '<p style="color:#8899aa">队列为空（outputs/ 下无待复核文件）</p>';
-      return;
-    }
-    let html = '';
-    data.files.forEach(f => {
-      html += `<div class="result-item" onclick="loadReviewFile('${f.name}')">
-        <span>📄 ${f.image_stem || f.name}</span>
-        <span>${f.count} 框</span>
-      </div>`;
-    });
-    box.innerHTML = html;
-  } catch (e) {
-    box.innerHTML = `<div class="error-box">❌ 加载失败: ${e.message}</div>`;
-  }
-}
-
-async function loadReviewFile(name) {
-  reviewFileName = name;
-  deletedIds.clear();
-  document.getElementById('reviewActions').style.display = 'none';
-  const errorBox = document.getElementById('errorBox');
-  errorBox.innerHTML = '';
-
-  try {
-    const [metaResp, fileResp] = await Promise.all([
-      fetch('/api/review-files'),
-      fetch('/api/review-file?name=' + encodeURIComponent(name)),
-    ]);
-    const metaData = await metaResp.json();
-    const qdata = await fileResp.json();
-    if (!fileResp.ok || qdata.error) {
-      errorBox.innerHTML = `<div class="error-box">❌ ${qdata.error || '队列文件不可读'}</div>`;
-      return;
-    }
-
-    const meta = (metaData.files || []).find(f => f.name === name);
-    const imgPath = qdata.image_path || (meta ? meta.image_path : '');
-
-    if (!imgPath) {
-      errorBox.innerHTML = '<div class="error-box">❌ 该队列文件缺少 image_path 字段（旧版本文件），无法显示原图</div>';
-      return;
-    }
-
-    const imgResp = await fetch('/api/review-image?path=' + encodeURIComponent(imgPath));
-    if (!imgResp.ok) {
-      errorBox.innerHTML = '<div class="error-box">❌ 原图不可读: ' + imgPath + '</div>';
-      return;
-    }
-    const imgUrl = URL.createObjectURL(await imgResp.blob());
-
-    currentData = {
-      image_url: imgUrl,
-      image_path: imgPath,
-      bboxes: qdata.annotations || [],
-      masks: [],
-      summary: { total: (qdata.annotations || []).length, model: '' },
-    };
-
-    const img = new Image();
-    img.onload = () => {
-      const c = document.getElementById('canvas');
-      c.width = img.width;
-      c.height = img.height;
-      const ctx = c.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      drawBoxes(ctx);
-    };
-    img.src = imgUrl;
-
-    renderResultList();
-    if (!currentData.bboxes.length) {
-      document.getElementById('results').innerHTML = '<p style="color:#8899aa">无待复核标注</p>';
-    }
-    document.getElementById('summary').innerHTML = `
-      <div class="summary">
-        <b>${currentData.bboxes.length}</b> 个待复核目标<br>
-        <small>队列文件: ${name} · 点击列表项删除/恢复</small>
-      </div>`;
-    document.getElementById('reviewActions').style.display = 'block';
-  } catch (e) {
-    errorBox.innerHTML = `<div class="error-box">❌ 加载失败: ${e.message}</div>`;
-  }
-}
-
-async function saveReview() {
-  if (!reviewFileName) return;
-  try {
-    const kept = currentData ? currentData.bboxes.filter((b, i) => !deletedIds.has(i)) : [];
-    const body = { queue_file: reviewFileName, deleted_indices: [...deletedIds] };
-    if (currentData && currentData.edited) body.edited = kept;  // 修正框全量重建
-    const resp = await fetch('/api/review-save', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const data = await resp.json();
-    if (!resp.ok || data.error) {
-      alert('保存失败: ' + (data.error || resp.status));
-      return;
-    }
-    lastReviewedName = data.saved_path.split('/').pop();
-    alert(`已保存: ${data.saved_path}\n保留 ${data.kept} 框，删除 ${data.deleted} 框`);
-    reviewFileName = null;
-    loadReviewFiles();
-  } catch (e) {
-    alert('保存失败: ' + e.message);
-  }
-}
-
-async function downloadReviewJSON() {
-  if (!lastReviewedName) { alert('请先保存修正'); return; }
-  try {
-    const resp = await fetch('/api/review-file?name=' + encodeURIComponent(lastReviewedName));
-    const data = await resp.json();
-    if (!resp.ok || data.error) {
-      alert('下载失败: ' + (data.error || resp.status));
-      return;
-    }
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = lastReviewedName;
-    a.click();
-  } catch (e) {
-    alert('下载失败: ' + e.message);
-  }
-}
-
-// ── 初始化 ──
-loadModels();
-onTaskTypeChange();
-bindCanvasEditing();
-</script>
+<script src="/static/app.js"></script>
 </body>
 </html>

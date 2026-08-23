@@ -17,7 +17,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 ```
 
 - **Auto2dLabel**：2D 六类任务逐版本推进（检测 → 分割 → 分类 → OBB → 3D 基石[Tracking/域内权重] → Pose），当前 v0.3；**为 Auto3dLabel 做基石**，优先交付支撑 3D 的内容（v0.4）
-- **Auto3dLabel**：3D 标注（调研完成，MVP 走「2D 基础模型 → 3D 提升」路线，**2026-08-19 战略调整：主推进**，v0.1 单帧 MVP 已立项，见 `auto3dlabel/milestone/v0.1.md`）
+- **Auto3dLabel**：3D 标注（调研完成，MVP 走「2D 基础模型 → 3D 提升」路线，**2026-08-19 战略调整：主推进**，**v0.1 单帧 MVP ✅ 完成（2026-08-24）**，见 `auto3dlabel/milestone/v0.1.md`）
 - **人工介入点**：低置信度自动入 review/hard 队列 + Web 审核界面 + 主动学习采样，Agent 不确定时主动求助
 
 ## Target User（目标用户）
@@ -78,10 +78,10 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 
 | 项 | 状态 |
 | --- | --- |
-| **Auto2dLabel** | v0.1–v0.3 ✅：检测 + 分割 + 分类（CLIP/SigLIP + torchvision 14 款）+ OBB（YOLO-OBB）+ Web 闭环 + Agentic 闭环，**84 个模型**（含 cityscapes 域内 Mask R-CNN，全量 500 图 mAP 0.5149），**12 数据集 Benchmark**（含 DOTA OBB 旋转框；CPU 可行性 + GPU 复测均完成，见 `auto2dlabel/tests/test-v0.3.md`）；**v0.4 ✅ 2026-08-23**（Tracking Phase 1 ByteTrack + Phase 2 BoT-SORT/约束过滤/KITTI difficulty + **KITTI 域内微调 0.8867** + Phase 3 AgentState 续跑/模型级重试/Web 三件套，见 `tests/test-v0.4.md`）；**v0.5 ✅ 2026-08-23**（Pose YOLO-pose / 指代 L2 Florence-2 + **L3 Qwen2-VL-7B 4bit**（GPU 冒烟 33.2s，L2 失败自动升级阶梯）/ 自动车道 ROI UFLD / ILSVRC2012 val 分类扩展（全量 5 万图 top-1 0.6968 与官方一致），见 `tests/test-v0.5.md`；质量门 585/0/167/127） |
-| **质量门** | pyright 0 / mypy 167 / ruff 127 / pytest 585 passed（每版本硬性门槛，命令与标准见 `Benchmark_plan.md` §10.6） |
+| **Auto2dLabel** | v0.1–v0.3 ✅：检测 + 分割 + 分类（CLIP/SigLIP + torchvision 14 款）+ OBB（YOLO-OBB）+ Web 闭环 + Agentic 闭环，**84 个模型**（含 cityscapes 域内 Mask R-CNN，全量 500 图 mAP 0.5149），**12 数据集 Benchmark**（含 DOTA OBB 旋转框；CPU 可行性 + GPU 复测均完成，见 `auto2dlabel/tests/test-v0.3.md`）；**v0.4 ✅ 2026-08-23**（Tracking Phase 1 ByteTrack + Phase 2 BoT-SORT/约束过滤/KITTI difficulty + **KITTI 域内微调 0.8867** + Phase 3 AgentState 续跑/模型级重试/Web 三件套，见 `tests/test-v0.4.md`）；**v0.5 ✅ 2026-08-23**（Pose YOLO-pose / 指代 L2 Florence-2 + **L3 Qwen2-VL-7B 4bit**（GPU 冒烟 33.2s，L2 失败自动升级阶梯）/ 自动车道 ROI UFLD / ILSVRC2012 val 分类扩展（全量 5 万图 top-1 0.6968 与官方一致）/ **Web 复核增强**（CVAT 借鉴：快捷键/undo/手柄/列表/过滤/右键/区域 issue + edited_by_human 数据回路 + 已复核重开，jsdom 冒烟 76/76），见 `tests/test-v0.5.md`；质量门 595/0/167/127） |
+| **质量门** | pyright 0 / mypy 167 / ruff 127 / pytest 595 passed（每版本硬性门槛，命令与标准见 `Benchmark_plan.md` §10.6） |
 | **代码托管** | GitHub `GithubSherlock/AutoLabel`（private），权重与 `.env` 不入库 |
-| **Auto3dLabel** | 调研 ✅，路线定案（2D → 3D 提升）；**2026-08-19 战略调整：主推进**——v0.1 单帧 MVP 里程碑已定义（`auto3dlabel/milestone/v0.1.md`），KITTI object 数据已就位，与 Auto2dLabel v0.4 双线并行 |
+| **Auto3dLabel** | 调研 ✅，路线定案（2D → 3D 提升）；**2026-08-19 战略调整：主推进**；**v0.1 ✅ 2026-08-24**——单帧 KITTI 五步管线 + Agentic 闭环 + Web 复核 + 128 用例，质量门全绿（实测 `auto3dlabel/tests/test-v0.1.md`；3D 层 AP 近零为反投影路线精度天花板的实证，演进方向 CenterPoint/PointPillars） |
 
 ## 已知缺口 / 待办
 
@@ -103,7 +103,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 
 | 优先级 | 事项 | 内容 |
 | --- | --- | --- |
-| 1 | **Auto3dLabel v0.1 单帧 3D MVP**（主推进） | 路线 2：复用 G-DINO + SAM2 → mask 反投影语义点云 → DBSCAN 聚类 → 3D bbox 拟合 → KITTI 导出 + 3D IoU 冒烟评测（里程碑与验收见 `auto3dlabel/milestone/v0.1.md`，选型速查与红线见 `auto3dlabel/CLAUDE.md`）。KITTI object 数据已就位：`Documents/datasets/KITTI/object`（2026-08-19 从 `/autodl-pub/data/KITTI/object` 补齐 velodyne/calib/image_2 全量） |
+| 1 | **Auto3dLabel v0.1 单帧 3D MVP**（主推进）✅ 2026-08-24 | 路线 2：复用 G-DINO + SAM2 → mask 反投影语义点云 → DBSCAN 聚类 → 3D bbox 拟合 → KITTI 导出 + 3D/BEV IoU 评测 + Agentic + Web 复核（里程碑与验收见 `auto3dlabel/milestone/v0.1.md`，实测 `auto3dlabel/tests/test-v0.1.md`）。KITTI object 数据已就位：`Documents/datasets/KITTI/object` |
 | 1' | **Auto2dLabel v0.4 3D 基石版**（双线并行） | Tracking（ByteTrack，视频时序 ID——3D v0.2 多帧的跟踪 ID + 运动属性依赖；**Phase 1 ✅ 2026-08-19**）+ KITTI 域 2D 检测质量（benchmark 接入 + 域内微调权重）+ AgentState from_dict 收尾（里程碑见 `auto2dlabel/milestone/v0.4.md`） |
 | 2 | **Auto3dLabel v0.2 多帧** | 跟踪 ID + 运动属性（速度/加速度），依赖 2D v0.4 Tracking 交付 |
 | 3 | 已知缺口消化 | mot 域微调权重（cityscapes ✅ 已闭环 0.5149，时机与域内数据同步）、分类数据集扩展（ImageNet100 ✅ + ILSVRC2012 val ✅，cifar/CUB200 待排期）、Web bbox 拖拽/标签编辑、分类与 OBB 的 Web 展示（已随 v0.4 Phase 3 消化） |

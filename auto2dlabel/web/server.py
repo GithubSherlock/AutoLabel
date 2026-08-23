@@ -47,7 +47,7 @@ REVIEW_DIR = Path("outputs")
 _ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-app = FastAPI(title="AutoLabel Web", version="0.3.0")
+app = FastAPI(title="AutoLabel Web", version="0.5.0")
 
 # 确保 weights 目录存在
 WEIGHTS_DIR.mkdir(exist_ok=True)
@@ -293,6 +293,7 @@ def _bbox_from_dict(d: dict[str, Any]) -> Bbox:
             (float(k[0]), float(k[1]), float(k[2]))
             for k in d.get("keypoints", [])
         ],
+        edited_by_human=bool(d.get("edited_by_human", False)),
     )
 
 
@@ -541,7 +542,24 @@ async def list_review_files() -> JSONResponse:
                 "modified": f.stat().st_mtime,
             })
     files.sort(key=lambda x: (-x["modified"], x["name"]))
-    return JSONResponse({"files": files, "dir": str(REVIEW_DIR.resolve())})
+
+    # 已复核文件（*_reviewed.json 供重开复查，同款容错扫描）
+    reviewed = []
+    for f in sorted(REVIEW_DIR.glob("*_reviewed.json")):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue  # 损坏文件跳过
+        reviewed.append({
+            "name": f.name,
+            "image_path": data.get("image_path", ""),
+            "image_stem": f.name.removesuffix("_reviewed.json"),
+            "count": len(data.get("annotations", [])),
+            "issues": len(data.get("issues", [])),
+            "modified": f.stat().st_mtime,
+        })
+    reviewed.sort(key=lambda x: (-x["modified"], x["name"]))
+    return JSONResponse({"files": files, "reviewed": reviewed, "dir": str(REVIEW_DIR.resolve())})
 
 
 @app.get("/api/review-file")
@@ -574,9 +592,17 @@ async def save_review(payload: dict[str, Any] = Body(...)) -> JSONResponse:
     payload 支持两种模式（互斥，edited 优先）：
     - edited: 修正后的框全量重建（拖拽/改标签后的完整 bbox 列表）
     - deleted_indices: 仅删除框下标（旧模式，向后兼容）
+
+    支持对已复核文件（*_reviewed.json）重开修正：COCO 源归一化为前端框
+    dict（category_id → label）后走同一保存管线，输出原地覆写。
+
+    附加可选字段：
+    - issues: 人工标注的区域问题列表 [{id, x, y, width, height, text, status}]
+    - edited_by_human: 每框人工修正标记（随 edited 全量重建落盘 *_reviewed.json）
     """
     name = str(payload.get("queue_file", ""))
-    if not name.endswith("_review.json") or "/" in name or "\\" in name:
+    is_reviewed = name.endswith("_reviewed.json")
+    if not name.endswith(("_review.json", "_reviewed.json")) or "/" in name or "\\" in name:
         return JSONResponse({"error": f"非法队列文件: {name}"}, status_code=400)
 
     src = REVIEW_DIR / name
@@ -588,7 +614,23 @@ async def save_review(payload: dict[str, Any] = Body(...)) -> JSONResponse:
     except (json.JSONDecodeError, OSError):
         return JSONResponse({"error": f"队列文件损坏: {name}"}, status_code=400)
 
-    annotations = list(data.get("annotations", []))
+    if is_reviewed:
+        # 已复核文件（COCO dict）→ 归一化为前端框 dict（category_id → label）
+        cat_map = {c["id"]: c["name"] for c in data.get("categories", [])}
+        annotations = []
+        for a in data.get("annotations", []):
+            bb = a.get("bbox") or [0, 0, 0, 0]
+            annotations.append({
+                "x": bb[0], "y": bb[1], "width": bb[2], "height": bb[3],
+                "label": cat_map.get(a.get("category_id"), "unknown"),
+                "confidence": a.get("score", 1.0),
+                "edited_by_human": bool(a.get("edited_by_human")),
+            })
+        stem = name.removesuffix("_reviewed.json")
+    else:
+        annotations = list(data.get("annotations", []))
+        stem = name.removesuffix("_review.json")
+
     edited = payload.get("edited")
     if edited is not None:
         kept = list(edited)  # 修正框全量重建（含拖拽/标签编辑）
@@ -598,20 +640,37 @@ async def save_review(payload: dict[str, Any] = Body(...)) -> JSONResponse:
         kept = [a for i, a in enumerate(annotations) if i not in deleted]
         deleted_count = len(deleted)
 
-    stem = name.removesuffix("_review.json")
+    # 图像尺寸：队列文件 image_size；已复核文件回退 images[0]（COCO）
+    img_size = list(data.get("image_size") or [])
+    if not img_size:
+        imgs = data.get("images") or []
+        if imgs:
+            img_size = [imgs[0].get("width", 0), imgs[0].get("height", 0)]
     ann = Annotation(
         image_path=data.get("image_path", data.get("image", "")),
-        image_size=tuple(data.get("image_size", (0, 0))),
+        image_size=tuple(img_size),
     )
     for b in kept:
         ann.add_bbox(_bbox_from_dict(b))
 
     REVIEW_DIR.mkdir(parents=True, exist_ok=True)
     out = REVIEW_DIR / f"{stem}_reviewed.json"
+    coco = build_coco_dict([ann])
+    # 人工修正标记落盘（build_coco_dict 保持纯净，仅此处后处理注入）
+    for coco_ann, b in zip(coco.get("annotations", []), ann.bboxes):
+        if b.edited_by_human:
+            coco_ann["edited_by_human"] = True
+    issues = payload.get("issues") or []
+    if issues:
+        coco["issues"] = issues
+    src_img = data.get("image_path", data.get("image", ""))
+    if src_img:
+        coco["image_path"] = src_img
     out.write_text(
-        json.dumps(build_coco_dict([ann]), indent=2, ensure_ascii=False), encoding="utf-8"
+        json.dumps(coco, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    src.rename(src.with_name(name + ".reviewed"))
+    if not is_reviewed:
+        src.rename(src.with_name(name + ".reviewed"))
 
     return JSONResponse({
         "ok": True,
@@ -627,7 +686,7 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.environ.get("AUTOLABEL_PORT", "8765"))
-    print("  AutoLabel Web v0.3.0")
+    print("  AutoLabel Web v0.5.0")
     print(f"  访问: http://localhost:{port}")
     print(f"  API 文档: http://localhost:{port}/docs")
     print(f"  权重目录: {WEIGHTS_DIR}")

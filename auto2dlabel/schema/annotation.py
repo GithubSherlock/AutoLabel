@@ -24,6 +24,8 @@ class Bbox:
     track_id: int | None = None  # 跟踪 ID（ByteTrack 关联；None=未跟踪）
     keypoints: list[tuple[float, float, float]] = field(default_factory=list)
     # 姿态关键点 [x, y, v]（COCO 17 点语义，像素坐标，v=0 未标注/1 标注/2 不可见）；空 = 无姿态
+    edited_by_human: bool | None = None
+    # 人工修正标记（Web 审核拖拽/缩放/旋转/改标签置位；None=AI 初稿，仅 True 时 to_dict 输出）
 
     @property
     def xyxy(self) -> tuple[float, float, float, float]:
@@ -63,6 +65,8 @@ class Bbox:
             d["track_id"] = self.track_id
         if self.keypoints:  # 非空才输出（防普通检测 JSON 膨胀）
             d["keypoints"] = [list(k) for k in self.keypoints]
+        if self.edited_by_human:
+            d["edited_by_human"] = True
         return d
 
 

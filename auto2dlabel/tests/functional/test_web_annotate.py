@@ -91,6 +91,29 @@ def test_bbox_from_dict_defaults() -> None:
     assert b.angle == 0.0
     assert b.track_id is None
     assert b.confidence == 1.0
+    assert not b.edited_by_human  # 缺键 → False（AI 初稿）
+
+
+def test_bbox_from_dict_edited_by_human() -> None:
+    """edited_by_human 标记经 _bbox_from_dict 重建保真。"""
+    b = server._bbox_from_dict({
+        "x": 1, "y": 2, "width": 3, "height": 4, "label": "car", "edited_by_human": True,
+    })
+    assert b.edited_by_human is True
+
+
+def test_bbox_to_dict_edited_by_human_conditional() -> None:
+    """Bbox.to_dict 仅 edited_by_human=True 时输出该键（防 JSON 膨胀）。"""
+    from auto2dlabel.schema.annotation import Bbox
+
+    plain = Bbox(x=0, y=0, width=1, height=1, label="c")
+    assert "edited_by_human" not in plain.to_dict()
+    assert "edited_by_human" not in Bbox(
+        x=0, y=0, width=1, height=1, label="c", edited_by_human=False,
+    ).to_dict()
+    assert Bbox(
+        x=0, y=0, width=1, height=1, label="c", edited_by_human=True,
+    ).to_dict()["edited_by_human"] is True
 
 
 # ---------- /api/annotate 三路由 ----------
@@ -155,6 +178,18 @@ def test_export_coco_bbox_with_angle(monkeypatch: pytest.MonkeyPatch) -> None:
     assert coco["annotations"][0]["bbox"] == [10.0, 20.0, 30.0, 40.0]
 
 
+def test_export_coco_ignores_edited_by_human() -> None:
+    """/api/export-coco 输出纯净 COCO（edited_by_human 不泄漏到导出）。"""
+    resp = client.post("/api/export-coco", json={
+        "image_path": "a.png", "image_width": 100, "image_height": 100,
+        "bboxes": [{"x": 10, "y": 20, "width": 30, "height": 40, "label": "car",
+                    "confidence": 0.9, "edited_by_human": True}],
+        "masks": [],
+    })
+    assert resp.status_code == 200
+    assert "edited_by_human" not in resp.json()["annotations"][0]
+
+
 # ---------- /api/review-save：edited 全量重建 ----------
 
 @pytest.fixture()
@@ -213,3 +248,31 @@ def test_review_save_deleted_indices_backward_compat(review_dir: Path) -> None:
     assert data["deleted"] == 1
     out = json.loads((review_dir / "demo_reviewed.json").read_text(encoding="utf-8"))
     assert len(out["annotations"]) == 1
+    # 无 issues → 不写 issues 键（向后兼容，防静默改结构）
+    assert "issues" not in out
+
+
+def test_review_save_edited_persists_flag(review_dir: Path) -> None:
+    """edited 全量重建时 edited_by_human 标记落盘 *_reviewed.json。"""
+    queue = review_dir / "demo_review.json"
+    queue.write_text(json.dumps({
+        "image_path": "demo.png",
+        "image_size": [100, 100],
+        "annotations": [
+            {"x": 1, "y": 2, "width": 3, "height": 4, "label": "car", "confidence": 0.8},
+            {"x": 5, "y": 6, "width": 7, "height": 8, "label": "person", "confidence": 0.7},
+        ],
+    }), encoding="utf-8")
+
+    resp = client.post("/api/review-save", json={
+        "queue_file": "demo_review.json",
+        "edited": [
+            {"x": 11, "y": 12, "width": 30, "height": 40, "label": "truck",
+             "confidence": 0.9, "edited_by_human": True},
+            {"x": 5, "y": 6, "width": 7, "height": 8, "label": "person", "confidence": 0.7},
+        ],
+    })
+    assert resp.status_code == 200
+    out = json.loads((review_dir / "demo_reviewed.json").read_text(encoding="utf-8"))
+    assert out["annotations"][0]["edited_by_human"] is True
+    assert "edited_by_human" not in out["annotations"][1]  # 未人工改过的框无该键
