@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from auto2dlabel.models.detection import DetectionModel
     from auto2dlabel.models.segmentation import SegmentationModel
 
+    from auto3dlabel.models.detection3d import Detector3D
+
 
 def attach_coco_names(results: list[dict]) -> list[dict]:
     """dict 加 name 键（COCO 名），供 evaluate_detections prompt 覆盖检查匹配。
@@ -36,12 +38,14 @@ def attach_coco_names(results: list[dict]) -> list[dict]:
 
 
 class Detect3DTool(Tool):
-    """KITTI 单帧 3D 检测工具（2D 检测 → SAM2 mask → 反投影 → 聚类拟合）。"""
+    """KITTI 单帧 3D 检测工具（v0.2 双引擎：LiDAR 直检 / 2D+反投影）。"""
 
     name = "detect_objects"
     description = (
-        "Detect 3D objects in a KITTI frame (LiDAR + camera). Runs the full pipeline: "
-        "2D detection → SAM2 mask → LiDAR backprojection → DBSCAN clustering → 3D box fitting. "
+        "Detect 3D objects in a KITTI frame (LiDAR + camera). Runs either the LiDAR "
+        "detector engine (mmdet3d PointPillars/CenterPoint, 3 classes: Car/Pedestrian/"
+        "Cyclist) when det_model is a 3D model name, or the 2D pipeline: 2D detection → "
+        "SAM2 mask → LiDAR backprojection → DBSCAN clustering → 3D box fitting. "
         "Returns 3D boxes with cx/cy/cz center, h/w/l size, rotation_y, and fit_points "
         "(number of LiDAR points supporting the fit). Use this tool when the user asks to "
         "annotate 3D objects (cars, pedestrians, cyclists) in a KITTI frame."
@@ -83,13 +87,20 @@ class Detect3DTool(Tool):
             "required": ["prompts"],
         }
 
-    def _models(self) -> tuple[DetectionModel | None, SegmentationModel | None]:
+    def _models(
+        self,
+    ) -> tuple[DetectionModel | None, SegmentationModel | None, Detector3D | None]:
         from auto2dlabel.models.detection import create_detection_model
         from auto2dlabel.models.segmentation import create_segmentation_model
 
+        from auto3dlabel.models.detection3d import create_detector3d
+
+        det3d = create_detector3d(self.det_model_name)
+        if det3d is not None:
+            return None, None, det3d  # LiDAR 引擎：2D det/seg 不实例化（省显存）
         det = create_detection_model(self.det_model_name) if self.det_model_name else None
         seg = create_segmentation_model(self.seg_model_name) if self.seg_model_name else None
-        return det, seg
+        return det, seg, None
 
     def forward(
         self,
@@ -97,7 +108,7 @@ class Detect3DTool(Tool):
         confidence_threshold: float = 0.3,
         **kwargs: Any,
     ) -> list[dict]:
-        """跑完整 3D 管线；0 框自动降阈值重试一次（同 2D 工具，对 Agent Loop 透明）。
+        """跑完整 3D 管线（双引擎）；0 框自动降阈值重试一次（同 2D 工具，对 Agent Loop 透明）。
 
         基类 forward 为 **kwargs 调用协议（orchestrator 以 tool.forward(**arguments) 调用），
         故具名参数全部给默认值 + **kwargs 吸收其余，规避 override 不兼容。
@@ -105,7 +116,7 @@ class Detect3DTool(Tool):
         from auto2dlabel.models.detection import detect_with_retry
 
         prompts = prompts or ["car"]
-        det_model, seg_model = self._models()  # None 时 annotate_frame 内部走默认工厂
+        det_model, seg_model, det3d = self._models()  # None 时 annotate_frame 内部走默认工厂
 
         def _run(conf: float) -> list[dict]:
             result = annotate_frame(
@@ -113,6 +124,7 @@ class Detect3DTool(Tool):
                 prompts,
                 det_model=det_model,
                 seg_model=seg_model,
+                det3d=det3d,
                 confidence=conf,
                 viz=False,
             )

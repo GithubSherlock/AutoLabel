@@ -49,6 +49,28 @@ def _parse_frame_ids(spec: str) -> list[str]:
     raise typer.BadParameter(f"无法识别的帧 ID/目录: {spec}")
 
 
+def _make_models(
+    det_model: str | None, seg_model: str | None
+) -> tuple[object, object, object]:
+    """双引擎模型工厂：det_model 命中 DETECTOR3D_NAMES → LiDAR 直检（seg 不实例化）。
+
+    Returns: (det, seg, det3d)（det3d 非 None 时 det/seg 为 None）
+    """
+    from auto2dlabel.models.detection import create_detection_model
+    from auto2dlabel.models.segmentation import create_segmentation_model
+
+    from auto3dlabel.models.detection3d import create_detector3d
+
+    det3d = create_detector3d(det_model)
+    if det3d is not None:
+        return None, None, det3d
+    return (
+        create_detection_model(_resolve_det_model(det_model)),
+        create_segmentation_model(seg_model or "sam2_l.pt"),
+        None,
+    )
+
+
 def _run_frame(
     frame_id: str,
     prompts: list[str],
@@ -59,23 +81,98 @@ def _run_frame(
     viz: bool,
 ) -> tuple[int, int, int]:
     """单帧跑管线 + 导出产物 → (accepted, review, hard)。"""
-    from auto2dlabel.models.detection import create_detection_model
-    from auto2dlabel.models.segmentation import create_segmentation_model
-
     from auto3dlabel.export.kitti_label import build_label_file
     from auto3dlabel.export.review_queue import triage_3d, write_review_queue
     from auto3dlabel.tools.pipeline import annotate_frame
 
     frame = resolve_frame(frame_id)
-    det = create_detection_model(_resolve_det_model(det_model))
-    seg = create_segmentation_model(seg_model or "sam2_l.pt")
+    det, seg, det3d = _make_models(det_model, seg_model)
     result = annotate_frame(
-        frame, prompts, det_model=det, seg_model=seg, confidence=conf, viz=viz, out_dir=out_dir
+        frame,
+        prompts,
+        det_model=det,  # type: ignore[arg-type]
+        seg_model=seg,  # type: ignore[arg-type]
+        det3d=det3d,  # type: ignore[arg-type]
+        confidence=conf,
+        viz=viz,
+        out_dir=out_dir,
     )
     triage = triage_3d(result.boxes3d)
     build_label_file(frame.frame_id, result.boxes3d, out_dir / "labels")
     write_review_queue(frame, triage, out_dir / "reviews")
     return len(triage.accepted), len(triage.review), len(triage.hard)
+
+
+def _run_tracked_sequence(
+    frame_ids: list[str],
+    prompts: list[str],
+    det_model: str | None,
+    seg_model: str | None,
+    conf: float,
+    out_dir: Path,
+    viz: bool,
+) -> dict[str, int]:
+    """多帧跟踪：逐帧 annotate → Tracker3D 回写 track_id → label/复核队列/序列 tracks.json。
+
+    Returns: 统计 {accepted, review, hard, failed}（同 run batch 汇总口径）。
+    """
+    import json
+
+    from auto3dlabel.export.kitti_label import build_label_file
+    from auto3dlabel.export.review_queue import triage_3d, write_review_queue
+    from auto3dlabel.tools.pipeline import annotate_frame
+    from auto3dlabel.tools.track3d import Tracker3D
+
+    det, seg, det3d = _make_models(det_model, seg_model)
+    tracker = Tracker3D()
+    stat = {"accepted": 0, "review": 0, "hard": 0, "failed": 0}
+    track_frames: dict[int, list[str]] = {}
+    for fid in frame_ids:
+        try:
+            frame = resolve_frame(fid)
+            result = annotate_frame(
+                frame,
+                prompts,
+                det_model=det,  # type: ignore[arg-type]
+                seg_model=seg,  # type: ignore[arg-type]
+                det3d=det3d,  # type: ignore[arg-type]
+                confidence=conf,
+                viz=viz,
+                out_dir=out_dir,
+            )
+            track_ids = tracker.update(result.boxes3d)
+            for box, tid in zip(result.boxes3d, track_ids, strict=True):
+                box.track_id = tid
+                track_frames.setdefault(tid, []).append(fid)
+            triage = triage_3d(result.boxes3d)
+            build_label_file(frame.frame_id, result.boxes3d, out_dir / "labels")
+            write_review_queue(frame, triage, out_dir / "reviews")
+            stat["accepted"] += len(triage.accepted)
+            stat["review"] += len(triage.review)
+            stat["hard"] += len(triage.hard)
+            console.print(f"  {fid}: 采纳 {len(triage.accepted)} / 复核 {len(triage.review)} / "
+                          f"困难 {len(triage.hard)}")
+        except Exception as e:  # 失败隔离：单帧异常不中断序列
+            stat["failed"] += 1
+            console.print(f"  [red]{fid}: 失败 {e}[/red]")
+    # 序列轨迹导出（track_id → 帧/速度历史）
+    tracks_json = {
+        "sequence": f"{frame_ids[0]}-{frame_ids[-1]}",
+        "tracks": [
+            {
+                "track_id": t.track_id,
+                "label": t.label,
+                "frames": track_frames.get(t.track_id, []),
+                "velocities": t.velocities,
+            }
+            for t in tracker.tracks()
+        ],
+    }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "tracks.json"
+    path.write_text(json.dumps(tracks_json, ensure_ascii=False, indent=2))
+    console.print(f"[bold]产物[/bold] {path}")
+    return stat
 
 
 @app.command()
@@ -84,7 +181,14 @@ def run(
     instruction: Annotated[str, typer.Argument(help="自然语言检测指令，如「检测汽车和行人」")],
     det_model: Annotated[
         str | None,
-        typer.Option("--det-model", "-d", help="2D 检测模型（kitti_finetune=KITTI 微调权重）"),
+        typer.Option(
+            "--det-model",
+            "-d",
+            help=(
+                "检测模型：2D（kitti_finetune/gdino…）或 3D LiDAR"
+                "（pointpillars_kitti/pointpillars_nus/centerpoint_nus）"
+            ),
+        ),
     ] = None,
     seg_model: Annotated[
         str | None, typer.Option("--seg-model", "-s", help="分割模型")
@@ -96,12 +200,31 @@ def run(
     batch: Annotated[bool, typer.Option("--batch", help="批量模式（目录/范围输入）")] = False,
     resume: Annotated[bool, typer.Option("--resume", help="跳过已产出 label 的帧")] = False,
     no_viz: Annotated[bool, typer.Option("--no-viz", help="不生成自检/BEV 图")] = False,
+    track3d: Annotated[
+        bool,
+        typer.Option(
+            "--track3d",
+            help="多帧跟踪（batch 模式；导出 tracks.json + label 回写 track_id）",
+        ),
+    ] = False,
 ) -> None:
     """代码级直跑：检测 → SAM2 → 反投影 → 聚类拟合 → KITTI label + 复核队列（零 LLM）。"""
     from auto2dlabel.tools.prompts import extract_prompts
 
     prompts = extract_prompts(instruction) or ["car"]
     console.print(f"[bold]prompts:[/bold] {prompts}  det={det_model or '默认'}  seg={seg_model}")
+
+    if batch and track3d:
+        frame_ids = _parse_frame_ids(target)
+        console.print(f"跟踪序列 {len(frame_ids)} 帧 → {out_dir}")
+        stat = _run_tracked_sequence(
+            frame_ids, prompts, det_model, seg_model, conf, out_dir, not no_viz
+        )
+        console.print(
+            f"[bold]汇总:[/bold] 采纳 {stat['accepted']} / 复核 {stat['review']} / "
+            f"困难 {stat['hard']} / 失败 {stat['failed']}"
+        )
+        return
 
     if batch:
         frame_ids = _parse_frame_ids(target)

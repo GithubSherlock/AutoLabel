@@ -1,10 +1,13 @@
-"""3D 几何：yaw↔rotation_y 唯一转换点 + BEV/3D IoU（shapely）。
+"""3D 几何：yaw↔rotation_y 唯一转换点 + BEV/3D IoU（shapely）+ nuScenes 四元数转换。
 
 yaw 约定（红线）：
 - 内部 yaw_bev：车头方向相对 +z 轴、向 +x 为正，[-π, π]
 - KITTI rotation_y：绕相机 y 轴，从 +x 向 +z 为正（官方 computeBoxCorners：
   x' = x·cos ry + z·sin ry, z' = -x·sin ry + z·cos ry，车头向量 (cos ry, -sin ry)）
 - 由 (sin yaw, cos yaw) = (cos ry, -sin ry) ⇒ ry = yaw_bev - π/2（已单测锁定）
+- nuScenes 全局系 yaw（绕 z 轴，x 前 y 左）→ 四元数 (w,x,y,z)：
+  车头向量 (cos yaw, sin yaw, 0) ⇒ quat = (cos(yaw/2), 0, 0, sin(yaw/2))
+  ——唯一转换点 yaw_to_quat / quat_to_yaw（v0.2 P3）
 """
 
 from __future__ import annotations
@@ -16,6 +19,18 @@ from shapely.geometry import Polygon
 
 if TYPE_CHECKING:
     from auto3dlabel.schema.box3d import Box3D
+
+
+def yaw_to_quat(yaw: float) -> tuple[float, float, float, float]:
+    """nuScenes 全局系 yaw（绕 z 轴）→ 四元数 (w,x,y,z)。"""
+    half = yaw / 2
+    return (float(np.cos(half)), 0.0, 0.0, float(np.sin(half)))
+
+
+def quat_to_yaw(quat: tuple[float, float, float, float]) -> float:
+    """四元数 (w,x,y,z) → 绕 z 轴 yaw（忽略 x/y 分量，nuScenes 目标框仅绕 z 旋转）。"""
+    w, _x, _y, z = quat
+    return wrap_pi(2 * float(np.arctan2(z, w)))
 
 
 def wrap_pi(angle: float) -> float:
@@ -76,6 +91,26 @@ def iou3d_list(a: list[float], b: list[float]) -> float:
     ba = Box3D.from_gt_row("x", a[0], a[1], a[2], a[3], a[4], a[5], a[6])
     bb = Box3D.from_gt_row("x", b[0], b[1], b[2], b[3], b[4], b[5], b[6])
     return iou3d(ba, bb)
+
+
+def points_in_box(points: np.ndarray, box: Box3D) -> int:
+    """3D 框内 LiDAR 点计数（LiDAR 观测性 → v0.2 LiDAR 引擎的 fit_points 替代）。
+
+    相机系 (N,3) 点云 → box 局部系（沿车头 u / 沿右 v / y 高度）矩形过滤。
+    triage_3d 的 fit_points < MIN_FIT_POINTS 强制 review 逻辑零改动复用。
+    """
+    pts = np.asarray(points, dtype=np.float64)[:, :3]
+    dx, dz = np.sin(box.yaw_bev), np.cos(box.yaw_bev)  # 车头单位向量
+    px, pz = dz, -dx  # 垂直向量（右）
+    rel_x = pts[:, 0] - box.cx
+    rel_y = pts[:, 1] - box.cy
+    rel_z = pts[:, 2] - box.cz
+    u = rel_x * dx + rel_z * dz
+    v = rel_x * px + rel_z * pz
+    inside = (
+        (np.abs(u) <= box.l / 2) & (np.abs(v) <= box.w / 2) & (np.abs(rel_y) <= box.h / 2)
+    )
+    return int(inside.sum())
 
 
 def bev_iou_quad(a: list[float], b: list[float]) -> float:

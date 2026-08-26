@@ -15,8 +15,15 @@ from auto3dlabel.data.kitti import (
     resolve_frame,
 )
 from auto3dlabel.export.review_queue import triage_3d, write_review_queue
+from auto3dlabel.models.detection3d import Det3DResult
 from auto3dlabel.schema.box3d import Box3D, FrameResult, KittiFrame
-from auto3dlabel.tests.helpers.fakes import FakeDetection, FakeSegmentation, det
+from auto3dlabel.tests.helpers.fakes import (
+    FakeDetection,
+    FakeDetector3D,
+    FakeSegmentation,
+    det,
+    det3d,
+)
 from auto3dlabel.tests.helpers.synth import ANCHOR_PIXEL, VELO_ANCHOR, write_frame
 from auto3dlabel.tools.pipeline import annotate_frame
 
@@ -165,6 +172,76 @@ def test_two_instances_two_boxes(tmp_path: Any) -> None:
     )
     # 同一 mask 两簇：主簇保留，次簇（≥30%）→ adhesion → 仍只出一个主簇框
     assert 1 <= len(result.boxes3d) <= 2
+
+
+# ── v0.2 LiDAR 直检引擎分支 ─────────────────────────────────────
+
+# 相机系车框（velo_car 点云经 Tr_velo_to_cam 的期望位置）：x_cam∈[0,2] y_cam∈[0.3,1.5] z_cam∈[8,12]
+_LIDAR_CAR_BBOX = (1.0, 1.5, 10.0, 4.0, 1.2, 2.0, 0.0)  # [x,y,z,l,h,w,ry] 底面中心
+
+
+def _lidar_pipe(
+    tmp_path: Path,
+    prompts: tuple[str, ...] = ("car",),
+    conf: float = 0.3,
+    dets: list[Det3DResult] | None = None,
+    **kw: Any,
+) -> tuple[KittiFrame, FakeDetector3D, FrameResult]:
+    frame = write_frame(tmp_path, points=_velo_car(), **kw)
+    fake = FakeDetector3D(dets if dets is not None else [
+        det3d(label="Car", confidence=0.9, bbox=_LIDAR_CAR_BBOX),
+    ])
+    result = annotate_frame(
+        frame, list(prompts), det3d=fake, confidence=conf, viz=False,
+    )
+    return frame, fake, result
+
+
+def test_lidar_branch_one_box(tmp_path: Any) -> None:
+    """LiDAR 直检：FakeDetector3D → Box3D 组装 + fit_points = 框内点计数。"""
+    frame, fake, result = _lidar_pipe(tmp_path)
+    assert len(result.boxes3d) == 1
+    box = result.boxes3d[0]
+    assert box.label == "Car"
+    assert box.confidence == 0.9
+    assert box.fit_points > 100  # 合成车点云部分落在框内（z_cam∈[9,11] 约半）
+    assert fake.calls == [(frame.frame_id, 0.3)]  # conf 阈值透传
+
+
+def test_lidar_branch_prompt_filter(tmp_path: Any) -> None:
+    """prompts 只保留映射到的 KITTI 类（Car 保留、Pedestrian 滤除）。"""
+    _, _, result = _lidar_pipe(
+        tmp_path,
+        prompts=("car",),
+        dets=[
+            det3d(label="Car", confidence=0.9, bbox=_LIDAR_CAR_BBOX),
+            det3d(label="Pedestrian", confidence=0.9, bbox=_LIDAR_CAR_BBOX),
+        ],
+    )
+    assert len(result.boxes3d) == 1
+    assert result.boxes3d[0].label == "Car"
+
+
+def test_lidar_branch_no_prompt_match_keeps_all(tmp_path: Any) -> None:
+    """prompts 无 KITTI 三类映射 → 保留全部 + warning（宁多勿漏）。"""
+    _, _, result = _lidar_pipe(
+        tmp_path,
+        prompts=("dog",),
+        dets=[
+            det3d(label="Car", confidence=0.9, bbox=_LIDAR_CAR_BBOX),
+            det3d(label="Cyclist", confidence=0.8, bbox=_LIDAR_CAR_BBOX),
+        ],
+    )
+    assert len(result.boxes3d) == 2
+    assert any("无 KITTI 三类映射" in w for w in result.warnings)
+
+
+def test_lidar_branch_conf_filters_zero(tmp_path: Any) -> None:
+    """conf 低于阈值的检测被 Fake 滤除 → 空结果。"""
+    _, _, result = _lidar_pipe(
+        tmp_path, conf=0.5, dets=[det3d(confidence=0.3, bbox=_LIDAR_CAR_BBOX)],
+    )
+    assert result.boxes3d == []
 
 
 # ── triage / review queue ─────────────────────────────────────

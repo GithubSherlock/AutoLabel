@@ -7,6 +7,8 @@
 4. web/server.save_review（3D 字段直通保留）
 5. export/review_queue.triage_3d（confidence + fit_points 双键分流）
 6. tools/fit.fit_box3d（单一产出源）
+7. track_id（v0.2 P2）：tools/track3d.Tracker3D.update 回写 + to_dict 非 None 输出
+   + cli --track3d 序列导出（KITTI label 15 字段不含，nuScenes instance_token 走 P3）
 """
 
 from __future__ import annotations
@@ -47,6 +49,7 @@ class Box3D:
     y2: float = 0.0
     review_flag: bool = False  # fit_points 低/粘连嫌疑 → HITL 强制 review
     edited_by_human: bool | None = None
+    track_id: int | None = None  # v0.2 P2 多帧跟踪 id（Tracker3D.update 回写；None = 单帧模式）
 
     @property
     def rotation_y(self) -> float:
@@ -125,6 +128,8 @@ class Box3D:
         }
         if self.edited_by_human:
             d["edited_by_human"] = True
+        if self.track_id is not None:
+            d["track_id"] = self.track_id
         return d
 
     @classmethod
@@ -150,6 +155,7 @@ class Box3D:
             y2=float(d.get("y2", 0.0)),
             review_flag=bool(d.get("review_flag", False)),
             edited_by_human=d.get("edited_by_human"),
+            track_id=d.get("track_id"),
         )
 
 

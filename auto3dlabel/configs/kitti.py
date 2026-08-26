@@ -78,3 +78,60 @@ DEFAULT_CONF = 0.3
 DEFAULT_IOU = 0.5
 DEFAULT_DET_MODEL = "IDEA-Research/grounding-dino-tiny"
 DEFAULT_SEG_MODEL = "sam2_l.pt"
+
+# ===== v0.2：LiDAR 3D 检测器（mmdet3d）路由 =====
+# configs 经 sparse-checkout 落 MMDET3D_CONFIG_DIR（不入库）；权重落 WEIGHTS_DIR/<weights_dir>/
+WEIGHTS_DIR = Path(os.environ.get("AUTO3DLABEL_WEIGHTS_DIR", "auto3dlabel/weights"))
+MMDET3D_CONFIG_DIR = Path(
+    os.environ.get("MMDET3D_CONFIG_DIR", "auto3dlabel/weights/mmdet3d_configs")
+)
+
+# 模型名 → {config 相对路径（以 MMDET3D_CONFIG_DIR 为根）, checkpoint 文件名, weights_dir}
+# config/权重 URL 以 sparse-checkout 的 configs/*/metafile.yml 为准（M3 下载脚本提取核对）
+DETECTOR3D_NAMES = {
+    "pointpillars_kitti": {
+        "config": "configs/pointpillars/pointpillars_hv_secfpn_8xb6-160e_kitti-3d-3class.py",
+        "checkpoint": (
+            "hv_pointpillars_secfpn_6x8_160e_kitti-3d-3class_20220301_150306-37dc2420.pth"
+        ),
+        "weights_dir": "pointpillars_kitti",
+    },
+    "pointpillars_nus": {
+        "config": "configs/pointpillars/pointpillars_hv_secfpn_sbn-all_8xb4-2x_nus-3d.py",
+        "checkpoint": (
+            "hv_pointpillars_secfpn_sbn-all_4x8_2x_nus-3d_20210826_225857-f19d00a3.pth"
+        ),
+        "weights_dir": "pointpillars_nus",
+    },
+    "centerpoint_nus": {
+        "config": (
+            "configs/centerpoint/"
+            "centerpoint_pillar02_second_secfpn_head-circlenms_8xb4-cyclic-20e_nus-3d.py"
+        ),
+        "checkpoint": (
+            "centerpoint_02pillar_second_secfpn_circlenms_4x8_cyclic_20e_nus_"
+            "20220811_031844-191a3822.pth"
+        ),
+        "weights_dir": "centerpoint_nus",
+    },
+}
+
+# KITTI 图像统一尺寸（image_2 全数据集同尺寸；3D 直检 2D 投影框外接用）
+KITTI_IMG_W = 1242
+KITTI_IMG_H = 375
+
+# KITTI 官方 40-point AP 口径（与模型 zoo 数字对表）
+# 现有 evaluate_per_class 为 11-point + 全类 IoU 0.5，双口径并存见 benchmarks/
+
+KITTI_OFFICIAL_IOU = {"Car": 0.7, "Pedestrian": 0.5, "Cyclist": 0.5}
+AP_NUM_POINTS = 40
+
+
+def prompts_to_kitti_labels(prompts: list[str]) -> set[str] | None:
+    """prompts（COCO 名）→ LiDAR 引擎保留的 KITTI 类集合；无交集返回 None（保留全部，宁多勿漏）。
+
+    3-class 模型只产 Car/Pedestrian/Cyclist（评测口径），Truck/Tram 等映射不生效。
+    """
+    labels = {COCO_TO_KITTI.get(p, "") for p in prompts}
+    matched = labels & set(KITTI_EVAL_CLASSES)
+    return matched or None

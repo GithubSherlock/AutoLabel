@@ -10,6 +10,7 @@ from typing import Any
 
 from auto2dlabel.agent.llm import LLMResponse
 from auto2dlabel.models.detection import DetectionResult
+from auto3dlabel.models.detection3d import Det3DResult
 
 
 class FakeDetection:
@@ -58,6 +59,25 @@ class FakeSegmentation:
         return [FakeMask(p) for p in polys]
 
 
+class FakeDetector3D:
+    """LiDAR 3D 检测器 Fake（Detector3D Protocol duck-typed，零真实权重铁律）。
+
+    按 conf_threshold 过滤返回预设 Det3DResult，记录每次调用 (frame_id, conf)。
+    """
+
+    def __init__(self, dets: list[Det3DResult]) -> None:
+        self.dets = list(dets)
+        self.calls: list[tuple[str, float | None]] = []
+        self.class_names: tuple[str, ...] = ("Car", "Pedestrian", "Cyclist")
+
+    def detect(
+        self, frame: Any, conf_threshold: float | None = None
+    ) -> list[Det3DResult]:
+        self.calls.append((frame.frame_id, conf_threshold))
+        threshold = conf_threshold if conf_threshold is not None else 0.0
+        return [d for d in self.dets if d.confidence >= threshold]
+
+
 class FakeLLM:
     """脚本化 LLM：按队列返回响应（content/tool_calls），记录每轮 tools。"""
 
@@ -83,6 +103,15 @@ def det(
     x: float, y: float, width: float, height: float, label: str, confidence: float,
 ) -> DetectionResult:
     return DetectionResult(x=x, y=y, width=width, height=height, label=label, confidence=confidence)
+
+
+def det3d(
+    label: str = "Car",
+    confidence: float = 0.9,
+    bbox: tuple[float, ...] = (8.0, -0.9, 18.0, 3.9, 1.5, 1.6, 0.0),
+) -> Det3DResult:
+    """快速构造 Det3DResult（bbox = [x,y,z,l,h,w,ry] 底面中心相机系）。"""
+    return Det3DResult(label=label, confidence=confidence, bbox=list(bbox))
 
 
 def tool_call(name: str, arguments: dict[str, Any], call_id: str) -> dict[str, Any]:

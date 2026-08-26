@@ -15,14 +15,18 @@ from auto3dlabel.schema.box3d import Box3D, KittiFrame
 
 
 def gt_frame(frame: KittiFrame) -> dict[str, Any]:
-    """帧 GT → {"objects": [{"name", "bbox"(7 值), "quad"(8 值), "difficulty"}]}。"""
+    """帧 GT → {"objects": [{"name", "bbox"(7 值), "quad"(8 值), "bbox2d", "difficulty"}],
+    "dontcares": [[x1,y1,x2,y2], ...]}。"""
     objects: list[dict[str, Any]] = []
+    dontcares: list[list[float]] = []
     for line in frame.label_path.read_text(encoding="utf-8").strip().splitlines():
         parts = line.split()
         if len(parts) < 15:
             continue
         name = parts[0]
+        bbox2d = [float(v) for v in parts[4:8]]
         if name in ("DontCare", "Misc"):
+            dontcares.append(bbox2d)
             continue
         h, w, l = float(parts[8]), float(parts[9]), float(parts[10])
         x, y, z = float(parts[11]), float(parts[12]), float(parts[13])
@@ -40,10 +44,11 @@ def gt_frame(frame: KittiFrame) -> dict[str, Any]:
                 "name": name,
                 "bbox": [h, w, l, x, y, z, ry],
                 "quad": corners.reshape(-1).tolist(),
+                "bbox2d": bbox2d,
                 "difficulty": difficulty,
             }
         )
-    return {"objects": objects}
+    return {"objects": objects, "dontcares": dontcares}
 
 
 def pred_frame(boxes: list[Box3D]) -> list[dict[str, Any]]:
@@ -64,6 +69,7 @@ def pred_frame(boxes: list[Box3D]) -> list[dict[str, Any]]:
                     b.rotation_y,
                 ],
                 "quad": corners.reshape(-1).tolist(),
+                "bbox2d": [b.x1, b.y1, b.x2, b.y2],
                 "conf": b.confidence,
             }
         )

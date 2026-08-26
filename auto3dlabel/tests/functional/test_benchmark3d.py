@@ -9,6 +9,7 @@ from auto3dlabel.benchmarks.kitti3d_benchmark import (
     format_benchmark_table,
     run_kitti3d_benchmark,
 )
+from auto3dlabel.benchmarks.kitti_official_ap import run_kitti_official
 from auto3dlabel.benchmarks.load_gt3d import gt_frame, pred_frame
 from auto3dlabel.schema.box3d import Box3D, KittiFrame
 from auto3dlabel.tests.helpers.synth import gt_line, write_frame
@@ -106,3 +107,49 @@ def test_table_renders(tmp_path: Any) -> None:
     result = run_kitti3d_benchmark([frame], {frame.frame_id: [box]})
     text = format_benchmark_table(result)
     assert "3D" in text and "BEV" in text and "Car" in text and "100.0" in text
+
+
+# ── 官方 40-point 口径（kitti_official_ap，与模型 zoo 对表）──────────────
+
+def test_official_ap_perfect_match(tmp_path: Any) -> None:
+    """预测 = GT → 官方口径 AP 100（Car easy；IoU 阈值 0.7 满足）。"""
+    box = Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 8.0, -0.9, 18.0, 0.0)
+    frame = _gt_frame(tmp_path, [gt_line()])
+    result = run_kitti_official([frame], {frame.frame_id: [box]})
+    easy = result["easy"]["Car"]
+    assert easy["gt_count"] == 1 and abs(easy["ap"] - 1.0) < 1e-6
+    assert easy["pred_count"] == 1
+
+
+def test_official_ap_partial_40point(tmp_path: Any) -> None:
+    """3 GT 命中 1 → recall=1/3，41 点中 t≤0.325 共 14 点 → AP = 14/41。"""
+    frame = _gt_frame(tmp_path, [gt_line(), gt_line(x=30.0), gt_line(x=50.0)])
+    box = Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 8.0, -0.9, 18.0, 0.0)
+    result = run_kitti_official([frame], {frame.frame_id: [box]})
+    assert result["easy"]["Car"]["ap"] == round(14.0 / 41.0, 4)
+    assert result["easy"]["Car"]["gt_count"] == 3
+
+
+def test_official_ap_car_iou_threshold_07(tmp_path: Any) -> None:
+    """x+1m 偏移（3D IoU≈0.59）：0.5 < IoU < 0.7 → Car 官方阈值 0.7 下不匹配 → AP 0。
+
+    同框在现有 11-point 口径（IoU 0.5）下会命中——双口径差异的实证用例。
+    """
+    box = Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 9.0, -0.9, 18.0, 0.0)
+    frame = _gt_frame(tmp_path, [gt_line()])
+    result = run_kitti_official([frame], {frame.frame_id: [box]})
+    stats = result["easy"]["Car"]
+    assert stats["gt_count"] == 1 and stats["pred_count"] == 1
+    assert abs(stats["ap"] - 0.0) < 1e-9
+    # 对照组：11-point + IoU 0.5 口径同框命中 → AP 100（差异即口径差）
+    legacy = run_kitti3d_benchmark([frame], {frame.frame_id: [box]})
+    assert abs(legacy["3d"]["easy"]["Car"]["ap"] - 1.0) < 1e-6
+
+
+def test_official_ap_no_pred_keeps_gt_count(tmp_path: Any) -> None:
+    """无预测 → AP 0 但 gt_count 保留（表内显零）。"""
+    frame = _gt_frame(tmp_path, [gt_line()])
+    result = run_kitti_official([frame], {frame.frame_id: []})
+    stats = result["easy"]["Car"]
+    assert stats["gt_count"] == 1 and stats["pred_count"] == 0
+    assert abs(stats["ap"] - 0.0) < 1e-9

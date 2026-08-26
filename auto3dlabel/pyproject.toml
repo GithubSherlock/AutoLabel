@@ -42,14 +42,19 @@ ignore = ["E741"]  # 3D 领域惯例变量名 l（length，与 h/w 并列）
 [tool.ruff.lint.per-file-ignores]
 # calib 数据行 = 真实 calib_000000.txt 逐字提取（拆行破坏数据原文与可核对性）
 "tests/helpers/synth.py" = ["E501"]
+# Kalman 数学惯例变量名 P/S/K（协方差/新息/增益，与论文公式一致）
+"tools/track3d.py" = ["N806"]
 
 [tool.mypy]
 python_version = "3.10"
 strict = true
 ignore_missing_imports = true
+# weights/ 为下载产物（权重 + mmdet3d 官方 configs，不入库不检查）
+exclude = ["weights/"]
 
 [tool.pyright]
 typeCheckingMode = "basic"
+exclude = ["**/weights"]
 
 [tool.pytest.ini_options]
 testpaths = ["auto3dlabel/tests"]

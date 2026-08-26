@@ -30,9 +30,14 @@ Rules:
 - prompts: English COCO names only. Map: 汽车/车辆→car, 行人/人→person, \
 自行车/单车/骑行者→bicycle, 摩托车→motorcycle, 卡车→truck, 公交车/公共汽车→bus, 火车→train
 - confidence_threshold: default 0.3; extract if user says 置信度/conf/阈值X
-- det_model: 2D detector for the pipeline. Default "IDEA-Research/grounding-dino-tiny".
-  Map: yolo→yolo11s.pt, yolo26→yolo26x.pt, grounding dino/gdino→IDEA-Research/grounding-dino-tiny,
-  kitti微调/kitti权重/kitti_yolo→kitti_finetune (a KITTI-finetuned YOLO).
+- det_model: 2D detector or LiDAR 3D detector for the pipeline.
+  Default "IDEA-Research/grounding-dino-tiny".
+  Map: yolo→yolo11s.pt, yolo26→yolo26x.pt, grounding dino/gdino→
+  IDEA-Research/grounding-dino-tiny, kitti微调/kitti权重/kitti_yolo→kitti_finetune
+  (a KITTI-finetuned YOLO).
+  LiDAR 3D engines: pointpillars/点柱→pointpillars_kitti (KITTI),
+  centerpoint→centerpoint_nus (nuScenes)
+  (LiDAR-only detectors, no SAM needed).
   If user names a model ending with .pt or containing /, use it directly.
 - seg_model: SAM mask model. Default "sam2_l.pt". Map: sam/sam2→sam2_l.pt, \
 fastsam→FastSAM-s.pt, sam3→sam3.pt

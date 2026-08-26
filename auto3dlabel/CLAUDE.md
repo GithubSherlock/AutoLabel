@@ -67,6 +67,7 @@ pyright auto3dlabel/                                       # 0
   - LiDAR 系是唯一可达标注业务精度的路线：KITTI car moderate AP3D **74–81**（SECOND 78.2 / PointPillars 77.6 / PV-RCNN 81.4，开源权重齐全），nuScenes VoxelNeXt 64.5 mAP；12GB 可跑、秒级单帧
   - **第一候选 CenterPoint / PointPillars**——KITTI+nuScenes 双支持、OpenPCDet+MMDet3D 双框架权重；**用 MMDet3D 完整训练权重（val 77.6–78.2），避开 OpenPCDet 的 underfit demo 权重**；升级项 VoxelNeXt（全稀疏 64ms/帧）
   - 融合系 BEVFusion（MIT，nuScenes NDS 76.1）留 v2+（需相机-LiDAR 标定对齐）；单目系（moderate ≤30%）只作交叉验证兜底
+  - **无 LiDAR 域标注（LabelAny3D 调研，2026-08-24）**：NeurIPS 2025 的 LabelAny3D（arXiv:2601.01676）走分析合成路线——相对深度（比 metric depth 稳）+ Objaverse 形状先验 / TRELLIS 式重建（amodal 补全遮挡，恰是 v0.1 反投影拟合 3D AP 近零的短板）+ SAM/G-DINO；面向 COCO 日常物体（无 GT 可对的域），价值主张是「伪标签训练下游单目检测器优于旧伪标签法」（**间接指标，无直接标注误差数字**）。定位：自动驾驶域（有 LiDAR）不需要它——已有真值域用 LiDAR 系 74–81，引入单目合成是负优化；作为 **v2+「行车记录仪/网络视频等无 LiDAR 数据源」3D 预标注候选**（CVAT 也无此能力，差异化空间）。验证门槛：KITTI 20 帧 val 小规模复现 vs GT 3D IoU（预期显著好于我们的 0%，moderate 大概率仍 <30%，约 1 天成本）
   - 无 ultralytics 式 3D 全家桶，事实标准仍是 OpenPCDet + MMDetection3D（spconv 编译是主要坑，Pillar 系可免）
 - **合规**：KITTI（CC BY-NC-SA 3.0）/ nuScenes（CC BY-NC-SA 4.0）数据**非商用**，商业化需自采/商用许可数据；单目模型 repo 许可证多未标注，BEVFusion/SparseDrive（MIT）最干净
 
@@ -94,7 +95,7 @@ pyright auto3dlabel/                                       # 0
 
 ### 开工顺序（v0.1 已完成，供 v0.2 参照）
 
-✅ 已落地：`from auto2dlabel import` 搭 agent 骨架 + Web 复核队列协议 → 3D 管线（calib/backproject/cluster/fit/geometry/pipeline）→ KITTI 3D benchmark（照 dota_obb_benchmark 结构）→ Agentic/Web 闭环（见上方实现速查）。v0.2 候选：nuScenes 支持、SAM2 视频传播多帧增强（首帧 prompt → 跨帧 mask 传播，权重已在 84 模型目录）、CenterPoint/PointPillars 引入（3D 检测模型演进路线，见下）。
+✅ 已落地：`from auto2dlabel import` 搭 agent 骨架 + Web 复核队列协议 → 3D 管线（calib/backproject/cluster/fit/geometry/pipeline）→ KITTI 3D benchmark（照 dota_obb_benchmark 结构）→ Agentic/Web 闭环（见上方实现速查）。v0.2 候选：nuScenes 支持、SAM2 视频传播多帧增强（首帧 prompt → 跨帧 mask 传播，权重已在 84 模型目录）、CenterPoint/PointPillars 引入（3D 检测模型演进路线，见下）、LabelAny3D 无 LiDAR 域预标注复现验证（见下）。
 
 ## 设计红线
 

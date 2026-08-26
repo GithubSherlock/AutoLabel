@@ -19,6 +19,7 @@ env/
 
 # ===== 模型权重（统一由 auto2dlabel/weights/download_weights.sh 下载，不入库）=====
 auto2dlabel/weights/
+auto3dlabel/weights/
 *.pt
 *.pth
 *.onnx
