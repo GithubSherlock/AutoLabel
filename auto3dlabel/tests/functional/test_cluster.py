@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+
 from auto3dlabel.configs.kitti import VOXEL_MAX_POINTS
 from auto3dlabel.tests.helpers.synth import rect_points
 from auto3dlabel.tools.cluster import _voxel_downsample, cluster_instance

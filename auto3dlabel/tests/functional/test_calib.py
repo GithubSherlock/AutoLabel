@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+
 from auto3dlabel.schema.calib import KittiCalib
 from auto3dlabel.tests.helpers import synth
 

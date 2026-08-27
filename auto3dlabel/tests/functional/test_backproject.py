@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+
 from auto3dlabel.tests.helpers import synth
 from auto3dlabel.tools.backproject import backproject_semantics, rasterize_masks
 

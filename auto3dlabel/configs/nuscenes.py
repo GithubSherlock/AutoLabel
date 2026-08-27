@@ -35,6 +35,35 @@ NUSCENES_CLASSES = [
 # mmdet3d 类名 → 官方检测类名（恒等映射的显式形式；未知类丢弃不导出）
 MMDET3D_TO_NUSCENES = {c: c for c in NUSCENES_CLASSES}
 
+# 官方 GT category_name → 检测类名（devkit 23 类映射表；None = 官方忽略类不参与评测）。
+# pedestrian/bus 的 category 带第三段子类——split('.')[-1] 会错成 adult/rigid（2026-08-27
+# Mini 冒烟实证 pedestrian/bus GT 全丢），必须走显式全表
+NUSCENES_CATEGORY_MAP: dict[str, str | None] = {
+    "animal": None,
+    "human.pedestrian.adult": "pedestrian",
+    "human.pedestrian.child": "pedestrian",
+    "human.pedestrian.construction_worker": "pedestrian",
+    "human.pedestrian.personal_mobility": "pedestrian",
+    "human.pedestrian.police_officer": "pedestrian",
+    "human.pedestrian.stroller": "pedestrian",
+    "human.pedestrian.wheelchair": "pedestrian",
+    "movable_object.barrier": "barrier",
+    "movable_object.debris": None,
+    "movable_object.pushable_pullable": None,
+    "movable_object.trafficcone": "traffic_cone",
+    "static_object.bicycle_rack": None,
+    "vehicle.bicycle": "bicycle",
+    "vehicle.bus.bendy": "bus",
+    "vehicle.bus.rigid": "bus",
+    "vehicle.car": "car",
+    "vehicle.construction": "construction_vehicle",
+    "vehicle.emergency.ambulance": None,
+    "vehicle.emergency.police": None,
+    "vehicle.motorcycle": "motorcycle",
+    "vehicle.trailer": "trailer",
+    "vehicle.truck": "truck",
+}
+
 # 评测口径：全局系（x 前 y 左 z 上）旋转矩形 x-y 平面 IoU + 按距离分桶（简化版
 # 不实现官方 TP 指标，如实记录口径差异，见 benchmarks/nuscenes_benchmark.py）
 NUSCENES_IOU_THRESHOLD = 0.5

@@ -60,10 +60,15 @@ class Tracker3D:
         self._tracks: dict[int, Track3D] = {}
         self._missed: dict[int, int] = {}  # track_id → 连续未匹配帧数
         self._kf: dict[int, tuple[np.ndarray, np.ndarray]] = {}  # (x, P) 恒速状态
+        self._completed: list[Track3D] = []  # 超龄删除的完整轨迹（序列导出需要）
 
     def tracks(self) -> list[Track3D]:
         """当前活跃轨迹（含连续未匹配但未超 max_age 的）。"""
         return list(self._tracks.values())
+
+    def completed(self) -> list[Track3D]:
+        """超龄删除的完整轨迹（与 tracks() 合并 = 序列全量轨迹历史）。"""
+        return list(self._completed)
 
     def update(self, boxes: list[Box3D]) -> list[int]:
         """一帧更新；返回与 boxes 对齐的 track_id（新目标分配新 id）。
@@ -99,6 +104,7 @@ class Tracker3D:
             if tid not in matched.values():
                 self._missed[tid] = self._missed.get(tid, 0) + 1
                 if self._missed[tid] > self.max_age:
+                    self._completed.append(self._tracks[tid])
                     del self._tracks[tid]
                     self._kf.pop(tid, None)
                     self._missed.pop(tid, None)

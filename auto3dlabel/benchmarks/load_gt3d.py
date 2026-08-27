@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Any
 
 from auto2dlabel.benchmarks.kitti_benchmark import kitti_difficulty
-
 from auto3dlabel.schema.box3d import Box3D, KittiFrame
 
 
@@ -46,6 +45,41 @@ def gt_frame(frame: KittiFrame) -> dict[str, Any]:
                 "quad": corners.reshape(-1).tolist(),
                 "bbox2d": bbox2d,
                 "difficulty": difficulty,
+            }
+        )
+    return {"objects": objects, "dontcares": dontcares}
+
+
+def gt_frame_official(frame: KittiFrame) -> dict[str, Any]:
+    """官方 clean_data 输入池（kitti_official_ap 专用；gt_frame 的 11-point 口径不受影响）。
+
+    - objects: name ∈ {Car, Van, Pedestrian, Person_sitting, Cyclist} 的**全部**对象
+      （含超 hard 范围——官方 clean_data 将其标记 ignored_gt 留在匹配池吸收预测，
+      不剔除；难度分层 = 完整池上打 ignore 标记，不是预筛难度段）
+    - 每对象: name / bbox 7 值 / bbox2d / truncated / occluded（flags 判据字段）
+    - dontcares: 仅 DontCare 行 2D 框（Misc/Tram 官方 valid_class=-1 恒不参与，剔除等价）
+    """
+    objects: list[dict[str, Any]] = []
+    dontcares: list[list[float]] = []
+    for line in frame.label_path.read_text(encoding="utf-8").strip().splitlines():
+        parts = line.split()
+        if len(parts) < 15:
+            continue
+        name = parts[0]
+        bbox2d = [float(v) for v in parts[4:8]]
+        if name == "DontCare":
+            dontcares.append(bbox2d)
+            continue
+        if name not in ("Car", "Van", "Pedestrian", "Person_sitting", "Cyclist"):
+            continue
+        objects.append(
+            {
+                "name": name,
+                "bbox": [float(parts[8]), float(parts[9]), float(parts[10]),
+                         float(parts[11]), float(parts[12]), float(parts[13]), float(parts[14])],
+                "bbox2d": bbox2d,
+                "truncated": float(parts[1]),
+                "occluded": int(parts[2]),
             }
         )
     return {"objects": objects, "dontcares": dontcares}

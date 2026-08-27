@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from auto3dlabel.tests.helpers.synth import write_frame
 from fastapi.testclient import TestClient
+
+from auto3dlabel.tests.helpers.synth import write_frame
 
 BOX = {
     "label": "Car", "confidence": 0.62, "cx": 8.0, "cy": 1.4, "cz": 18.0,

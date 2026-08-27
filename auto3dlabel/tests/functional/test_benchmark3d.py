@@ -111,23 +111,40 @@ def test_table_renders(tmp_path: Any) -> None:
 
 # ── 官方 40-point 口径（kitti_official_ap，与模型 zoo 对表）──────────────
 
-def test_official_ap_perfect_match(tmp_path: Any) -> None:
-    """预测 = GT → 官方口径 AP 100（Car easy；IoU 阈值 0.7 满足）。"""
-    box = Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 8.0, -0.9, 18.0, 0.0)
+
+def _with_bbox2d(
+    box: Box3D, x1: float = 500.0, y1: float = 150.0, x2: float = 700.0, y2: float = 300.0
+) -> Box3D:
+    """给预测框附官方豁免所需的 2D 外接框（高 150px ≥ MIN_HEIGHT，不会被 ignored_dt）。"""
+    box.x1, box.y1, box.x2, box.y2 = x1, y1, x2, y2
+    return box
+
+
+def test_official_ap_perfect_match_sparse_penalty(tmp_path: Any) -> None:
+    """预测 = GT → precision/recall 100 但 AP40 = 0（官方稀疏惩罚）。
+
+    阈值采样只取 1 个 TP 分数 → 40 个采样点中仅 1 个非零 → AP = 0/40。
+    这是官方 eval 对极小样本的真实行为（对照口径回归锚点，非缺陷）。
+    """
+    box = _with_bbox2d(Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 8.0, -0.9, 18.0, 0.0))
     frame = _gt_frame(tmp_path, [gt_line()])
     result = run_kitti_official([frame], {frame.frame_id: [box]})
-    easy = result["easy"]["Car"]
-    assert easy["gt_count"] == 1 and abs(easy["ap"] - 1.0) < 1e-6
-    assert easy["pred_count"] == 1
+    for diff in ("easy", "moderate", "hard"):
+        stats = result[diff]["Car"]
+        assert stats["gt_count"] == 1 and stats["pred_count"] == 1, (diff, stats)
+        assert stats["precision"] == 1.0 and stats["recall"] == 1.0, (diff, stats)
+        assert stats["ap"] == 0.0, (diff, stats)
 
 
-def test_official_ap_partial_40point(tmp_path: Any) -> None:
-    """3 GT 命中 1 → recall=1/3，41 点中 t≤0.325 共 14 点 → AP = 14/41。"""
+def test_official_ap_partial_recall(tmp_path: Any) -> None:
+    """3 GT 命中 1 → precision 1.0 / recall 1/3 / AP 0（同上稀疏惩罚）。"""
+    box = _with_bbox2d(Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 8.0, -0.9, 18.0, 0.0))
     frame = _gt_frame(tmp_path, [gt_line(), gt_line(x=30.0), gt_line(x=50.0)])
-    box = Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 8.0, -0.9, 18.0, 0.0)
     result = run_kitti_official([frame], {frame.frame_id: [box]})
-    assert result["easy"]["Car"]["ap"] == round(14.0 / 41.0, 4)
-    assert result["easy"]["Car"]["gt_count"] == 3
+    stats = result["easy"]["Car"]
+    assert stats["gt_count"] == 3 and stats["pred_count"] == 1
+    assert stats["precision"] == 1.0 and abs(stats["recall"] - 1.0 / 3.0) < 1e-9
+    assert stats["ap"] == 0.0
 
 
 def test_official_ap_car_iou_threshold_07(tmp_path: Any) -> None:
@@ -135,7 +152,7 @@ def test_official_ap_car_iou_threshold_07(tmp_path: Any) -> None:
 
     同框在现有 11-point 口径（IoU 0.5）下会命中——双口径差异的实证用例。
     """
-    box = Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 9.0, -0.9, 18.0, 0.0)
+    box = _with_bbox2d(Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 9.0, -0.9, 18.0, 0.0))
     frame = _gt_frame(tmp_path, [gt_line()])
     result = run_kitti_official([frame], {frame.frame_id: [box]})
     stats = result["easy"]["Car"]
@@ -153,3 +170,44 @@ def test_official_ap_no_pred_keeps_gt_count(tmp_path: Any) -> None:
     stats = result["easy"]["Car"]
     assert stats["gt_count"] == 1 and stats["pred_count"] == 0
     assert abs(stats["ap"] - 0.0) < 1e-9
+
+
+def test_official_ignored_gt_absorbs_pred(tmp_path: Any) -> None:
+    """超 hard 范围 GT（truncated=0.9）留在匹配池吸收预测 → 不算 FP（官方豁免）。
+
+    旧近似口径将超 hard 对象整剔 → 命中它的预测变 FP → precision 0.5；
+    官方口径吸收后 precision 1.0。难度累积：hard 档同样包含 easy GT（gt_count=1）。
+    """
+    box1 = _with_bbox2d(Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 8.0, -0.9, 18.0, 0.0))
+    box2 = _with_bbox2d(Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 30.0, -0.9, 18.0, 0.0))
+    frame = _gt_frame(tmp_path, [gt_line(), gt_line(truncated=0.9, x=30.0, y2=260.0)])
+    result = run_kitti_official([frame], {frame.frame_id: [box1, box2]})
+    for diff in ("easy", "moderate", "hard"):
+        stats = result[diff]["Car"]
+        assert stats["gt_count"] == 1, (diff, stats)  # 超 hard 对象不计入有效 GT
+        assert stats["precision"] == 1.0, (diff, stats)  # 匹配超 hard GT 的预测被吸收
+        assert stats["pred_count"] == 2, (diff, stats)
+
+
+def test_official_dontcare_criterion0_exempts_fp(tmp_path: Any) -> None:
+    """DontCare 豁免判据 = 交/预测面积 > 0.7（官方 criterion=0，非并集 IoU）。
+
+    预测 2D 框完全落入 DontCare 内（交/预测面积 = 1.0）→ 豁免 FP → precision 1.0。
+    旧近似口径用并集 IoU（此处 = 0.25 < 0.7）不豁免 → precision 0.5——判据差异的实证用例。
+    """
+    box1 = _with_bbox2d(Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 8.0, -0.9, 18.0, 0.0))
+    box2 = _with_bbox2d(Box3D.from_gt_row("Car", 1.5, 1.6, 3.9, 31.0, -0.9, 18.0, 0.0))
+    frame = _gt_frame(
+        tmp_path,
+        [
+            gt_line(),
+            gt_line(x=30.0),
+            gt_line(name="DontCare", x1=400.0, y1=100.0, x2=800.0, y2=400.0),
+        ],
+    )
+    result = run_kitti_official([frame], {frame.frame_id: [box1, box2]})
+    stats = result["easy"]["Car"]
+    # box2 命中不了任何 GT（IoU 0.59），但其 2D 框在 DontCare 内 → 官方豁免不罚 FP
+    assert stats["gt_count"] == 2
+    assert stats["precision"] == 1.0, stats
+    assert abs(stats["recall"] - 0.5) < 1e-9

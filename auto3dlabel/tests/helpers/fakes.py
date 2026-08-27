@@ -68,6 +68,7 @@ class FakeDetector3D:
     def __init__(self, dets: list[Det3DResult]) -> None:
         self.dets = list(dets)
         self.calls: list[tuple[str, float | None]] = []
+        self.batch_calls: list[tuple[list[str], float | None]] = []
         self.class_names: tuple[str, ...] = ("Car", "Pedestrian", "Cyclist")
 
     def detect(
@@ -76,6 +77,14 @@ class FakeDetector3D:
         self.calls.append((frame.frame_id, conf_threshold))
         threshold = conf_threshold if conf_threshold is not None else 0.0
         return [d for d in self.dets if d.confidence >= threshold]
+
+    def detect_batch(
+        self, frames: list[Any], conf_threshold: float | None = None
+    ) -> list[list[Det3DResult]]:
+        """批量接口（parity 双接口断言铁律）：记录整批调用，逐帧 conf 过滤。"""
+        self.batch_calls.append(([f.frame_id for f in frames], conf_threshold))
+        threshold = conf_threshold if conf_threshold is not None else 0.0
+        return [[d for d in self.dets if d.confidence >= threshold] for _ in frames]
 
 
 class FakeLLM:

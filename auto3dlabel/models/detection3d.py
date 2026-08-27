@@ -58,6 +58,22 @@ class Det3DResult:
         return box
 
 
+def suggest_batch_size(
+    per_frame_bytes: int, free_bytes: int, safety_factor: float = 0.85, max_batch: int = 32
+) -> int:
+    """批大小 = 空闲显存 × 安全系数 ÷ 单帧峰值（钳 [1, max_batch]）。
+
+    cli run --batch LiDAR 引擎自动实测用：目标「跑满 GPU」但留安全余量
+    （默认 0.85 与 2D resolve_batch_params 同源；实测路径传 0.92 + OOM 减半兜底）；
+    max_batch 为估算失真护栏（实测偏差由运行时 OOM 减半吸收）；
+    输入非正 → 1（保守逐帧）。
+    """
+    if per_frame_bytes <= 0 or free_bytes <= 0:
+        return 1
+    batch = int(free_bytes * safety_factor // per_frame_bytes)
+    return max(1, min(max_batch, batch))
+
+
 class Detector3D(Protocol):
     """3D 检测器协议 —— 测试注入 FakeDetector3D（零真实权重铁律）。"""
 
@@ -70,6 +86,12 @@ class Detector3D(Protocol):
         self, frame: KittiFrame, conf_threshold: float | None = None
     ) -> list[Det3DResult]:
         """KITTI 单帧点云 → 3D 检测列表（conf_threshold 覆盖构造默认）。"""
+        ...
+
+    def detect_batch(
+        self, frames: list[KittiFrame], conf_threshold: float | None = None
+    ) -> list[list[Det3DResult]]:
+        """多帧点云一次 forward → 每帧检测列表（批处理：显存随帧数线性增长）。"""
         ...
 
 
@@ -107,6 +129,13 @@ class Mmdet3dDetector:
                 "（安装步骤见 milestone/v0.2.md M1）"
             ) from e
         device = self._device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+        # 确定性红线（批量 parity，同 2D 铁律）：cudnn 按 shape 启发式选卷积算法，
+        # 不同批大小 → 不同 shape → 可能不同 kernel → 末位浮点漂移。
+        # 2026-08-28 实测（400 帧 pointpillars_kitti，RTX 4090）：batch≤16 逐位一致；
+        # batch=32（跑满显存档）5/400 帧 x 差 1cm（deterministic 只限候选集，
+        # 无法跨 shape 强绑 kernel）——远低于人工标注方差（±10cm），接受并记录。
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
         model = init_model(
             config=self._config_path, checkpoint=self._checkpoint_path, device=device
         )
@@ -138,7 +167,9 @@ class Mmdet3dDetector:
         model = self._load()
         # 官方推理链（LoadPointsFromDict pipeline）；1.4.0 实际返回 (results[0], data[0])
         # 类型标注误写为 Det3DDataSample（不可迭代）→ cast 对齐真实返回
-        out: Any = cast(Any, inference_detector(model, np.asarray(pts, dtype=np.float32)))[0]
+        out: Any = cast(
+            Any, inference_detector(model, np.asarray(pts, dtype=np.float32))
+        )[0]
         pred: Any = out.pred_instances_3d
         boxes = pred.bboxes_3d.tensor.detach().cpu().numpy()
         scores = pred.scores_3d.detach().cpu().numpy()
@@ -147,15 +178,68 @@ class Mmdet3dDetector:
         mask = scores >= threshold
         return boxes[mask], scores[mask], labels[mask]
 
+    def detect_points_batch(
+        self, pts_list: list[np.ndarray], conf_threshold: float | None = None
+    ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """多帧点云一次 forward → 每帧 (boxes, scores, labels)（原始输出系，同 detect_points）。
+
+        inference_detector 官方 API 原生支持 Sequence[ndarray]（is_batch=True）：
+        伪 collate 后单次 model.test_step 整批推理——激活显存随帧数线性增长
+        （batch 大小 = 显存换吞吐，cli run --batch 用它跑满 GPU）。
+        """
+        from mmdet3d.apis import inference_detector  # pyright: ignore[reportMissingImports]
+
+        model = self._load()
+        # 批量返回 (results_list, data_list)——类型标注误写为单样本 → cast 对齐真实返回
+        outs: Any = cast(
+            Any, inference_detector(model, [np.asarray(p, dtype=np.float32) for p in pts_list])
+        )[0]
+        threshold = conf_threshold if conf_threshold is not None else self.conf_threshold
+        results: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        for out in outs:
+            pred: Any = out.pred_instances_3d
+            boxes = pred.bboxes_3d.tensor.detach().cpu().numpy()
+            scores = pred.scores_3d.detach().cpu().numpy()
+            labels = pred.labels_3d.detach().cpu().numpy()
+            mask = scores >= threshold
+            results.append((boxes[mask], scores[mask], labels[mask]))
+        return results
+
     def detect(
         self, frame: KittiFrame, conf_threshold: float | None = None
     ) -> list[Det3DResult]:
         """单帧点云 → 检测列表（≥阈值）；含 8 角点投影 2D 外接框。"""
         boxes, scores, labels = self.detect_points(frame.load_points(), conf_threshold)
         threshold = conf_threshold if conf_threshold is not None else self.conf_threshold
+        return self._det3d_results(frame, boxes, scores, labels, threshold)
 
+    def detect_batch(
+        self, frames: list[KittiFrame], conf_threshold: float | None = None
+    ) -> list[list[Det3DResult]]:
+        """多帧点云一次 forward → 每帧检测列表（语义同 detect：相机系 + 2D 投影框）。"""
+        per_frame = self.detect_points_batch(
+            [f.load_points() for f in frames], conf_threshold
+        )
+        threshold = conf_threshold if conf_threshold is not None else self.conf_threshold
+        return [
+            self._det3d_results(frame, b, s, l, threshold)
+            for frame, (b, s, l) in zip(frames, per_frame, strict=True)
+        ]
+
+    def _det3d_results(
+        self,
+        frame: KittiFrame,
+        boxes: np.ndarray,
+        scores: np.ndarray,
+        labels: np.ndarray,
+        threshold: float,
+    ) -> list[Det3DResult]:
+        """单帧原始输出（LiDAR 系 7 值）→ Det3DResult 列表（相机系 + 2D 投影框）。
+
+        detect / detect_batch 共用（批处理不改转换语义——parity 铁律同 2D 批量）：
+        唯一转换点 = 官方 convert_to(CAM) + calib 4x4（R0_rect @ Tr_velo_to_cam）。
+        """
         # mmdet3d KITTI 模型输出 LiDAR 系（x 前/y 左/z 上，底面中心）→ 相机系
-        # 唯一转换点：官方 convert_to(CAM) + calib 4x4（R0_rect @ Tr_velo_to_cam）
         from mmdet3d.structures import (  # pyright: ignore[reportMissingImports]
             Box3DMode,
             LiDARInstance3DBoxes,
@@ -170,7 +254,6 @@ class Mmdet3dDetector:
         )
         boxes = cam_boxes.tensor.detach().cpu().numpy()
 
-        calib = frame.load_calib()
         results: list[Det3DResult] = []
         for i in range(len(boxes)):
             if float(scores[i]) < threshold:

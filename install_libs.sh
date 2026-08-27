@@ -12,7 +12,7 @@ echo "========================================="
 echo "  AutoLabel 依赖安装"
 echo "========================================="
 echo "  1) auto2dlabel  (2D 图像标注)"
-echo "  2) auto3dlabel  (3D 点云标注，待实现)"
+echo "  2) auto3dlabel  (3D 点云标注，依赖 auto2dlabel 骨架，将连带安装 2D)"
 echo "  3) 全部安装"
 echo "========================================="
 
@@ -36,6 +36,9 @@ install_2d() {
 }
 
 install_3d() {
+    echo ""
+    echo ">>> auto3dlabel 复用 auto2dlabel 骨架（agent/模型/工具），先安装 2D 依赖..."
+    install_2d
     echo ""
     echo ">>> 安装 auto3dlabel 依赖..."
     if [[ -f "$REQ_3D" ]]; then

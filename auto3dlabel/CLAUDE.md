@@ -15,7 +15,8 @@ auto3dlabel/
 ├── tools/cluster.py           # sklearn DBSCAN（BEV xz）+ 类别 eps + 0.1m 体素降采样 + 粘连标记
 ├── tools/fit.py               # minAreaRect 角点法 yaw + z 分位高度 + Box3D 组装 + fit_points 门槛
 ├── tools/geometry.py          # shapely BEV/3D IoU + yaw_bev↔rotation_y **唯一转换点**（rotation_y = yaw−π/2）
-├── tools/viz.py               # 投影自检散点图 / 语义点云 BEV 彩图 / 3D bbox vs GT 对比图（cv2）
+├── tools/visualize.py         # 投影自检散点图 / 语义点云 BEV 彩图 / 3D bbox vs GT 对比图（cv2）
+├── tools/log.py|device.py|evaluate.py|export.py  # 2D re-export 薄层（复用不复制）+ 3D ExportTool（CLI 直调，不进 LLM registry）
 ├── tools/pipeline.py          # annotate_frame：detect→SAM2→反投影→聚类→拟合（入口 disable_tf32）
 ├── export/kitti_label.py      # line_from_box3d 纯函数（15 字段，y 底部中心回写）+ build 全量
 ├── export/review_queue.py     # triage_3d（conf 三档 + fit_points<20/review_flag 强制 review）+ *_review.json
@@ -31,6 +32,7 @@ auto3dlabel/
 
 ```bash
 auto3dlabel run 000123 "检测汽车和行人" -d yolo11s_kitti            # 代码级直跑（零下载）
+auto3dlabel run 000000-000399 "检测汽车和行人" -d pointpillars_kitti --batch  # LiDAR 批量：一次 forward 整批，自动实测批大小跑满 GPU（4090 实测 21764/24564 MiB）
 auto3dlabel chat "标注 KITTI 帧 000123 中的汽车和行人"               # LLM 闭环（DeepSeek）
 REVIEW3D_DIR=outputs/<dir>/reviews python3 -m auto3dlabel.web.server # Web 复核（:8765 同 2D）
 ```
@@ -39,7 +41,7 @@ REVIEW3D_DIR=outputs/<dir>/reviews python3 -m auto3dlabel.web.server # Web 复�
 
 ```bash
 python -m pytest -q                                        # 全项目（723 = 595 基线 + 128 新）
-ruff check auto3dlabel/                                    # 0（嵌套 pyproject 就近生效，含 E741 豁免 l）
+ruff check auto3dlabel/                                    # 0（配置统一在根 pyproject.toml：E741 豁免 l 在 per-file-ignores）
 mypy auto3dlabel/ --follow-imports=silent                  # 0（strict；--follow-imports=silent 必须，否则基线依赖噪声）
 pyright auto3dlabel/                                       # 0
 ```
@@ -104,5 +106,6 @@ pyright auto3dlabel/                                       # 0
 - **LiDAR 观测性**：只反投影 LiDAR 实际打到的点；遮挡/远距目标点稀疏 → 拟合退化，输出「拟合点数」置信度供 HITL 分流（宁缺勿假）
 - **yaw 约定**：内部统一 BEV 平面（KITTI 地面 xz）角度 `yaw_bev`（车头相对 +z 向 +x 为正）；导出时经唯一转换点（`tools/geometry.py`）显式转 KITTI 相机系 `rotation_y`（`= yaw_bev − π/2`），nuScenes 全局系 yaw 到 v0.2 再定，不得混用
 - **复用不复制**：Agentic 编排（planner/orchestrator）、HITL 三档、质量评估模式复用 auto2dlabel 骨架；3D 新增代码只放 `auto3dlabel/`
+- **依赖护栏（2026-08-28）**：auto2dlabel 为 auto3dlabel 硬依赖（复用 agent/模型/工具骨架）；`bash install_libs.sh 3d` 连带安装 2D 依赖；包本体装法 = 仓库根 `pip install -e .`（根 pyproject 同一发行包装 auto2dlabel + auto3dlabel）；cli run/chat 入口 `_require_auto2dlabel()` 缺包时给安装指引而非裸 ImportError
 - **纯本地**：延续 2D 红线——无外部 API；数据（KITTI / nuScenes mini）与权重不入库
 - **先单帧后时序**：v0.1 只做单帧；跟踪 ID + 运动属性等 auto2dlabel v1.0 Tracking 交付后共用（ByteTrack/BoT-SORT）

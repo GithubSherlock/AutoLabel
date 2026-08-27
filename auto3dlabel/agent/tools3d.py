@@ -12,15 +12,13 @@ from typing import TYPE_CHECKING, Any
 
 from auto2dlabel.tools.base import Tool
 from auto2dlabel.tools.registry import ToolRegistry
-
 from auto3dlabel.schema.box3d import KittiFrame
 from auto3dlabel.tools.pipeline import annotate_frame
-from auto3dlabel.tools.viz import draw_bev
+from auto3dlabel.tools.visualize import draw_bev
 
 if TYPE_CHECKING:
     from auto2dlabel.models.detection import DetectionModel
     from auto2dlabel.models.segmentation import SegmentationModel
-
     from auto3dlabel.models.detection3d import Detector3D
 
 
@@ -92,7 +90,6 @@ class Detect3DTool(Tool):
     ) -> tuple[DetectionModel | None, SegmentationModel | None, Detector3D | None]:
         from auto2dlabel.models.detection import create_detection_model
         from auto2dlabel.models.segmentation import create_segmentation_model
-
         from auto3dlabel.models.detection3d import create_detector3d
 
         det3d = create_detector3d(self.det_model_name)

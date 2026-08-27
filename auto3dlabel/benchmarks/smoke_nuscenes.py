@@ -3,8 +3,8 @@
 用法：
     python3 -m auto3dlabel.benchmarks.smoke_nuscenes [model] [conf]
 
-管线：Mini val 2 场景 → 每 sample LIDAR_TOP 主点云 → detect_points（自车系）→
-ego_pose 补偿转全局（NusBox）→ run_nuscenes_benchmark 简化评测出表 →
+管线：Mini val 2 场景 → 每 sample LIDAR_TOP 主点云 → detect_points（传感器系）→
+calib + ego_pose 两级补偿转全局（NusBox）→ run_nuscenes_benchmark 简化评测出表 →
 build_submission_json + validate + write 自检。
 
 口径（如实记录，见 nuscenes_benchmark 模块 docstring）：Mini 2 场景 vs 官方 val 150 场景；
@@ -87,30 +87,47 @@ def _predict_sample(
     conf: float,
     class_names: list[str],
 ) -> list[NusBox]:
-    """单 sample 检测：自车系 → ego_pose 补偿 → 全局系 NusBox。"""
+    """单 sample 检测：传感器系 → calib 位姿 → ego 地面系 → ego_pose → 全局系 NusBox。"""
     pts = _load_lidar(sample, nusc, dataroot)
     boxes, scores, labels = det.detect_points(pts, conf)
     if len(boxes) == 0:
         return []
-    # ego_pose 挂在 LIDAR_TOP 的 sample_data 记录上（sample 表无此字段）
+    # ego_pose 与 LIDAR 位姿都挂在 LIDAR_TOP 的 sample_data 记录上（sample 表无此字段）
     lidar_data = nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
     ego = nusc.get("ego_pose", lidar_data["ego_pose_token"])
-    r_mat = _rot_matrix(tuple(ego["rotation"]))
+    calib = nusc.get("calibrated_sensor", lidar_data["calibrated_sensor_token"])
+    r_ego = _rot_matrix(tuple(ego["rotation"]))
     t_ego = np.asarray(ego["translation"], dtype=np.float64)
     q_ego = tuple(ego["rotation"])
+    r_calib = _rot_matrix(tuple(calib["rotation"]))
+    t_calib = np.asarray(calib["translation"], dtype=np.float64)
+    q_calib = tuple(calib["rotation"])
     out: list[NusBox] = []
+    warned = False
     for i in range(len(boxes)):
-        # nus 模型 9 值输出 [x,y,z,w,l,h,yaw,vx,vy]（自车系中心 + 自车系速度）
-        x, y, z, w, l, h, yaw = (float(v) for v in boxes[i, :7])
-        center = r_mat @ np.array([x, y, z]) + t_ego
-        quat = _quat_mul(q_ego, yaw_to_quat(yaw))
+        idx = int(labels[i])
+        if idx < 0 or idx >= len(class_names):
+            if not warned:  # 诊断：类表与模型 head 类数不符（每样本一次）
+                print(
+                    f"[诊断] 标签越界跳过 idx={idx} len(class_names)={len(class_names)}",
+                    file=sys.stderr,
+                )
+                warned = True
+            continue
+        # nus 模型 9 值输出 [x,y,z,l,w,h,yaw,vx,vy]（传感器系中心 + 速度）——
+        # 实测校准：2021-08 旧权重 L-W 顺序（与 1.4.0 DeltaXYZWLHRBBoxCoder 的
+        # W-L 定义相反，跨场景 81.5% car 匹配实证）；yaw 为标准语义（0=+x 前）
+        x, y, z, l, w, h, yaw = (float(v) for v in boxes[i, :7])
+        # 两级补偿：传感器系 → ego 地面系（LIDAR 高 1.84m 等 calib 位姿）→ 全局系
+        center = r_ego @ (r_calib @ np.array([x, y, z]) + t_calib) + t_ego
+        quat = _quat_mul(q_ego, _quat_mul(q_calib, yaw_to_quat(yaw)))
         velocity: tuple[float, float] | None = None
         if boxes.shape[1] >= 9:
-            v_local = r_mat @ np.array([float(boxes[i, 7]), float(boxes[i, 8]), 0.0])
-            velocity = (float(v_local[0]), float(v_local[1]))
+            v_glob = r_ego @ (r_calib @ np.array([float(boxes[i, 7]), float(boxes[i, 8]), 0.0]))
+            velocity = (float(v_glob[0]), float(v_glob[1]))
         out.append(
             NusBox(
-                label=class_names[int(labels[i])],
+                label=class_names[idx],
                 confidence=float(scores[i]),
                 translation=(float(center[0]), float(center[1]), float(center[2])),
                 size=(w, l, h),
@@ -162,6 +179,7 @@ def main(argv: list[str] | None = None) -> None:
 
     gt_map: dict[str, list[NusBox]] = {}
     pred_map: dict[str, list[NusBox]] = {}
+    egos: dict[str, tuple[float, float]] = {}  # 距离分桶相对自车（官方 distance 口径）
     t0 = time.perf_counter()
     n_scenes = 0
     n_samples = 0
@@ -174,6 +192,9 @@ def main(argv: list[str] | None = None) -> None:
             pred_map[sample["token"]] = _predict_sample(
                 det, sample, nusc, dataroot, conf, class_names
             )
+            lidar_data = nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
+            ego = nusc.get("ego_pose", lidar_data["ego_pose_token"])
+            egos[sample["token"]] = (float(ego["translation"][0]), float(ego["translation"][1]))
     elapsed = time.perf_counter() - t0
     n_pred = sum(len(v) for v in pred_map.values())
     console.print(
@@ -181,7 +202,7 @@ def main(argv: list[str] | None = None) -> None:
         f"{n_scenes} 场景 {n_samples} samples 共 {n_pred} 个预测框"
     )
 
-    bench = run_nuscenes_benchmark(gt_map, pred_map)
+    bench = run_nuscenes_benchmark(gt_map, pred_map, egos=egos)
     console.print(_format_table(bench))
     console.print(f"mAP = {bench['mAP'] * 100:.1f}")
 

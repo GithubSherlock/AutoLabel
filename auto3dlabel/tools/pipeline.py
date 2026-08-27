@@ -11,12 +11,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from auto2dlabel.models.detection import DetectionModel, create_detection_model
 from auto2dlabel.models.segmentation import SegmentationModel, create_segmentation_model
 from auto2dlabel.schema.annotation import Bbox
-from auto2dlabel.tools.device import disable_tf32
-
 from auto3dlabel.configs.kitti import (
     COCO_TO_KITTI,
     DEFAULT_CONF,
@@ -29,9 +28,10 @@ from auto3dlabel.models.detection3d import Detector3D
 from auto3dlabel.schema.box3d import FrameResult, KittiFrame
 from auto3dlabel.tools.backproject import backproject_semantics
 from auto3dlabel.tools.cluster import cluster_instance
+from auto3dlabel.tools.device import disable_tf32
 from auto3dlabel.tools.fit import fit_box3d
 from auto3dlabel.tools.geometry import points_in_box
-from auto3dlabel.tools.viz import draw_bev, draw_projection_check
+from auto3dlabel.tools.visualize import draw_bev, draw_projection_check
 
 
 def annotate_frame(
@@ -112,6 +112,31 @@ def annotate_frame(
     return result
 
 
+def annotate_frames_lidar_batch(
+    frames: list[KittiFrame],
+    prompts: list[str],
+    det3d: Detector3D,
+    confidence: float = DEFAULT_CONF,
+    viz: bool = True,
+    out_dir: str | Path | None = None,
+) -> list[FrameResult]:
+    """多帧 LiDAR 直检（一次 forward 整批）→ 每帧 FrameResult。
+
+    cli run --batch 的 3D 引擎路径：det3d.detect_batch 单次前向算整批
+    （激活显存随帧数线性增长 → 批大小 = 显存换吞吐，跑满 GPU）；
+    后处理（类别过滤 / fit_points / BEV）与单帧路径同源（_lidar_frame_result）。
+    """
+    disable_tf32()
+    per_frame = det3d.detect_batch(frames, conf_threshold=confidence)
+    results = []
+    for frame, dets in zip(frames, per_frame, strict=True):
+        result = _lidar_frame_result(frame, prompts, dets)
+        if viz and out_dir is not None:
+            _draw_lidar_bev(frame, result, Path(out_dir))
+        results.append(result)
+    return results
+
+
 def _annotate_frame_lidar(
     frame: KittiFrame,
     prompts: list[str],
@@ -120,8 +145,18 @@ def _annotate_frame_lidar(
     viz: bool,
     out_dir: str | Path | None,
 ) -> FrameResult:
-    """LiDAR 直检引擎分支：3-class 检测 → Box3D 组装 + fit_points 替代（框内点计数）。"""
+    """LiDAR 直检引擎分支（单帧）：3-class 检测 → Box3D 组装 + fit_points（框内点计数）。"""
     dets = det3d.detect(frame, conf_threshold=confidence)
+    result = _lidar_frame_result(frame, prompts, dets)
+    if viz and out_dir is not None:
+        _draw_lidar_bev(frame, result, Path(out_dir))
+    return result
+
+
+def _lidar_frame_result(
+    frame: KittiFrame, prompts: list[str], dets: list[Any]
+) -> FrameResult:
+    """检测列表 → FrameResult（单帧/批量后处理同源：类别过滤 + fit_points 计数）。"""
     result = FrameResult(frame_id=frame.frame_id)
     allowed = prompts_to_kitti_labels(prompts)
     if allowed is not None:
@@ -137,14 +172,16 @@ def _annotate_frame_lidar(
         # fit_points = 框内 LiDAR 点数（LiDAR 观测性红线：远处/遮挡目标点少 → HITL 兜底）
         box.fit_points = points_in_box(pts, box)
         result.boxes3d.append(box)
-    if viz and out_dir is not None:
-        out = Path(out_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        result.bev_path = draw_bev(
-            frame,
-            out / f"{frame.frame_id}_bev.png",
-            points_cam=None,  # LiDAR 直检无需语义点云散点（标定链 v0.1 已验证）
-            boxes=result.boxes3d,
-            gt_boxes=frame.load_gt3d(),
-        )
     return result
+
+
+def _draw_lidar_bev(frame: KittiFrame, result: FrameResult, out_dir: Path) -> None:
+    """BEV 对比图落盘（单帧/批量同源；目录按需创建）。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result.bev_path = draw_bev(
+        frame,
+        out_dir / f"{frame.frame_id}_bev.png",
+        points_cam=None,  # LiDAR 直检无需语义点云散点（标定链 v0.1 已验证）
+        boxes=result.boxes3d,
+        gt_boxes=frame.load_gt3d(),
+    )

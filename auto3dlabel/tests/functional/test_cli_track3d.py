@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from auto3dlabel.cli import _run_tracked_sequence
 from auto3dlabel.schema.box3d import Box3D, FrameResult, KittiFrame
 from auto3dlabel.tests.helpers.synth import write_frame

@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from auto3dlabel.configs.nuscenes import DEFAULT_NUSCENES_ROOT
+from auto3dlabel.configs.nuscenes import DEFAULT_NUSCENES_ROOT, NUSCENES_CATEGORY_MAP
 from auto3dlabel.schema.nuscenes_box import NusBox
 
 
@@ -75,14 +75,16 @@ def samples_of_scene(nusc: Any, scene_name: str) -> list[dict]:
 
 
 def gt_boxes_of_sample(nusc: Any, sample_token: str) -> list[NusBox]:
-    """sample → GT NusBox 列表（原始表数值直映射，类名剥 'vehicle.' 前缀）。"""
+    """sample → GT NusBox 列表（原始表数值直映射，类名走官方 category 映射表）。"""
     boxes: list[NusBox] = []
     for ann in nusc.sample_annotation:
         if ann["sample_token"] != sample_token:
             continue
         if "num_lidar_pts" in ann and ann["num_lidar_pts"] <= 0:
             continue  # 无 LiDAR 观测的标注不参与（简化口径，如实记录）
-        name = ann["category_name"].split(".")[-1]
+        name = NUSCENES_CATEGORY_MAP.get(ann["category_name"])
+        if name is None:
+            continue  # 官方忽略类（animal/debris/emergency 等）不参与评测
         boxes.append(
             NusBox(
                 label=name,

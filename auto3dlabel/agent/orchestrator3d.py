@@ -13,7 +13,6 @@ from typing import Any
 
 from auto2dlabel.agent.orchestrator import AgentOrchestrator
 from auto2dlabel.agent.state import AgentState
-
 from auto3dlabel.agent.tools3d import build_3d_registry
 from auto3dlabel.configs.kitti import MIN_FIT_POINTS
 from auto3dlabel.schema.box3d import Box3D, KittiFrame

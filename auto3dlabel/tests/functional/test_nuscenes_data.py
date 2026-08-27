@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from auto3dlabel.data.nuscenes import (
     dataroot_exists,
     gt_boxes_of_sample,
@@ -84,16 +85,22 @@ class _FakeNusc:
                 "num_lidar_pts": 100,
             },
             {
-                "sample_token": "s0", "category_name": "vehicle.bus",
+                "sample_token": "s0", "category_name": "vehicle.bus.rigid",
                 "translation": [5.0, 0.0, 0.0], "size": [2.5, 10.0, 3.0],
                 "rotation": [1.0, 0.0, 0.0, 0.0], "instance_token": "i2",
                 "num_lidar_pts": 0,
             },
             {
-                "sample_token": "s1", "category_name": "human.pedestrian",
+                "sample_token": "s1", "category_name": "human.pedestrian.adult",
                 "translation": [0.0, 0.0, 0.0], "size": [0.6, 0.7, 1.8],
                 "rotation": [1.0, 0.0, 0.0, 0.0], "instance_token": "i3",
                 "num_lidar_pts": 30,
+            },
+            {
+                "sample_token": "s1", "category_name": "animal",
+                "translation": [9.0, 9.0, 0.0], "size": [0.5, 1.0, 0.8],
+                "rotation": [1.0, 0.0, 0.0, 0.0], "instance_token": "i4",
+                "num_lidar_pts": 10,
             },
         ]
 
@@ -112,11 +119,12 @@ def test_samples_of_scene_chain_and_missing() -> None:
 
 
 def test_gt_boxes_of_sample_filters_and_maps() -> None:
-    """GT 直映射（类名剥前缀）+ num_lidar_pts=0 剔除 + instance_token 穿透。"""
+    """GT 官方 category 映射（子类聚合）+ num_lidar_pts=0 剔除 + instance_token 穿透。"""
     nusc = _FakeNusc()
     boxes = gt_boxes_of_sample(nusc, "s0")
-    assert len(boxes) == 1  # bus 被剔除
+    assert len(boxes) == 1  # bus.rigid 被 num_lidar_pts=0 剔除
     assert boxes[0].label == "car"
     assert boxes[0].translation == (1.0, 2.0, 3.0)
     assert boxes[0].track_id == "i1"
-    assert gt_boxes_of_sample(nusc, "s1")[0].label == "pedestrian"
+    s1 = gt_boxes_of_sample(nusc, "s1")
+    assert [b.label for b in s1] == ["pedestrian"]  # adult 子类映射 + animal 忽略类跳过

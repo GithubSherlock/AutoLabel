@@ -41,3 +41,29 @@ class NusBox:
         if self.velocity is not None:
             d["velocity"] = list(self.velocity)
         return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> NusBox:
+        """to_dict 的官方提交键反向重建（tools/export.py nuscenes 分支消费）。
+
+        track_id 可读（instance_token）但 to_dict 不输出——官方提交格式无此字段。
+        """
+        velocity_raw = d.get("velocity")
+        trans_raw = d.get("translation", (0.0, 0.0, 0.0))
+        size_raw = d.get("size", (0.0, 0.0, 0.0))
+        rot_raw = d.get("rotation", (1.0, 0.0, 0.0, 0.0))
+        return cls(
+            label=str(d.get("detection_name", "")),
+            confidence=float(d.get("detection_score", 1.0)),
+            translation=(float(trans_raw[0]), float(trans_raw[1]), float(trans_raw[2])),
+            size=(float(size_raw[0]), float(size_raw[1]), float(size_raw[2])),
+            quaternion=(
+                float(rot_raw[0]), float(rot_raw[1]), float(rot_raw[2]), float(rot_raw[3])
+            ),
+            velocity=(
+                (float(velocity_raw[0]), float(velocity_raw[1]))
+                if velocity_raw is not None
+                else None
+            ),
+            track_id=d.get("track_id"),
+        )

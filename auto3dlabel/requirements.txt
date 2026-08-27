@@ -1,4 +1,7 @@
-# Auto3dLabel 依赖（3D 侧直接 import 的部分；2D 基础模型依赖由 auto2dlabel 覆盖）
+# Auto3dLabel 依赖（3D 侧直接 import 的部分）
+# ⚠ auto2dlabel 为硬依赖（复用其 agent/模型/工具骨架）：请用仓库根 pyproject `pip install -e .`
+#   （同时安装 auto2dlabel + auto3dlabel 两个包）或 `bash install_libs.sh 3d`（连带装 2D 依赖）；
+#   单独 pip install 本文件会缺 auto2dlabel 包本体
 numpy>=1.24
 opencv-python-headless>=4.8
 scikit-learn>=1.3

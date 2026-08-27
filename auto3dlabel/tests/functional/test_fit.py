@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+
 from auto3dlabel.configs.kitti import MIN_FIT_POINTS_ABS
 from auto3dlabel.schema.box3d import Box3D
 from auto3dlabel.tests.helpers.synth import rect_points

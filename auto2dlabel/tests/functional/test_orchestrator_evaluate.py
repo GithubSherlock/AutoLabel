@@ -2,7 +2,7 @@
 
 覆盖：质量通过时零暴露；质量未通过时条件暴露 evaluate_quality；
 flag 写 metadata、retry 结果并入 _sync_annotations、max_iterations=3 红线、
-同批重复调用只执行一次。
+同批重复调用只执行一次、重复调用消息配对（DeepSeek 400 回归）。
 """
 
 from __future__ import annotations
@@ -151,3 +151,31 @@ def test_duplicate_evaluate_in_same_batch_runs_once() -> None:
 
     assert state.metadata["llm_review_flagged"] is True
     assert detect.calls == [("a.jpg", 0.3)]  # retry 未执行（重复调用被跳过）
+
+
+def test_duplicate_detect_keeps_tool_result_paired() -> None:
+    """重复 detect_objects：assistant 消息保留完整 tool_calls，tool 结果紧随配对。
+
+    回归（2026-08-28 chat 实测）：曾从 assistant 消息删除重复调用条目 → 孤儿
+    tool 消息（前置无对应 tool_calls）→ DeepSeek 严格 API 下一轮请求 400。
+    """
+    detect = _FakeDetectTool([
+        [Bbox(x=1, y=2, width=3, height=4, label="car", confidence=0.9)],
+        [Bbox(x=5, y=6, width=7, height=8, label="car", confidence=0.9)],
+    ])
+    llm = _ScriptedLLM([
+        {"tool_calls": [_tool_call("detect_objects", _DETECT_ARGS, "c1")]},
+        {"tool_calls": [_tool_call("detect_objects", _DETECT_ARGS, "c2")]},
+        {"content": "完成: car × 1"},
+    ])
+    state = _make_orchestrator(llm, detect).run("a.jpg", "检测 car", confidence_threshold=0.3)
+
+    assert detect.calls == [("a.jpg", 0.3)]  # 重复调用未执行（防重复红线）
+    for i, m in enumerate(state.messages):
+        if m.get("role") != "tool":
+            continue
+        prev = state.messages[i - 1]
+        assert prev.get("role") == "assistant", "tool 结果必须紧随 assistant 消息"
+        ids = [tc["id"] for tc in prev.get("tool_calls", [])]
+        assert m["tool_call_id"] in ids, "tool 结果必须有前置 tool_calls 配对条目"
+    assert state.iteration == 3  # detect → 重复跳过 → 总结（红线内）

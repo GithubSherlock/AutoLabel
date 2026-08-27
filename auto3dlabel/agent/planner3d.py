@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 from auto2dlabel.agent import json
 from auto2dlabel.agent.llm import LLMClient
-
 from auto3dlabel.configs.kitti import DEFAULT_CONF, DEFAULT_DET_MODEL, DEFAULT_SEG_MODEL
 
 _PLANNER3D_SYSTEM_PROMPT = """You are a task planner for a KITTI 3D object annotation tool. \

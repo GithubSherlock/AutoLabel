@@ -63,6 +63,19 @@ def test_missed_track_deleted_after_max_age() -> None:
     assert new_id != first_id
 
 
+def test_deleted_track_preserved_in_completed() -> None:
+    """超龄删除的轨迹移入 completed（历史完整）——序列导出不丢早段轨迹。"""
+    tracker = Tracker3D(max_age=3)
+    first_id = tracker.update([_box(0.0, 10.0)])[0]
+    tracker.update([_box(0.2, 10.0)])  # 1 次匹配（历史 2 框）
+    for _ in range(4):  # 连续 4 帧无框 → 第 4 帧删除（missed=3 后第 4 次更新）
+        tracker.update([])
+    completed = tracker.completed()
+    assert [t.track_id for t in completed] == [first_id]
+    assert len(completed[0].history) == 2  # 历史完整保留（含匹配帧）
+    assert tracker.tracks() == []
+
+
 def test_velocity_kalman_converges() -> None:
     """匀速 vx=2m/s 单目标 → 末帧 Kalman 速度 ≈ (2, 0)（收敛后误差 <0.3）。"""
     tracker = Tracker3D(use_kalman=True, dt=0.1)

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+
 from auto2dlabel.agent.evaluate import QualityReport
 from auto2dlabel.agent.llm import LLMClient
 from auto2dlabel.agent.orchestrator import AgentOrchestrator

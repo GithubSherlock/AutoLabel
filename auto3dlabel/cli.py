@@ -8,8 +8,9 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -20,6 +21,24 @@ from auto3dlabel.data.kitti import normalize_frame_id, resolve_frame
 
 app = typer.Typer(help="Agentic 3D 标注（KITTI 单帧 → 3D bbox 初稿 + HITL 三档）")
 console = Console()
+
+
+def _require_auto2dlabel() -> None:
+    """auto2dlabel 为 auto3dlabel 硬依赖（复用 agent/模型/工具骨架）。
+
+    install_libs.sh 3d 已连带安装 2D 依赖，但包本体须在 import 路径中
+    （仓库根 `pip install -e .` 同时安装 auto2dlabel + auto3dlabel）；
+    此处兜底给出可操作提示，而非裸 ImportError 堆栈。
+    """
+    try:
+        import auto2dlabel  # noqa: F401
+    except ImportError:
+        console.print(
+            "[red]未找到 auto2dlabel 包[/red]（auto3dlabel 复用其 agent/模型/工具骨架）。\n"
+            "请在仓库根目录执行: pip install -e .\n"
+            "或确认 auto2dlabel 在 PYTHONPATH 中后重试。"
+        )
+        raise typer.Exit(code=1) from None
 
 
 def _resolve_det_model(name: str | None) -> str:
@@ -58,7 +77,6 @@ def _make_models(
     """
     from auto2dlabel.models.detection import create_detection_model
     from auto2dlabel.models.segmentation import create_segmentation_model
-
     from auto3dlabel.models.detection3d import create_detector3d
 
     det3d = create_detector3d(det_model)
@@ -74,25 +92,28 @@ def _make_models(
 def _run_frame(
     frame_id: str,
     prompts: list[str],
-    det_model: str | None,
-    seg_model: str | None,
+    det: Any,
+    seg: Any,
+    det3d: Any,
     conf: float,
     out_dir: Path,
     viz: bool,
 ) -> tuple[int, int, int]:
-    """单帧跑管线 + 导出产物 → (accepted, review, hard)。"""
+    """单帧跑管线 + 导出产物 → (accepted, review, hard)。
+
+    模型实例由调用方注入（批量路径只加载一次，不再逐帧重建）。
+    """
     from auto3dlabel.export.kitti_label import build_label_file
     from auto3dlabel.export.review_queue import triage_3d, write_review_queue
     from auto3dlabel.tools.pipeline import annotate_frame
 
     frame = resolve_frame(frame_id)
-    det, seg, det3d = _make_models(det_model, seg_model)
     result = annotate_frame(
         frame,
         prompts,
-        det_model=det,  # type: ignore[arg-type]
-        seg_model=seg,  # type: ignore[arg-type]
-        det3d=det3d,  # type: ignore[arg-type]
+        det_model=det,
+        seg_model=seg,
+        det3d=det3d,
         confidence=conf,
         viz=viz,
         out_dir=out_dir,
@@ -101,6 +122,115 @@ def _run_frame(
     build_label_file(frame.frame_id, result.boxes3d, out_dir / "labels")
     write_review_queue(frame, triage, out_dir / "reviews")
     return len(triage.accepted), len(triage.review), len(triage.hard)
+
+
+def _is_oom(e: BaseException) -> bool:
+    """CUDA OOM 判定（RuntimeError "out of memory"）。"""
+    return "out of memory" in str(e).lower()
+
+
+def _measure_batch_size(
+    det3d: Any,
+    probe_frames: list[Any],
+    prompts: list[str],
+    conf: float,
+    viz: bool,
+    out_dir: Path,
+) -> int:
+    """自动实测批大小：batch=1 峰值显存增量 → 空闲 × 0.92 ÷ 单帧峰值。
+
+    热身后测增量（首帧前向含模型加载/权重，不得计入单帧峰值）；
+    安全系数 0.92（目标「跑满 GPU」≈92% 显存；估算失真由整批 OOM 减半吸收，
+    故可高于 2D 的 0.85）；CUDA 不可用 → 1（逐帧，等同 2D 兜底）。
+    """
+    import torch
+
+    from auto3dlabel.models.detection3d import suggest_batch_size
+    from auto3dlabel.tools.pipeline import annotate_frames_lidar_batch
+
+    if not probe_frames or not torch.cuda.is_available():
+        return 1
+    annotate_frames_lidar_batch(probe_frames, prompts, det3d, conf, viz, out_dir)  # 热身
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated(0)  # 模型常驻显存（探针前已加载）
+    annotate_frames_lidar_batch(probe_frames, prompts, det3d, conf, viz, out_dir)
+    per_frame = max(1, torch.cuda.max_memory_allocated(0) - base)  # 单帧激活峰值
+    free = torch.cuda.mem_get_info(0)[0]
+    return suggest_batch_size(int(per_frame), int(free), safety_factor=0.92)
+
+
+def _run_batch_lidar(
+    frame_ids: list[str],
+    prompts: list[str],
+    det3d: Any,
+    conf: float,
+    out_dir: Path,
+    viz: bool,
+    resume: bool,
+    batch_size: int | None,
+) -> dict[str, int]:
+    """LiDAR 引擎批量路径：分批 detect_batch（一次 forward 整批，显存换吞吐）。
+
+    batch_size None → 自动实测（跑满 GPU：空闲 × 0.85 ÷ 单帧峰值）；
+    整批 OOM 减半重试；非 OOM 异常逐帧降级单帧（失败隔离口径同 2D 批量）。
+    """
+    from auto3dlabel.export.kitti_label import build_label_file
+    from auto3dlabel.export.review_queue import triage_3d, write_review_queue
+    from auto3dlabel.tools.pipeline import annotate_frames_lidar_batch
+
+    stat = {"accepted": 0, "review": 0, "hard": 0, "failed": 0}
+    todo = [
+        fid for fid in frame_ids
+        if not (resume and (out_dir / "labels" / f"{fid}.txt").is_file())
+    ]
+    if not todo:
+        return stat
+    frames = [resolve_frame(fid) for fid in todo]
+    batch = batch_size or _measure_batch_size(
+        det3d, frames[:1], prompts, conf, viz, out_dir
+    )
+    console.print(f"[dim]batch size = {batch}（{'实测' if batch_size is None else '显式'}）[/dim]")
+
+    i = 0
+    while i < len(frames):
+        chunk = frames[i : i + batch]
+        try:
+            results = annotate_frames_lidar_batch(chunk, prompts, det3d, conf, viz, out_dir)
+        except RuntimeError as e:
+            if _is_oom(e) and batch > 1:
+                console.print(f"[yellow]batch={batch} 显存不足（OOM），减半重试[/yellow]")
+                batch = max(1, batch // 2)
+                continue
+            console.print(
+                f"[red]批次 {chunk[0].frame_id}-{chunk[-1].frame_id} 失败（{e}），逐帧降级[/red]"
+            )
+            for frame in chunk:
+                try:
+                    a, r, h = _run_frame(
+                        frame.frame_id, prompts, None, None, det3d, conf, out_dir, viz
+                    )
+                    stat["accepted"] += a
+                    stat["review"] += r
+                    stat["hard"] += h
+                    console.print(f"  {frame.frame_id}: 采纳 {a} / 复核 {r} / 困难 {h}")
+                except Exception as e2:  # 失败隔离：单帧异常不中断批量
+                    stat["failed"] += 1
+                    console.print(f"  [red]{frame.frame_id}: 失败 {e2}[/red]")
+            i += len(chunk)
+            continue
+        for frame, result in zip(chunk, results, strict=True):
+            triage = triage_3d(result.boxes3d)
+            build_label_file(frame.frame_id, result.boxes3d, out_dir / "labels")
+            write_review_queue(frame, triage, out_dir / "reviews")
+            stat["accepted"] += len(triage.accepted)
+            stat["review"] += len(triage.review)
+            stat["hard"] += len(triage.hard)
+            console.print(
+                f"  {frame.frame_id}: 采纳 {len(triage.accepted)} / 复核 {len(triage.review)} / "
+                f"困难 {len(triage.hard)}"
+            )
+        i += len(chunk)
+    return stat
 
 
 def _run_tracked_sequence(
@@ -165,7 +295,7 @@ def _run_tracked_sequence(
                 "frames": track_frames.get(t.track_id, []),
                 "velocities": t.velocities,
             }
-            for t in tracker.tracks()
+            for t in tracker.tracks() + tracker.completed()
         ],
     }
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -198,6 +328,13 @@ def run(
         "outputs/kitti3d"
     ),
     batch: Annotated[bool, typer.Option("--batch", help="批量模式（目录/范围输入）")] = False,
+    batch_size: Annotated[
+        int | None,
+        typer.Option(
+            "--batch-size",
+            help="LiDAR 引擎批量帧数（默认自动实测：空闲显存 × 0.92 ÷ 单帧峰值，跑满 GPU）",
+        ),
+    ] = None,
     resume: Annotated[bool, typer.Option("--resume", help="跳过已产出 label 的帧")] = False,
     no_viz: Annotated[bool, typer.Option("--no-viz", help="不生成自检/BEV 图")] = False,
     track3d: Annotated[
@@ -209,6 +346,7 @@ def run(
     ] = False,
 ) -> None:
     """代码级直跑：检测 → SAM2 → 反投影 → 聚类拟合 → KITTI label + 复核队列（零 LLM）。"""
+    _require_auto2dlabel()
     from auto2dlabel.tools.prompts import extract_prompts
 
     prompts = extract_prompts(instruction) or ["car"]
@@ -229,19 +367,28 @@ def run(
     if batch:
         frame_ids = _parse_frame_ids(target)
         console.print(f"批量 {len(frame_ids)} 帧 → {out_dir}")
-        stat = {"accepted": 0, "review": 0, "hard": 0, "failed": 0}
-        for fid in frame_ids:
-            if resume and (out_dir / "labels" / f"{fid}.txt").is_file():
-                continue
-            try:
-                a, r, h = _run_frame(fid, prompts, det_model, seg_model, conf, out_dir, not no_viz)
-                stat["accepted"] += a
-                stat["review"] += r
-                stat["hard"] += h
-                console.print(f"  {fid}: 采纳 {a} / 复核 {r} / 困难 {h}")
-            except Exception as e:  # 失败隔离：单帧异常不中断批量
-                stat["failed"] += 1
-                console.print(f"  [red]{fid}: 失败 {e}[/red]")
+        # 模型只加载一次（批量铁律）：LiDAR 引擎走整批 forward，2D 链逐帧复用实例
+        det, seg, det3d = _make_models(det_model, seg_model)
+        if det3d is not None:
+            stat = _run_batch_lidar(
+                frame_ids, prompts, det3d, conf, out_dir, not no_viz, resume, batch_size
+            )
+        else:
+            stat = {"accepted": 0, "review": 0, "hard": 0, "failed": 0}
+            for fid in frame_ids:
+                if resume and (out_dir / "labels" / f"{fid}.txt").is_file():
+                    continue
+                try:
+                    a, r, h = _run_frame(
+                        fid, prompts, det, seg, None, conf, out_dir, not no_viz
+                    )
+                    stat["accepted"] += a
+                    stat["review"] += r
+                    stat["hard"] += h
+                    console.print(f"  {fid}: 采纳 {a} / 复核 {r} / 困难 {h}")
+                except Exception as e:  # 失败隔离：单帧异常不中断批量
+                    stat["failed"] += 1
+                    console.print(f"  [red]{fid}: 失败 {e}[/red]")
         console.print(
             f"[bold]汇总:[/bold] 采纳 {stat['accepted']} / 复核 {stat['review']} / "
             f"困难 {stat['hard']} / 失败 {stat['failed']}"
@@ -249,7 +396,8 @@ def run(
         return
 
     frame_id = normalize_frame_id(target)
-    a, r, h = _run_frame(frame_id, prompts, det_model, seg_model, conf, out_dir, not no_viz)
+    det, seg, det3d = _make_models(det_model, seg_model)
+    a, r, h = _run_frame(frame_id, prompts, det, seg, det3d, conf, out_dir, not no_viz)
     console.print(f"[bold]{frame_id}:[/bold] 采纳 {a} / 复核 {r} / 困难 {h}")
     console.print(
         f"产物: {out_dir / 'labels' / (frame_id + '.txt')} + "
@@ -271,13 +419,17 @@ def chat(
     ] = 3,
 ) -> None:
     """LLM Agent 闭环：planner 解析 → 3D agent loop → 质量评估 → HITL 三档 → 导出。"""
+    _require_auto2dlabel()
     from auto2dlabel.agent.llm import create_client
-
     from auto3dlabel.agent.orchestrator3d import run_3d_agent
     from auto3dlabel.agent.planner3d import TaskPlanner3D
-    from auto3dlabel.export.kitti_label import build_label_file
     from auto3dlabel.export.review_queue import triage_3d, write_review_queue
+    from auto3dlabel.schema.box3d import Box3D
+    from auto3dlabel.tools.device import print_device
+    from auto3dlabel.tools.export import ExportTool
+    from auto3dlabel.tools.log import log_chat_call
 
+    print_device()  # 设备横幅 + disable_tf32（批量/逐图确定性红线，幂等）
     client = create_client(provider=provider)
     planner = TaskPlanner3D(client)
     plan = planner.parse(instruction)
@@ -287,6 +439,7 @@ def chat(
     frame = resolve_frame(plan.frame_id)
     det_name = _resolve_det_model(det_model or plan.det_model)
 
+    t0 = time.perf_counter()
     boxes, state = run_3d_agent(
         frame,
         instruction,
@@ -296,8 +449,13 @@ def chat(
         out_dir=out_dir,
         max_iterations=max_iterations,
     )
+    elapsed = time.perf_counter() - t0
     triage = triage_3d(boxes)
-    build_label_file(frame.frame_id, boxes, out_dir / "labels")
+    ExportTool().forward(
+        annotations=[b.to_dict() for b in boxes],
+        output_path=str(out_dir / "labels" / f"{frame.frame_id}.txt"),
+        format="kitti",
+    )
     write_review_queue(frame, triage, out_dir / "reviews")
 
     table = Table(title=f"帧 {frame.frame_id} 3D 标注结果")
@@ -311,6 +469,39 @@ def chat(
     if state.metadata.get("quality_report"):
         console.print(f"[dim]质量报告: {state.metadata['quality_report']}[/dim]")
     console.print(f"迭代 {state.iteration} 次，产物: {out_dir / 'labels'} + {out_dir / 'reviews'}")
+
+    # 调用日志（logs/Chat_*.log）：按 detect_objects 工具调用逐条重建（通常 1 条）
+    steps_results = []
+    for tc in state.tool_calls:
+        if tc.get("tool_name") != "detect_objects":
+            continue
+        result = tc.get("result")
+        if not isinstance(result, dict):
+            continue
+        step_boxes = [
+            Box3D.from_dict(item) for item in (result.get("objects") or result.get("data") or [])
+            if isinstance(item, dict) and item.get("label")
+        ]
+        step_triage = triage_3d(step_boxes)
+        steps_results.append({
+            "step_id": tc.get("tool_call_id"),
+            "model": det_name,
+            "boxes3d_count": len(step_boxes),
+            "triage_summary": {
+                "accepted": len(step_triage.accepted),
+                "review": len(step_triage.review),
+                "hard": len(step_triage.hard),
+            },
+        })
+    log_chat_call(
+        instruction=instruction,
+        plan_summary={"frame_id": frame.frame_id, "det_model": det_name,
+                      "seg_model": seg_model or plan.seg_model},
+        steps_results=steps_results,
+        elapsed=round(elapsed, 3),
+        llm_model=provider,
+        annotation_type="kitti_3d",
+    )
 
 
 if __name__ == "__main__":

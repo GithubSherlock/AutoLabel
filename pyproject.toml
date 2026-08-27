@@ -26,6 +26,8 @@ dependencies = [
     "pyyaml>=6.0",
     "shapely>=2.0",
     "onnxruntime>=1.16",
+    # 3D（auto3dlabel）新增依赖：DBSCAN 聚类（唯一新增），其余与 2D 共享
+    "scikit-learn>=1.3",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +54,7 @@ all = [
 
 [project.scripts]
 auto2dlabel = "auto2dlabel.cli:app"
+auto3dlabel = "auto3dlabel.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["auto2dlabel*", "auto3dlabel*"]
@@ -65,11 +68,19 @@ exclude = ["auto2dlabel/models/vendor_florence2"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
+[tool.ruff.lint.isort]
+# 根项目名只自动识别 auto2dlabel 为 first-party；auto3dlabel 显式声明（合并后单一配置）
+known-first-party = ["auto2dlabel", "auto3dlabel"]
+
 [tool.ruff.lint.per-file-ignores]
 # LLM system prompt 长行刻意保留（拆行会改变注入 LLM 的 prompt 内容）
 "auto2dlabel/agent/planner.py" = ["E501"]
 # calib 数据行 = 真实 calib_000000.txt 逐字提取（拆行破坏数据原文与可核对性）
 "auto3dlabel/tests/helpers/synth.py" = ["E501"]
+# 3D 领域惯例变量名 l（length，与 h/w 并列）——原 auto3dlabel/pyproject.toml 合并至此
+"auto3dlabel/**" = ["E741"]
+# Kalman 数学惯例变量名 P/S/K（协方差/新息/增益，与论文公式一致）——原 auto3dlabel/pyproject.toml 合并至此
+"auto3dlabel/tools/track3d.py" = ["N806"]
 
 [tool.mypy]
 python_version = "3.10"
@@ -95,9 +106,17 @@ disable_error_code = ["type-arg"]
 
 [tool.pyright]
 typeCheckingMode = "basic"
-# cvat = 本地 CVAT 调研克隆（.gitignore 排除，不入库不检查）
-# weights/ = 下载产物（模型权重 + mmdet3d 官方 configs，不入库不检查）
-exclude = ["auto2dlabel/models/vendor_florence2", "cvat", "auto3dlabel/weights"]
+# 显式 exclude 会替换 pyright 默认排除项 → 自带默认三项，否则 config 诊断告警
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    # cvat = 本地 CVAT 调研克隆（.gitignore 排除，不入库不检查）
+    # weights/ = 下载产物（模型权重 + mmdet3d 官方 configs，不入库不检查）
+    "auto2dlabel/models/vendor_florence2",
+    "cvat",
+    "auto3dlabel/weights",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["auto2dlabel/tests", "auto3dlabel/tests"]

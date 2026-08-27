@@ -214,33 +214,33 @@ class AgentOrchestrator:
             if response.wants_tool_call:
                 assert response.tool_calls is not None
 
-                # 过滤重复调用：detect_objects 一次 / evaluate_quality 一次
-                for tc in list(response.tool_calls):
+                # 重复调用只跳过执行，assistant 消息仍保留完整 tool_calls 条目——
+                # OpenAI 兼容严格 API（DeepSeek）校验每个 tool 结果必须紧随含对应
+                # tool_calls 的 assistant 消息，删除条目会留下孤儿 tool 消息
+                # （无前置配对）→ 下一轮请求 400（2026-08-28 chat 实测回归）
+                dup_ids: set[str] = set()
+                for tc in response.tool_calls:
                     name = tc["function"]["name"]
                     if name == "detect_objects" and _detect_called:
+                        dup_ids.add(tc["id"])
                         logger.info("Skipping duplicate detect_objects call")
-                        response.tool_calls.remove(tc)
-                        state.add_tool_result(
-                            tc["id"], "detect_objects",
-                            {"skipped": True, "reason": "already called, use previous results"},
-                        )
                     if name == "evaluate_quality" and self._evaluate_called:
+                        dup_ids.add(tc["id"])
                         logger.info("Skipping duplicate evaluate_quality call")
-                        response.tool_calls.remove(tc)
-                        state.add_tool_result(
-                            tc["id"], "evaluate_quality",
-                            {"skipped": True, "reason": "already called, only once per image"},
-                        )
 
-                if not response.tool_calls:
-                    state.add_message("assistant", "检测已完成，请直接总结结果。")
-                    continue
                 state.add_message("assistant", response.content or "", response.tool_calls)
 
                 for tc in response.tool_calls:
-                    if tc["function"]["name"] == "detect_objects":
-                        _detect_called = True
                     tool_name = tc["function"]["name"]
+                    if tc["id"] in dup_ids:
+                        state.add_tool_result(
+                            tc["id"],
+                            tool_name,
+                            {"skipped": True, "reason": "already called, use previous results"},
+                        )
+                        continue
+                    if tool_name == "detect_objects":
+                        _detect_called = True
                     arguments = json.loads(tc["function"]["arguments"])
 
                     logger.info("Calling tool: %s(%s)", tool_name, arguments)

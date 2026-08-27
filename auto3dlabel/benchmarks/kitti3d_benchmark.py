@@ -11,10 +11,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from auto2dlabel.benchmarks.common import evaluate_per_class
 from rich.console import Console
 from rich.table import Table
 
+from auto2dlabel.benchmarks.common import evaluate_per_class
 from auto3dlabel.benchmarks.load_gt3d import gt_frame, pred_frame
 from auto3dlabel.configs.kitti import KITTI_EVAL_CLASSES
 from auto3dlabel.schema.box3d import KittiFrame

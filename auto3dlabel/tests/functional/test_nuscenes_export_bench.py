@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from auto3dlabel.benchmarks.nuscenes_benchmark import nus_iou, nuscenes_ap, run_nuscenes_benchmark
 from auto3dlabel.export.nuscenes_json import (
     build_submission_json,
@@ -61,6 +62,23 @@ def test_run_benchmark_distance_bins() -> None:
     assert result["distance"]["0-25m"]["car"]["ap"] == 1.0
     assert result["distance"]["25-50m"]["car"]["ap"] == 0.0
     assert 0.0 <= result["mAP"] <= 1.0
+
+
+def test_run_benchmark_distance_bins_ego_relative() -> None:
+    """距离分桶相对自车（egos）：全局 x=40 目标距 ego(30,0) 仅 10m → 落 0-25m 桶。
+
+    缺省 egos 相对全局原点（nus city 系目标距原点常 >500m，全落桶外）——
+    两者在此用例下分桶相反，同时断言锁定口径。
+    """
+    gt = {"s0": [_box(x=40.0)]}
+    pred = {"s0": [_box(x=40.0)]}
+    result = run_nuscenes_benchmark(gt, pred, egos={"s0": (30.0, 0.0)})
+    assert result["overall"]["car"]["ap"] == 1.0
+    assert result["distance"]["0-25m"]["car"]["ap"] == 1.0  # 相对原点 40m 会错落 25-50m
+    assert result["distance"]["0-25m"]["car"]["gt_count"] == 1
+    assert result["distance"]["25-50m"]["car"]["ap"] == 0.0
+    origin_rel = run_nuscenes_benchmark(gt, pred)  # 缺省 egos = 全局原点
+    assert origin_rel["distance"]["25-50m"]["car"]["ap"] == 1.0
 
 
 def test_build_and_validate_submission() -> None:

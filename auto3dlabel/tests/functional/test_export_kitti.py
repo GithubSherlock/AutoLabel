@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+
 from auto3dlabel.configs.kitti import COCO_TO_KITTI
 from auto3dlabel.export.kitti_label import build_label_file, line_from_box3d
 from auto3dlabel.schema.box3d import Box3D

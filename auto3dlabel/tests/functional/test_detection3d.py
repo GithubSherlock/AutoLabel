@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 
 import pytest
+
 from auto3dlabel.configs.kitti import (
     DETECTOR3D_NAMES,
     MMDET3D_CONFIG_DIR,

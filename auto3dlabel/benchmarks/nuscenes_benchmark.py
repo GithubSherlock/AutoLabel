@@ -48,9 +48,13 @@ def nus_iou(a: NusBox, b: NusBox) -> float:
     return float(inter / union) if union > 0 else 0.0
 
 
-def _distance(box: NusBox) -> float:
-    """全局系 x-y 平面到自车（原点）距离（官方 distance 口径）。"""
-    return float(np.hypot(box.translation[0], box.translation[1]))
+def _distance(box: NusBox, ego: tuple[float, float] = (0.0, 0.0)) -> float:
+    """全局系 x-y 平面到自车位置的距离（官方 distance 口径；ego 缺省 = 原点）。
+
+    注意：nus 全局坐标是 city 系（目标距原点常 >500m）——相对全局原点分桶无意义，
+    必须传 ego 位置（run_nuscenes_benchmark 的 egos 参数）。
+    """
+    return float(np.hypot(box.translation[0] - ego[0], box.translation[1] - ego[1]))
 
 
 def nuscenes_ap(
@@ -109,9 +113,12 @@ def run_nuscenes_benchmark(
     gt: dict[str, list[NusBox]],
     pred: dict[str, list[NusBox]],
     class_names: list[str] | None = None,
+    egos: dict[str, tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
     """{sample_token: [NusBox]} → {overall: {class: {ap}}, distance: {bin: {class: {ap}}}, mAP}。
 
+    egos: {sample_token: (ego_x, ego_y)}——距离分桶相对**自车**（官方 distance 口径；
+    缺省相对全局原点，仅在坐标近原点的合成测试下等价）。overall 不受 egos 影响。
     简化口径（见模块 docstring）：与官方 val 全量数字不可直接对等，记录对照仅供参考。
     """
     classes = class_names or NUSCENES_CLASSES
@@ -124,8 +131,14 @@ def run_nuscenes_benchmark(
 
     by_bin: dict[str, dict[str, dict[str, Any]]] = {}
     for lo, hi in DISTANCE_BINS:
-        gt_bin = [b for b in all_gt if lo <= _distance(b) < hi]
-        pred_bin = [b for b in all_pred if lo <= _distance(b) < hi]
+        gt_bin: list[NusBox] = []
+        pred_bin: list[NusBox] = []
+        for token, boxes in gt.items():
+            ego = egos[token] if egos and token in egos else (0.0, 0.0)
+            gt_bin += [b for b in boxes if lo <= _distance(b, ego) < hi]
+            pred_bin += [
+                b for b in pred.get(token, []) if lo <= _distance(b, ego) < hi
+            ]
         by_bin[f"{lo}-{hi}m"] = {
             cls: nuscenes_ap(gt_bin, pred_bin, cls) for cls in classes
         }
