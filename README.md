@@ -1,14 +1,14 @@
 <p align="center">
   <h1 align="center">AutoLabel</h1>
-  <p align="center"><strong>Agentic 2D Image Annotation — AI-first, Human-in-the-loop</strong></p>
-  <p align="center">自然语言驱动 · LLM Agent 编排 · 多模型引擎 · 多格式导出</p>
+  <p align="center"><strong>Agentic 2D/3D Data Annotation — AI-first, Human-in-the-loop</strong></p>
+  <p align="center">自然语言驱动 · LLM Agent 编排 · 多模型引擎 · 代码级质量评估 · 多格式导出</p>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-%3E%3D3.10-blue" alt="Python >=3.10">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License MIT">
   <img src="https://img.shields.io/badge/models-84%2B-orange" alt="84+ Models">
-  <img src="https://img.shields.io/badge/version-0.3.0-informational" alt="Version 0.3.0">
+  <img src="https://img.shields.io/badge/version-0.5.0-informational" alt="Version 0.5.0">
 </p>
 
 ---
@@ -61,25 +61,28 @@
 
 | 子项目 | 状态 | 说明 |
 | --- | --- | --- |
-| **auto2dlabel** | ✅ v0.3 完成 | 2D 检测 + 分割 + 分类（CLIP/SigLIP/torchvision）+ OBB + NL 交互 + Web 审核 |
-| **auto3dlabel** | 📋 待实现 | 3D 点云标注（占位） |
+| **auto2dlabel** | ✅ v0.1–v0.5 完成，v0.6 📋 | 2D 检测/分割/分类/OBB + Tracking + Pose + VLM 指代 + Web 审核闭环，84 模型 |
+| **auto3dlabel** | ✅ v0.1–v0.2 完成，v0.3 📋 | 3D 标注：LiDAR 直检（mmdet3d PointPillars）+ 反投影拟合回退引擎 + 多帧跟踪 + nuScenes |
 
 ---
 
 ## 特性
 
-- **🗣️ 自然语言交互** — `chat` 命令支持中英文自然语言描述标注任务，LLM 自动提取参数（类别、阈值、模型），缺失参数交互追问
-- **🧠 Agentic 编排** — LLM Agent 规划多步任务（检测 → 分割 → 导出），自动调用工具，token 高效设计（结果摘要注入，避免全量 bbox 回传）
-- **🔧 3 引擎 × 84+ 模型** — Grounding DINO（开放词汇）、Ultralytics YOLO（YOLO11/12/26 + RT-DETR）、PyTorch Vision（Faster R-CNN/RetinaNet/SSD/FCOS）；分割支持 SAM/SAM2/SAM3/Mask R-CNN（含 cityscapes 域内权重）/FastSAM/torchvision 语义分割（FCN/DeepLabV3/LRASPP）；分类 CLIP/SigLIP/torchvision ImageNet1K（convnext/maxvit/swin/efficientnet/vit/resnet/resnext）；OBB YOLO-OBB 11/12/26（n/s/m/l/x）
-- **✅ HITL 置信度分流** — 三档阈值：高置信（≥0.7）直接接受 / 中置信（0.3–0.7）待人工审核 / 低置信（<0.3）难例队列
-- **📦 多格式导出** — COCO JSON / YOLO txt / Pascal VOC XML / LabelMe JSON / cls JSON / DOTA / YOLO-OBB txt，已通过 round-trip 测试（坐标误差 < 1e-3）
+- **🗣️ 自然语言交互** — `chat` 命令支持中英文自然语言描述标注任务，LLM 自动提取参数（类别、阈值、模型），缺失参数交互追问（v0.6 升级为 LLM 多轮对话确定参数）
+- **🧠 Agentic 编排** — LLM Agent 规划多步任务（检测 → 分割 → 导出），自动调用工具，token 高效设计（结果摘要注入）；F4 代码级质量评估（0 框重试/类别覆盖/超框警告）+ 不合格时条件触发 LLM Evaluate（accept / flag / retry / 换模型）
+- **🔧 3 引擎 × 84+ 模型** — Grounding DINO（开放词汇）、Ultralytics YOLO（YOLO11/12/26 + RT-DETR + YOLO-pose）、PyTorch Vision（Faster R-CNN/RetinaNet/SSD/FCOS）；分割支持 SAM/SAM2/SAM3/Mask R-CNN（含 cityscapes 域内权重）/FastSAM/torchvision 语义分割（FCN/DeepLabV3/LRASPP）；分类 CLIP/SigLIP/torchvision ImageNet1K（convnext/maxvit/swin/efficientnet/vit/resnet/resnext）；OBB YOLO-OBB 11/12/26（n/s/m/l/x）
+- **✅ HITL 置信度分流** — 三档阈值自动分流 + Web 复核队列（人工修正回流）+ 主动学习采样；低置信与质量不合格项强制入复核
+- **📦 多格式导出** — COCO JSON / YOLO txt / Pascal VOC XML / LabelMe JSON / cls JSON / DOTA / YOLO-OBB txt / MOT / COCO keypoints（Pose），已通过 round-trip 测试（坐标误差 < 1e-3）
 - **🖼️ 零样本图像分类** — CLIP/SigLIP 多候选 softmax 排序取 top-K，`Annotation.labels` + cls JSON 导出
 - **📐 OBB 旋转框** — YOLO-OBB 15 枚（yolo11/12/26 n/s/m/l/x），`Bbox.angle` 弧度约定，DOTA 8 角点 / YOLO-OBB txt 导出，旋转多边形可视化
-- **🔁 Batch 韧性 + 主动学习** — 单图失败隔离不中断整批 + `--resume` 断点续跑；`sample` 按不确定性排序聚合审核队列
+- **🎥 Tracking** — 视频/帧目录逐帧检测 + ByteTrack（默认）/ BoT-SORT（精度档，ReID + ECC），MOT 导出 + 轨迹可视化；指代约束 L1（属性+方位）/ L2（Florence-2）/ L3（Qwen2-VL-7B）阶梯
+- **💀 Pose** — YOLO-pose 关键点检测，COCO keypoints 导出
+- **🔁 Batch 韧性 + 动态调优** — 单图失败隔离 + `--resume` 断点续跑（AgentState 快照）；批量推理动态实测最大 batch 用满 GPU（parity 双铁律：rect=False + TF32 关闭）；`sample` 按不确定性排序聚合审核队列
 - **⚡ `--no-llm` Baseline** — 绕过 LLM Agent，使用内置关键词映射直调检测模型，用于对比实验和离线场景
 - **🔍 自动类别推荐** — 扫描全图 80 个 COCO 类别，按检出数量和置信度排序推荐 Top-K 类别
-- **🌐 Web 审核界面** — FastAPI + Canvas SPA，支持模型选择、标注可视化、mask Canvas 叠加、结果筛选删除、复核队列（人工修正回流）、COCO JSON / 可视化下载
-- **📊 Benchmark 套件** — 覆盖 COCO 2017 / VOC 2007 / KITTI / Cityscapes / nuImages / DOTA / D2SA / MOT17 / MOT20 共 9 个数据集，支持检测、分割与旋转框评测
+- **🌐 Web 审核界面** — FastAPI + Canvas SPA（CVAT 借鉴：快捷键/undo/手柄/过滤/区域 issue），mask 叠加 + 复核队列 + edited_by_human 数据回路 + COCO JSON / 可视化下载
+- **📊 Benchmark 套件** — 覆盖 12 数据集（COCO/VOC2007/KITTI/Cityscapes/nuImages/DOTA/DOTA-OBB/D2SA/MOT17/MOT20/coco_seg/ImageNet100 + ILSVRC2012），检测/分割/分类/OBB 全任务评测，一键 `run_benchmarks.sh`
+- **🧊 3D 标注（auto3dlabel）** — LiDAR 直检（mmdet3d PointPillars，KITTI 全 val Car moderate 82.0 超官方）+ 反投影拟合开放词汇回退引擎 + Tracker3D 多帧 ID/速度 + KITTI/nuScenes 导出 + 3D/BEV IoU 评测
 - **📝 结构化日志** — 每次调用的完整 JSON 日志（LLM/Chat/PythonAPI），可复现、可审计
 
 ---
@@ -95,8 +98,9 @@
 ### 1. 安装
 
 ```bash
-# 方式一：交互式安装脚本
+# 方式一：交互式安装脚本（2d / 3d）
 bash install_libs.sh 2d
+bash install_libs.sh 3d      # 含 mmdet3d/mmcv 硬装（CUDA 13 编译，--no-deps 红线）
 
 # 方式二：手动安装
 pip install -r auto2dlabel/requirements.txt
@@ -209,11 +213,12 @@ auto2dlabel chat
 启动 Web 服务，在浏览器中审核和修正标注结果：
 
 ```bash
-python -m auto2dlabel.web.server
+python -m auto2dlabel.web.server       # 2D 复核
+REVIEW3D_DIR=outputs/<dir>/reviews python3 -m auto3dlabel.web.server  # 3D 复核
 # 访问 http://localhost:8765
 ```
 
-功能：上传图片 → 选择检测/分割模型 → 调整阈值 → 自动标注 → Canvas 可视化 → 点击删除误检 → 下载 COCO JSON。
+功能：上传图片 → 选择检测/分割模型 → 调整阈值 → 自动标注 → Canvas 可视化（mask 叠加）→ 快捷键/undo/拖拽手柄编辑 → 复核队列（人工修正回流）→ 下载 COCO JSON。
 
 ### Python API
 
@@ -246,20 +251,21 @@ bash auto2dlabel/benchmarks/run_benchmarks.sh classification   # 分类组（ima
 # 仅 CPU 时检测/分割全组加 --extra "--model yolo11n.pt"（默认 yolo26x 超 run_all 超时）
 ```
 
-**实际 Benchmark 结果（2026-08-06）**：
+**实际 Benchmark 结果（精选，完整实测见 `auto2dlabel/tests/test-v0.X.md`）**：
 
 | 数据集 | 模型 | 指标 | 值 |
 | --- | --- | --- | --- |
-| COCO 2017 val (50 imgs) | yolov8x（历史值，模型已移除） | mAP@0.5 | 0.453 |
+| COCO 2017 val | yolo26x（GPU 复测 +0.20） | mAP@0.5 | 0.65+ |
 | VOC 2007 (100 imgs) | yolo26x | mAP@0.5 | 0.592 |
 | KITTI | yolo26x | mAP@0.5 | 0.441 |
-| COCO seg (50 imgs) | yolov8x + FastSAM-s（历史值，模型已移除） | mask mAP | 0.500 |
-| Cityscapes seg | FastSAM-s | mask mAP | 0.007* |
-| nuImages | yolo26x + FastSAM | mAP | 0.383 |
+| DOTA Task1 OBB | yolo11n-obb | mAP@0.5 | 0.7047（批量/逐图一致 0.8397，parity 修复后） |
+| COCO seg (50 imgs) | yolo26x + **sam2_l**（默认分割模型） | mask mAP | 0.6368 |
+| Cityscapes seg | **maskrcnn_r50_cityscapes**（域内权重） | mask mAP | **0.5149**（基线 0.0082，62.8×） |
+| ILSVRC2012 val（5 万图） | ImageNet1K 监督 | top-1 / top-5 | 0.6968 / 0.8899 |
+| MOT17+MOT20 | yolo26x + ByteTrack | MOTA / IDF1 | 域边界：检测 recall 瓶颈（详见 test-v0.3/0.4） |
+| KITTI 3D（auto3dlabel） | pointpillars_kitti（mmdet3d） | Car 官方口径 easy/moderate/hard | **89.8 / 82.0 / 77.2**（moderate 超官方 77.6） |
 
-> \* Cityscapes 分数极低是因为 FastSAM 对该数据域过度分割，需换用 SAM3。
-
-分类基准 ImageNet100 已就绪（top-1/top-5；纯 CPU 全量可行性验证见 `auto2dlabel/tests/test-v0.3.md`），ILSVRC2012 val 规划中——模块划分、缺口与程序规范见 `docs/Benchmark_plan.md`，数据集就绪状态见 `docs/datasets_plan.md`。
+模块划分、缺口与程序规范见 `docs/Benchmark_plan.md`，数据集就绪状态见 `docs/datasets_plan.md`。
 
 ### 测试
 
@@ -292,15 +298,16 @@ pytest auto2dlabel/tests/ -v
 | 开放词汇 | `IDEA-Research/grounding-dino-tiny` | 无需预设类别，中文 prompt 直译后使用 |
 | 卫星/航拍 | `yolo11n-obb.pt` | OBB 旋转框（v0.3 已支持） |
 
-### 分割模型（23 个）
+### 分割模型（24 个）
 
 | 模型 | 引擎 | 权重 | 特点 |
 | --- | --- | --- | --- |
 | **SAM3** | Ultralytics (Meta) | ~3.4GB | 文本 prompt → 检测+分割一步，开放词汇，**最强** |
-| **SAM 2.1** | Ultralytics (Meta) | 自动下载 | bbox prompt → mask，精度高 |
+| **SAM 2 / 2.1** | Ultralytics (Meta) | 自动下载 | bbox prompt → mask，精度高；`sam2_l.pt` 为**默认分割模型** |
 | **SAM** | Ultralytics (Meta) | ~160MB | bbox prompt → mask，轻量快速 |
 | **FastSAM** | Ultralytics | ~140MB | bbox IoU 匹配，最轻量 |
 | **Mask R-CNN** | torchvision | 自动下载 | COCO 预训练，检测+分割一步 |
+| **Mask R-CNN cityscapes** | torchvision（mmdet 权重转换） | 需转换 | **域内权重**：cityscapes 全量 mask mAP 0.5149（基线 0.0082） |
 | **torchvision 语义分割** | torchvision | 自动下载 | FCN×2 / DeepLabV3×3 / LRASPP×1，VOC 21 类全图分割（每类一个 mask） |
 
 **实测对比（000860.png，"car + person"，conf=0.1）**：
@@ -347,44 +354,38 @@ pytest auto2dlabel/tests/ -v
 
 ```txt
 AutoLabel/
-├── auto2dlabel/                  # 主包
-│   ├── cli.py                    # CLI 入口（Typer）
+├── auto2dlabel/                  # 2D 标注主体（v0.1–v0.5 ✅，v0.6 📋）
+│   ├── cli.py                    # CLI 入口（Typer，业务逻辑在 cli_*.py）
 │   ├── agent/                    # Agentic 编排层
-│   │   ├── orchestrator.py       # Agent Loop 编排器
+│   │   ├── orchestrator.py       # Agent Loop 编排器（run 命令）
 │   │   ├── planner.py            # NL 任务规划器（chat 命令）
 │   │   ├── llm.py                # LLM 客户端（DeepSeek/OpenAI/Anthropic）
-│   │   └── state.py              # Agent 状态管理
-│   ├── tools/                    # 工具层
-│   │   ├── detection.py          # 检测工具
-│   │   ├── segmentation.py       # 分割工具
-│   │   ├── export.py             # 导出工具
-│   │   ├── recommend.py          # 类别推荐
-│   │   ├── hitl.py               # HITL 置信度分流
-│   │   ├── batch.py              # batch 清单 / --resume
-│   │   ├── evaluate.py           # LLM Evaluate 工具（不进 registry）
-│   │   ├── sampling.py           # 主动学习采样
-│   │   ├── visualize.py          # 可视化
-│   │   ├── log.py                # 结构化日志
-│   │   └── confirm.py            # 交互确认
-│   ├── models/                   # 模型层
-│   │   ├── model_catalog.py      # 模型目录（29 检测 + 23 分割 + 16 分类 + 15 OBB）
-│   │   ├── detection.py          # 检测模型工厂
-│   │   ├── segmentation.py       # 分割模型工厂
-│   │   ├── classification.py     # 分类模型（CLIP/SigLIP/torchvision）
-│   │   └── obb.py                # OBB 模型（YOLO-OBB）
-│   ├── schema/                   # 数据 Schema
-│   │   ├── annotation.py         # Bbox / Mask / ImageLabel / Annotation
-│   │   └── task_plan.py          # 任务计划
-│   ├── export/                   # 导出器（COCO / YOLO / VOC / LabelMe / cls / DOTA / YOLO-OBB）
-│   ├── web/                      # Web 审核界面（FastAPI + Canvas，mask 叠加 + 复核队列）
-│   ├── benchmarks/               # Benchmark 套件（9 数据集）
-│   ├── milestone/                # 里程碑定义
+│   │   ├── evaluate.py           # F4 代码级质量评估 + 处置动作
+│   │   ├── batch_strategy.py     # 批次级 LLM 调参（每批 1 次）
+│   │   └── state.py              # Agent 状态管理（快照续跑）
+│   ├── tools/                    # 工具层（detection/segmentation/classification/obb/
+│   │                             #   tracking/constraints/refer/export/recommend/hitl/
+│   │                             #   batch/device/evaluate/sampling/visualize/log/confirm）
+│   ├── models/                   # 模型层（model_catalog 84 模型单一事实源）
+│   ├── schema/                   # 数据 Schema（Bbox/Mask/Annotation/TaskPlan）
+│   ├── export/                   # 导出器（COCO/YOLO/VOC/LabelMe/cls/DOTA/YOLO-OBB/MOT/keypoints）
+│   ├── web/                      # Web 审核界面（FastAPI + Canvas SPA，CVAT 借鉴交互）
+│   ├── benchmarks/               # Benchmark 套件（12 数据集 + run_benchmarks.sh）
+│   ├── milestone/ tests/         # 里程碑定义 + 实测数据
 │   ├── configs/.env              # 配置文件
-│   └── weights/                  # 模型权重目录
-├── auto3dlabel/                  # 3D 标注（待实现）
-├── auto2dlabel/tests/            # 测试（functional/ 用例 + helpers/ 工具）
-├── AutoLabel_plan.md             # 项目设计文档
-├── install_libs.sh               # 安装脚本
+│   └── weights/                  # 模型权重目录（不入库）
+├── auto3dlabel/                  # 3D 标注主体（v0.1–v0.2 ✅，v0.3 📋）
+│   ├── cli.py                    # CLI：run / chat（代码级直跑 + LLM 闭环）
+│   ├── models/detection3d.py     # LiDAR 3D 检测器（mmdet3d：pointpillars 等）
+│   ├── tools/                    # backproject/cluster/fit/geometry/pipeline/track3d
+│   ├── data/ schema/ export/     # KITTI/nuScenes 数据、Box3D/NusBox、label 导出
+│   ├── agent/                    # orchestrator3d / planner3d / tools3d
+│   ├── benchmarks/               # KITTI 双口径（官方 40-point）+ nuScenes 评测
+│   ├── web/                      # 3D 复核（复用 2D 四端点协议）
+│   ├── milestone/ tests/         # 里程碑定义 + 实测数据
+│   └── weights/                  # mmdet3d 权重 + configs（不入库）
+├── docs/                         # 计划书 / Benchmark 规范 / 数据集计划
+├── install_libs.sh               # 安装脚本（2d / 3d）
 └── pyproject.toml                # 项目配置
 ```
 
@@ -394,13 +395,16 @@ AutoLabel/
 
 | 版本 | 状态 | 内容 |
 | --- | --- | --- |
-| **v0.1a** | ✅ 完成 | Object Detection + 3 引擎 × 47 模型 → COCO/YOLO/VOC 导出 + Agent Loop |
-| **v0.1b** | ✅ 完成 | Instance Segmentation（SAM/SAM2/Mask R-CNN/FastSAM）+ `chat` 命令 |
-| **v0.1c** | ✅ 完成 | HITL 置信度分流 + `--no-llm` Baseline + Round-trip 测试 + LLM 价值量化实验 |
-| **v0.2** | ✅ 完成 | SAM3 + 类别推荐 + Web 审核界面（FastAPI + Canvas） |
-| **v0.3** | ✅ 完成 | 分类（CLIP/SigLIP/torchvision）+ OBB（YOLO-OBB）+ M2 mask 叠加/复核队列闭环 + M3 Evaluate 节点/batch 续跑/主动学习采样 |
-| **v0.4** | 📋 计划中 | Pose Estimation（ViTPose/RTMPose） |
-| **v1.0** | 📋 计划中 | Object Tracking（视频时序）+ 3D 点云（auto3dlabel） |
+| **v0.1–v0.2** | ✅ 完成 | 检测 + 分割 + 分类 + OBB + Web 审核 + Agentic 闭环 |
+| **v0.3** | ✅ 完成 | 分类（CLIP/SigLIP/torchvision）+ OBB（YOLO-OBB）+ F4 质量评估 + LLM Evaluate + batch 动态调优 + cityscapes 域内权重 + 12 数据集 Benchmark（84 模型） |
+| **v0.4** | ✅ 完成 | Tracking（ByteTrack/BoT-SORT + ReID + 指代 L1）+ KITTI 域内微调 + AgentState 续跑 + Web 三件套 |
+| **v0.5** | ✅ 完成 | Pose（YOLO-pose）+ 指代 L2/L3（Florence-2/Qwen2-VL-7B）+ 自动车道 ROI + ILSVRC2012（top-1 0.6968）+ KITTI 微调闭环（0.8867） |
+| **v0.6** | 📋 立项 2026-08-28 | 对话式 Agent 统一入口（chat 唯一入口 + LLM 多轮对话确定参数） |
+| **auto3dlabel v0.1** | ✅ 2026-08-24 | 单帧 KITTI 五步管线（标定→反投影→聚类→拟合）+ Agentic/Web 闭环 |
+| **auto3dlabel v0.2** | ✅ 2026-08-27 | mmdet3d PointPillars（KITTI Car moderate 82.0 超官方）+ Tracker3D + nuScenes Mini |
+| **auto3dlabel v0.3** | 📋 立项 2026-08-28 | 对话式 Planner → PV-RCNN/CenterPoint 精度 → BEVFusion 融合 → Web 真 3D 复核 → LabelAny3D 验证 |
+
+详细里程碑与实测数据见各包 `milestone/` 与 `tests/test-v0.X.md`。
 
 ---
 
@@ -408,11 +412,13 @@ AutoLabel/
 
 我们诚实地记录当前版本的限制和设计取舍：
 
-- **Batch 仍为串行循环**：单图失败已隔离（不中断整批）、支持 `--resume` 断点续跑，但无并发处理；checkpoint 仅写 `to_dict` 快照，`from_dict` 恢复未实现
-- **OBB 只支持 YOLO-OBB**：Oriented R-CNN 因 mmrotate 依赖重延后；DOTA Task1 旋转 GT 评测挂起（`rotate_iou` 指标已就绪，GT 归档未验证到）
-- **Web 审核无拖拽编辑**：bbox 拖拽/标签编辑、分类与 OBB 结果的 Web 展示列入后续版本
+- **域边界是硬约束**：COCO 预训练模型在特定域（MOT 密集行人、DOTA 航拍、cityscapes 小目标）精度低，GPU 复测定性为数据域边界（规模/SAHI/架构均无效）——出路是**域内微调回采闭环**（cityscapes 0.0082→0.5149、KITTI 0.8867 两例已闭环）
+- **OBB 只支持 YOLO-OBB**：Oriented R-CNN 因 mmrotate 依赖重延后（取舍注记见计划书）
 - **Benchmark 路径硬编码**：数据集路径指向 AutoDL 服务器特定目录（`~/autodl-tmp/Documents/datasets`、`/root/autodl-pub`），在其他环境需手动修改
 - **LLM 在单任务中边际价值有限**：v0.1c 实验表明，在单一检测任务上 LLM Agent 与 `--no-llm` 结果相同，LLM 的价值体现在多任务编排、模糊指令处理、异常处理等场景
+- **auto3dlabel 依赖 mmdet3d 硬装**：mmcv 2.1.0 需 CUDA 13 源码编译（`install_libs.sh 3d`），无 GPU 环境无法启用 LiDAR 直检引擎（反投影拟合引擎仍可 CPU 跑）
+- **3D 反投影拟合路线精度天花板**：v0.1 实证 3D AP 近零——已用 LiDAR 直检引擎（moderate 82.0）为主，反投影仅作开放词汇回退
+- **nuScenes 数据非商用**：KITTI/nuScenes 均为 CC BY-NC-SA 许可，商业化需自采/商用许可数据
 - **API Key 安全**：`auto2dlabel/configs/.env` 中硬编码了默认 API Key，公开使用时请注意替换为环境变量
 
 ---
