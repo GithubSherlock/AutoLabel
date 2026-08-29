@@ -7,6 +7,7 @@ mmdet3d 未装状态下全绿是设计目标（ImportError 守卫在 _load）；
 from __future__ import annotations
 
 import importlib.util
+from typing import Any
 
 import pytest
 
@@ -19,6 +20,7 @@ from auto3dlabel.configs.kitti import (
 from auto3dlabel.models.detection3d import (
     Det3DResult,
     Mmdet3dDetector,
+    _init_model_trusted,
     create_detector3d,
 )
 
@@ -58,6 +60,14 @@ def test_create_detector3d_routing() -> None:
     assert det._config_path == str(MMDET3D_CONFIG_DIR / entry["config"])
     # 零加载：config/权重文件不存在也不抛（存在性延迟到 _load，缺权重时抛给调用方兜底）
     assert isinstance(create_detector3d("centerpoint_nus"), Mmdet3dDetector)
+    # v0.3 P2：pvrcnn_kitti 路由（照 centerpoint_nus 既有断言模式）
+    det_pv = create_detector3d("pvrcnn_kitti")
+    assert isinstance(det_pv, Mmdet3dDetector)
+    entry_pv = DETECTOR3D_NAMES["pvrcnn_kitti"]
+    assert det_pv._checkpoint_path == str(
+        WEIGHTS_DIR / entry_pv["weights_dir"] / entry_pv["checkpoint"]
+    )
+    assert det_pv._config_path == str(MMDET3D_CONFIG_DIR / entry_pv["config"])
 
 
 @pytest.mark.skipif(MMDET3D_INSTALLED, reason="mmdet3d 已装，守卫路径跳过")
@@ -66,6 +76,40 @@ def test_detector3d_load_guard_import() -> None:
     det = Mmdet3dDetector("missing_config.py", "missing.pth")
     with pytest.raises(ImportError):
         det._load()
+
+
+@pytest.mark.skipif(not MMDET3D_INSTALLED, reason="需 mmdet3d 注入 fake init_model")
+def test_init_model_trusted_scoped_patch(monkeypatch: Any) -> None:
+    """v0.3 P2 回归：torch 2.6+ weights_only 兼容 patch 的作用域契约。
+
+    patch 仅覆盖 init_model 调用期（调用期内 torch.load 被替换、
+    weights_only 默认 False），返回/异常两条路径都恢复原函数——
+    进程内其他 checkpoint 加载路径零影响。零真实权重（fake init_model）。
+    """
+    import torch
+
+    orig_load = torch.load
+    calls: list[str] = []
+
+    def _fake_init_model(
+        config: Any = None, checkpoint: Any = None, device: str = "cuda:0"
+    ) -> str:
+        calls.append(device)
+        assert torch.load is not orig_load  # 调用期内已 patch
+        return "fake-model"
+
+    monkeypatch.setattr("mmdet3d.apis.init_model", _fake_init_model)
+    assert _init_model_trusted("cfg.py", "ckpt.pth", "cuda:0") == "fake-model"
+    assert calls == ["cuda:0"]
+    assert torch.load is orig_load  # 正常路径恢复
+
+    def _boom(config: Any = None, checkpoint: Any = None, device: str = "cuda:0") -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("mmdet3d.apis.init_model", _boom)
+    with pytest.raises(RuntimeError):
+        _init_model_trusted("cfg.py", "ckpt.pth", "cpu")
+    assert torch.load is orig_load  # 异常路径也恢复
 
 
 def test_prompts_to_kitti_labels() -> None:

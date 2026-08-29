@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import time
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -316,7 +317,7 @@ def run(
             "-d",
             help=(
                 "检测模型：2D（kitti_finetune/gdino…）或 3D LiDAR"
-                "（pointpillars_kitti/pointpillars_nus/centerpoint_nus）"
+                "（pointpillars_kitti/pvrcnn_kitti/pointpillars_nus/centerpoint_nus）"
             ),
         ),
     ] = None,
@@ -417,9 +418,16 @@ def chat(
     max_iterations: Annotated[
         int, typer.Option("--max-iterations", help="Agent Loop 最大迭代")
     ] = 3,
+    timeout: Annotated[
+        int, typer.Option("--timeout", help="对话等待秒数（0 = 不等待）")
+    ] = 30,
+    no_wait: Annotated[
+        bool, typer.Option("--no-wait", help="跳过对话，缺参直接报错（等价 --timeout 0）")
+    ] = False,
 ) -> None:
     """LLM Agent 闭环：planner 解析 → 3D agent loop → 质量评估 → HITL 三档 → 导出。"""
     _require_auto2dlabel()
+    from auto2dlabel.agent.dialog import ask_questions
     from auto2dlabel.agent.llm import create_client
     from auto3dlabel.agent.orchestrator3d import run_3d_agent
     from auto3dlabel.agent.planner3d import TaskPlanner3D
@@ -432,7 +440,18 @@ def chat(
     print_device()  # 设备横幅 + disable_tf32（批量/逐图确定性红线，幂等）
     client = create_client(provider=provider)
     planner = TaskPlanner3D(client)
-    plan = planner.parse(instruction)
+    wait = 0 if no_wait else timeout
+    # v0.3 P1 对话式解析：缺参多轮追问；异常降级单轮 parse（零行为回退）；
+    # 单轮仍失败 → 红字 + 退出（对齐 2D chat Step 2）
+    try:
+        plan = planner.parse_dialog(instruction, ask_fn=partial(ask_questions, timeout=wait))
+    except Exception as e:
+        console.print(f"[red]对话解析失败，降级单轮解析: {e}[/red]")
+        try:
+            plan = planner.parse(instruction)
+        except Exception as e2:
+            console.print(f"[red]解析失败: {e2}[/red]")
+            raise typer.Exit(code=1)
     console.print(f"[dim]plan: {plan.summary}[/dim]")
     if not plan.frame_id:
         raise typer.BadParameter("指令中未指定 KITTI 帧 ID")

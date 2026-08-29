@@ -68,3 +68,43 @@ NUSCENES_CATEGORY_MAP: dict[str, str | None] = {
 # 不实现官方 TP 指标，如实记录口径差异，见 benchmarks/nuscenes_benchmark.py）
 NUSCENES_IOU_THRESHOLD = 0.5
 DISTANCE_BINS = [(0, 25), (25, 50)]  # 简化分桶：近/中（官方 0-50m 四桶的降级）
+
+# nuScenes 6 相机通道（devkit 标准序，BEVFusion 多视角输入）
+NUSCENES_CAMERAS = (
+    "CAM_FRONT",
+    "CAM_FRONT_LEFT",
+    "CAM_FRONT_RIGHT",
+    "CAM_BACK",
+    "CAM_BACK_LEFT",
+    "CAM_BACK_RIGHT",
+)
+
+# ===== v0.3 P3：BEVFusion（mmdet3d projects/BEVFusion，nuScenes 简化评测） =====
+# config 位于 projects/BEVFusion/configs/（MMDET3D_CONFIG_DIR 内，custom_imports
+# 注册组件）；权重落 WEIGHTS_DIR/<weights_dir>/。**不进 DETECTOR3D_NAMES**：
+# detect(frame) 协议不兼容（detect_sample(sample, nusc, dataroot) 多模态协议）。
+BEVFUSION_NAMES = {
+    "bevfusion_nus": {
+        "config": (
+            "projects/BEVFusion/configs/"
+            "bevfusion_lidar-cam_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d.py"
+        ),
+        "checkpoint": (
+            "bevfusion_lidar-cam_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d"
+            "-5239b1af.pth"
+        ),
+        "weights_dir": "bevfusion_nus",
+    },
+    # lidar-only 备选（R3 降级链：融合 OOM/失败时切换）
+    "bevfusion_lidar_nus": {
+        "config": (
+            "projects/BEVFusion/configs/"
+            "bevfusion_lidar_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d.py"
+        ),
+        "checkpoint": (
+            "bevfusion_lidar_voxel0075_second_secfpn_8xb4-cyclic-20e_nus-3d"
+            "-2628f933.pth"
+        ),
+        "weights_dir": "bevfusion_lidar_nus",
+    },
+}

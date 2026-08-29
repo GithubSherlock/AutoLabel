@@ -1,15 +1,19 @@
 """3D 任务规划器：NL → Plan3D（照 auto2dlabel planner 模式：JSON 三级解析兜底）。
 
 三级解析：直接 JSON → ```json 代码块 → 正则找 { } 块（同 planner.py _parse_json_response）。
+v0.3 P1：对话式规划（parse_dialog）复用 auto2dlabel/agent/dialog.py 通用骨架。
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from auto2dlabel.agent import json
+from auto2dlabel.agent.dialog import parse_with_dialog
 from auto2dlabel.agent.llm import LLMClient
+from auto2dlabel.schema.task_plan import PlanQuestion
 from auto3dlabel.configs.kitti import DEFAULT_CONF, DEFAULT_DET_MODEL, DEFAULT_SEG_MODEL
 
 _PLANNER3D_SYSTEM_PROMPT = """You are a task planner for a KITTI 3D object annotation tool. \
@@ -35,11 +39,20 @@ Rules:
   IDEA-Research/grounding-dino-tiny, kitti微调/kitti权重/kitti_yolo→kitti_finetune
   (a KITTI-finetuned YOLO).
   LiDAR 3D engines: pointpillars/点柱→pointpillars_kitti (KITTI),
+  pvrcnn/pv-rcnn/PV-RCNN→pvrcnn_kitti (KITTI),
   centerpoint→centerpoint_nus (nuScenes)
   (LiDAR-only detectors, no SAM needed).
   If user names a model ending with .pt or containing /, use it directly.
 - seg_model: SAM mask model. Default "sam2_l.pt". Map: sam/sam2→sam2_l.pt, \
 fastsam→FastSAM-s.pt, sam3→sam3.pt
+- questions: ONLY when key fields are missing (frame_id / prompts), e.g.
+  "questions": [{"id": "frame_id", "question": "要标注哪个 KITTI 帧？(如 000123)"}].
+  id = bare field name. questions MUST accompany the full JSON (missing fields left
+  empty/default). No questions when nothing is missing.
+- Dialog: next round user's answers are fed back as
+  "补充信息（用户在以下问题的回答，请据此更新 JSON）：" + "- [frame_id] <question>"
+  + "用户回答：<answers>". Then fill the previously-missing fields from the
+  answers and output empty/omit questions.
 - Only JSON. No other text."""
 
 
@@ -52,6 +65,7 @@ class Plan3D:
     confidence_threshold: float = DEFAULT_CONF
     det_model: str = DEFAULT_DET_MODEL
     seg_model: str = DEFAULT_SEG_MODEL
+    questions: list[PlanQuestion] = field(default_factory=list)  # v0.3 P1 对话问题
 
     @property
     def summary(self) -> str:
@@ -69,6 +83,8 @@ def _dict_to_plan3d(data: dict) -> Plan3D:
         confidence_threshold=float(data.get("confidence_threshold", DEFAULT_CONF)),
         det_model=str(data.get("det_model", DEFAULT_DET_MODEL)),
         seg_model=str(data.get("seg_model", DEFAULT_SEG_MODEL)),
+        # v0.3 P1 对话问题（致命点：LLM JSON → plan 走本函数）
+        questions=PlanQuestion.from_list(data.get("questions")),
     )
 
 
@@ -108,3 +124,24 @@ class TaskPlanner3D:
         if not response.content:
             raise ValueError("LLM 返回空响应，无法解析 3D 任务")
         return parse_plan3d_json(response.content)
+
+    def parse_dialog(
+        self,
+        instruction: str,
+        ask_fn: Callable[[list[PlanQuestion]], str],
+        max_rounds: int = 3,
+    ) -> Plan3D:
+        """多轮对话解析（v0.3 P1）：缺参（frame_id/prompts）→ questions → 收集 → 回喂。
+
+        复用 auto2dlabel/agent/dialog.py 通用骨架（2D v0.6 同源，复用不复制）；
+        轮次耗尽 / 用户放弃 → 返回缺参 plan（3D cli 保持 BadParameter 兜底）；
+        LLM 响应非法 / 空响应 → ValueError 传播（调用方降级链处理）。
+        """
+        return parse_with_dialog(
+            llm=self.llm,
+            system_prompt=_PLANNER3D_SYSTEM_PROMPT,
+            parse_fn=parse_plan3d_json,
+            ask_fn=ask_fn,
+            instruction=instruction,
+            max_rounds=max_rounds,
+        )

@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import sys
 import threading
-from typing import Callable
 
 
 class ConfirmResult:
@@ -39,7 +37,10 @@ def ask_with_timeout(
         return ConfirmResult(confirmed=True)
 
     print(prompt)
-    print(f"\n[yellow]等待 {timeout} 秒后自动执行。回复 'cancel' 取消，或直接输入修改指令...[/yellow]")
+    print(
+        f"\n[yellow]等待 {timeout} 秒后自动执行。"
+        "回复 'cancel' 取消，或直接输入修改指令...[/yellow]"
+    )
 
     user_input: list[str | None] = [None]
     lock = threading.Lock()
@@ -78,6 +79,57 @@ def ask_with_timeout(
         # 用户输入了修改指令
         print(f"[dim]收到修改: {reply}[/dim]")
         return ConfirmResult(confirmed=True, user_input=reply)
+
+
+def ask_text(prompt: str, timeout: int = 30) -> str | None:
+    """收集用户自由文本回答（对话式规划用，v0.6）。
+
+    与 ask_with_timeout 的差异：**不解释确认/取消词典**——"ok"/"好"/"no" 等
+    一律按普通回答文本返回（对话阶段用户回答"好"不应被吞成确认）。
+    取消语义（cancel/取消/no/n / 超时 / 空回车 / EOF）→ None = 放弃对话，
+    由调用方走代码兜底（_fill_missing_params 等），与 --no-wait 语义一致。
+
+    Returns:
+        用户输入文本（strip 后），或 None 表示放弃对话。
+    """
+    if timeout <= 0:
+        print(prompt)
+        print("[auto] --no-wait 模式，跳过对话，使用计划默认值。")
+        return None
+
+    print(prompt)
+    print(
+        f"\n[yellow]等待 {timeout} 秒后跳过对话。"
+        "回复 'cancel' 放弃补充，或直接输入回答...[/yellow]"
+    )
+
+    user_input: list[str | None] = [None]
+    lock = threading.Lock()
+
+    def _read_input() -> None:
+        try:
+            inp = input("> ").strip()
+            with lock:
+                user_input[0] = inp if inp else None
+        except (EOFError, KeyboardInterrupt):
+            with lock:
+                user_input[0] = None
+
+    reader = threading.Thread(target=_read_input, daemon=True)
+    reader.start()
+    reader.join(timeout=timeout)
+
+    with lock:
+        reply = user_input[0]
+
+    if reader.is_alive():
+        # 超时
+        print(f"\n[dim]超时 {timeout}s，跳过对话，使用计划默认值...[/dim]")
+        return None
+    elif reply is None or reply.lower() in ("cancel", "c", "no", "n", "取消"):
+        print("[dim]跳过对话，使用计划默认值继续。[/dim]")
+        return None
+    return reply
 
 
 def ask_missing_params(

@@ -78,6 +78,15 @@ class LLMClient:
     ) -> LLMResponse:
         raise NotImplementedError
 
+    @property
+    def has_credentials(self) -> bool:
+        """是否有可用 API 凭据（v0.6「无 key 零影响」判定点）。
+
+        无 key 时调用方（chat 对话式解析、缺失参数回填）走代码级兜底，
+        零 LLM 调用；SDK 客户端不构造。
+        """
+        return bool(self.api_key)
+
 
 class OpenAIClient(LLMClient):
     """OpenAI 兼容 API 客户端。
@@ -276,9 +285,13 @@ def create_client(
         "deepseek": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
     }
 
-    # DeepSeek 自动从环境变量读取 key 和 base_url
+    # 各 provider 统一在创建时解析环境变量 key（v0.6「无 key 零影响」：
+    # has_credentials 判定必须与实际可用 key 同源——openai/anthropic 原在
+    # chat 时才读 env，会导致「判定无凭据走代码兜底」与「chat 时 env 注入
+    # 其实有 key」两个口径分叉）
+    api_key = api_key or os.environ.get(f"{provider.upper()}_API_KEY")
+    # DeepSeek 另需 base_url
     if provider == "deepseek":
-        api_key = api_key or os.environ.get("DEEPSEEK_API_KEY")
         base_url = base_url or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
     cls = providers.get(provider)

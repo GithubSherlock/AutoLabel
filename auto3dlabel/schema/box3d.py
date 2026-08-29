@@ -9,6 +9,8 @@
 6. tools/fit.fit_box3d（单一产出源）
 7. track_id（v0.2 P2）：tools/track3d.Tracker3D.update 回写 + to_dict 非 None 输出
    + cli --track3d 序列导出（KITTI label 15 字段不含，nuScenes instance_token 走 P3）
+8. web/payloads.frame_payload（v0.3 P4）：corners_cam 8x3 相机系角点 + load_points_bin
+   点云 → 四视图渲染数据（前端零 calib 依赖，yaw 数学留在 Python 侧）
 """
 
 from __future__ import annotations
@@ -159,6 +161,15 @@ class Box3D:
         )
 
 
+def load_points_bin(path: Path) -> np.ndarray:
+    """(N,4) float32 velodyne 点（x,y,z,intensity），剔除 NaN/Inf。
+
+    KittiFrame.load_points 与 web/payloads.frame_payload 共用（v0.3 P4 抽公共）。
+    """
+    pts = np.asarray(np.fromfile(path, dtype=np.float32)).reshape(-1, 4)
+    return np.asarray(pts[np.isfinite(pts).all(axis=1)])
+
+
 @dataclass
 class KittiFrame:
     """KITTI 单帧（路径容器 + 懒加载；frame_id 为 6 位零填充字符串）。"""
@@ -184,8 +195,7 @@ class KittiFrame:
 
     def load_points(self) -> np.ndarray:
         """(N,4) float32 velodyne 点（x,y,z,intensity），剔除 NaN/Inf。"""
-        pts = np.asarray(np.fromfile(self.velodyne_path, dtype=np.float32)).reshape(-1, 4)
-        return np.asarray(pts[np.isfinite(pts).all(axis=1)])
+        return load_points_bin(self.velodyne_path)
 
     def load_calib(self) -> KittiCalib:
         return KittiCalib.from_file(self.calib_path)

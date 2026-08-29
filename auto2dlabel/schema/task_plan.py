@@ -32,7 +32,8 @@ DEFAULT_TIMEOUT = 30
 BENCHMARK_DEFAULT_CONF = 0.3
 BENCHMARK_DEFAULT_IOU = 0.5
 BENCHMARK_DEFAULT_MODEL = "yolo26x.pt"
-BENCHMARK_DEFAULT_SEG_MODEL = "sam2_l.pt"  # GPU 复测：box-prompted 0.9278 vs FastSAM 0.4917（coco_seg）
+BENCHMARK_DEFAULT_SEG_MODEL = "sam2_l.pt"  # GPU 复测：box-prompted 0.9278 vs FastSAM
+# 0.4917（coco_seg）
 BENCHMARK_DEFAULT_MAX_IMAGES = 50
 
 # 可用数据集（用于 LLM prompt + 验证）
@@ -74,6 +75,39 @@ DATASET_CN_MAP: dict[str, str] = {
 
 # 必填参数集合
 REQUIRED_PARAMS = {"source", "prompts"}
+
+
+@dataclass
+class PlanQuestion:
+    """对话式规划问题（v0.6）：LLM 输出，代码只收集回答并回喂，不解释。
+
+    id 定位字段：2D 为 ``step{step_id}.{field}``（如 step1.source），
+    3D 为裸字段名（如 frame_id）。LLM 输出类型不稳定 → from_dict 强转 str。
+    """
+
+    id: str
+    question: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"id": self.id, "question": self.question}
+
+    @classmethod
+    def from_list(cls, raw: Any) -> list[PlanQuestion]:
+        """LLM 输出容错：非 list → []；非 dict 元素 / 空 question 跳过。
+
+        单一过滤入口（`_dict_to_plan` / `_dict_to_plan3d` 共用）。
+        """
+        if not isinstance(raw, list):
+            return []
+        questions: list[PlanQuestion] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            question = str(item.get("question", "")).strip()
+            if not question:
+                continue
+            questions.append(cls(id=str(item.get("id", "")), question=question))
+        return questions
 
 
 @dataclass
@@ -211,6 +245,8 @@ class TaskPlan:
     steps: list[TaskStep] = field(default_factory=list)
     confirm_timeout: int = DEFAULT_TIMEOUT  # 确认等待秒数
     raw_instruction: str = ""               # 原始用户指令
+    questions: list[PlanQuestion] = field(default_factory=list)  # v0.6 对话问题
+    dialog_context: str = ""  # v0.6 对话累积文本（Step 4 重解析用，不入 raw_instruction）
 
     @property
     def summary(self) -> str:
@@ -234,11 +270,17 @@ class TaskPlan:
         return {s.step_id: s.missing_params for s in self.steps if not s.is_complete}
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "steps": [s.to_dict() for s in self.steps],
             "confirm_timeout": self.confirm_timeout,
             "raw_instruction": self.raw_instruction,
         }
+        # 非空才输出（防 JSON 膨胀惯例同 edited_by_human）；旧消费者零破坏
+        if self.questions:
+            out["questions"] = [q.to_dict() for q in self.questions]
+        if self.dialog_context:
+            out["dialog_context"] = self.dialog_context
+        return out
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> TaskPlan:
@@ -246,6 +288,8 @@ class TaskPlan:
             steps=[TaskStep.from_dict(s) for s in d.get("steps", [])],
             confirm_timeout=d.get("confirm_timeout", DEFAULT_TIMEOUT),
             raw_instruction=d.get("raw_instruction", ""),
+            questions=PlanQuestion.from_list(d.get("questions")),
+            dialog_context=str(d.get("dialog_context", "")),
         )
 
 
@@ -261,7 +305,8 @@ class BenchmarkRequest:
     包含运行 benchmark 所需的全部参数。Chat 命令中缺失参数时追问用户。
     """
 
-    dataset: str = ""  # 数据集 key: coco/voc2007/kitti/dota/dota_obb/mot/coco_seg/cityscapes/nuimages/d2sa/imagenet100
+    dataset: str = ""  # 数据集 key: coco/voc2007/kitti/dota/dota_obb/mot/coco_seg/
+    # cityscapes/nuimages/d2sa/imagenet100
     task_type: str = "detection"      # detection | segmentation | classification | obb_detection
     model: str = BENCHMARK_DEFAULT_MODEL
     seg_model: str = BENCHMARK_DEFAULT_SEG_MODEL  # 仅 segmentation 使用

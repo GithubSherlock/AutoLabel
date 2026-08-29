@@ -690,4 +690,14 @@ if __name__ == "__main__":
     print(f"  访问: http://localhost:{port}")
     print(f"  API 文档: http://localhost:{port}/docs")
     print(f"  权重目录: {WEIGHTS_DIR}")
+
+    # v0.3 P4 同端口共存：3D 复核挂 /3d/（仅 __main__ 段，模块级 app 零改动 →
+    # 2D 测试零影响）。auto3dlabel 缺包/依赖不齐 → ImportError 静默降级（2D 独立服务）。
+    try:
+        from auto3dlabel.web import server as server3d
+
+        app.mount("/3d", server3d.app)
+        print(f"  3D 复核: http://localhost:{port}/3d/")
+    except ImportError as e:
+        print(f"  3D 复核: 未挂载（auto3dlabel 不可用: {e}）")
     uvicorn.run(app, host="0.0.0.0", port=port)

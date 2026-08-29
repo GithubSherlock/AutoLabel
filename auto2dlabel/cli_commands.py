@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import logging
+import re
+from functools import partial
+
 import typer
 from rich.table import Table
 
+from auto2dlabel.agent.dialog import ask_questions
 from auto2dlabel.agent.llm import create_client
 from auto2dlabel.agent.planner import TaskPlanner
 from auto2dlabel.cli_common import collect_images, console, setup_logging
 from auto2dlabel.cli_execute import execute_plan
 from auto2dlabel.schema.task_plan import TaskPlan
+
+logger = logging.getLogger(__name__)
 
 
 def sample_command(top_k: int, review_dir: str, output: str) -> None:
@@ -109,9 +116,9 @@ def chat_command(
 
     console.print("\n[dim]正在解析指令...[/dim]")
 
-    # ---- Step 2: LLM 解析 → TaskPlan ----
+    # ---- Step 2: LLM 解析 → TaskPlan（v0.6 对话式：缺参多轮追问，降级链零回退）----
     try:
-        plan = planner.parse(user_text, confirm_timeout=timeout)
+        plan = _parse_plan_dialog(planner, user_text, timeout)
     except Exception as e:
         console.print(f"[red]解析失败: {e}[/red]")
         raise typer.Exit(code=1)
@@ -139,10 +146,7 @@ def chat_command(
             return
         if result.user_input:
             try:
-                plan = planner.parse(
-                    plan.raw_instruction + " " + result.user_input,
-                    confirm_timeout=timeout,
-                )
+                plan = _reparse_confirm_edit(planner, plan, result.user_input, timeout)
                 console.print(f"[dim]参数已更新: {plan.summary}[/dim]")
             except Exception:
                 console.print("[yellow]无法解析修改，使用原计划[/yellow]")
@@ -194,7 +198,12 @@ def chat_command(
 
 
 def _maybe_recommend_classes(plan: TaskPlan, timeout: int, no_wait: bool) -> None:
-    """如果 TaskPlan 中有步骤缺少 prompts，运行类别推荐。"""
+    """如果 TaskPlan 中有步骤缺少 prompts，运行类别推荐。
+
+    v0.6 P2 落地形态：类别推荐保持代码级（模型类别表知识，代码级更准，
+    对话轮 questions 不涉及类别推荐）；用户表达「不知道标什么类别」→
+    LLM 留空 prompts → 本函数扫描首图统计 + 用户确认（回喂确认闭环）。
+    """
     from pathlib import Path
 
     from auto2dlabel.tools.confirm import ask_with_timeout
@@ -320,6 +329,70 @@ def _fill_batch_params(
     #    实测不可用时由 tools/device.resolve_batch_params 回退静态表兜底）
 
 
+def _parse_plan_dialog(planner: TaskPlanner, user_text: str, timeout: int) -> TaskPlan:
+    """对话式解析（v0.6 P1）：parse_dialog 多轮收集 → 异常降级单轮 parse。
+
+    无 key 零影响（v0.6 验收）：无凭据时零 LLM 调用，代码级提取类别 +
+    全默认参数构建计划（缺参交 _fill_missing_params 代码级追问）。
+    降级链零回退：对话层异常（LLM 非法响应 / 网络 / 骨架 bug）→ 日志 +
+    单轮 parse 兜底（v0.5 行为）；单轮仍失败由调用方红字 + typer.Exit(1)。
+    """
+    if not planner.llm.has_credentials:
+        logger.info("无 API key → 代码兜底构建默认计划（零 LLM 调用）")
+        return _plan_without_llm(user_text)
+    try:
+        return planner.parse_dialog(
+            user_text,
+            ask_fn=partial(ask_questions, timeout=timeout),
+            confirm_timeout=timeout,
+        )
+    except Exception as e:
+        logger.warning("对话解析降级为单轮 parse: %s", e)
+        return planner.parse(user_text, confirm_timeout=timeout)
+
+
+def _plan_without_llm(user_text: str) -> TaskPlan:
+    """无 key 代码兜底计划（v0.6 验收「无 key 零影响」）：全默认参数。
+
+    prompts 用 CN_EN_MAP 代码级提取（中英映射兜底红线，LLM 不参与）；
+    无关键词 → prompts 留空（不硬造类别，误标比少标更糟，交 Step 3.5
+    类别推荐 / _fill_missing_params 接管）。task_type 恒 object_detection：
+    任务型语义（跟踪/分割等）在 chat 内由 LLM 判定，无 key 场景保守取
+    默认检测（复杂任务请配 key 或走 run --track）。
+    """
+    from auto2dlabel.schema.task_plan import TaskStep
+    from auto2dlabel.tools.prompts import extract_prompts
+
+    prompts: list[str] = []
+    try:
+        prompts = extract_prompts(user_text)
+    except ValueError:
+        pass
+    plan = TaskPlan(steps=[TaskStep(step_id=1, source="", prompts=prompts)])
+    plan.raw_instruction = user_text
+    return plan
+
+
+def _reparse_confirm_edit(
+    planner: TaskPlanner, plan: TaskPlan, user_input: str, timeout: int
+) -> TaskPlan:
+    """Step 4 确认修改重解析（v0.6 G3 修复）。
+
+    对话收集的参数只存 dialog_context、不在 raw_instruction——重解析必须带上，
+    否则用户确认时改一句参数，对话成果全丢、字段回归缺失。
+    重解析后的 dialog_context 写回累积文本（连续多次修改时链条完整，
+    否则第二次修改 base 退化为 raw_instruction、对话字段再次回归缺失）。
+    raw_instruction 还原为「原指令 + 用户修改」（v0.5 语义：Step 4.5+
+    代码级扫描能看到修改文本，但看不到对话回喂噪声）。
+    """
+    original = plan.raw_instruction
+    base = plan.dialog_context or original
+    updated = planner.parse(f"{base} {user_input}", confirm_timeout=timeout)
+    updated.dialog_context = f"{base} {user_input}"
+    updated.raw_instruction = f"{original} {user_input}"
+    return updated
+
+
 def _fill_missing_params(plan: TaskPlan, planner: TaskPlanner, timeout: int) -> None:
     """如果 TaskPlan 有缺失参数，追问用户。"""
     from auto2dlabel.tools.confirm import ask_missing_params
@@ -330,6 +403,9 @@ def _fill_missing_params(plan: TaskPlan, planner: TaskPlanner, timeout: int) -> 
 
     reply = ask_missing_params(missing, timeout=timeout)
     if reply:
+        if not planner.llm.has_credentials:
+            _apply_reply_without_llm(plan, reply)  # v0.6：无 key 代码级字段映射
+            return
         try:
             updated = planner.parse(
                 plan.raw_instruction + " " + reply,
@@ -338,3 +414,25 @@ def _fill_missing_params(plan: TaskPlan, planner: TaskPlanner, timeout: int) -> 
             plan.steps = updated.steps
         except Exception:
             pass
+
+
+def _apply_reply_without_llm(plan: TaskPlan, reply: str) -> None:
+    """无 key 代码级补参（v0.6 零影响链）：自由文本 → 路径/类别字段。
+
+    LLM 缺席时的最小映射（v0.5 语义等价）：首段含 "/" 的路径 token →
+    source；extract_prompts → prompts。只填缺失字段，提取不到保持缺参
+    （Step 3.5 类别推荐 / execute 校验兜底，宁缺勿错）。
+    """
+    from auto2dlabel.tools.prompts import extract_prompts
+
+    path_m = re.search(r"[^\s，,]*/[^\s，,]*", reply)
+    prompts: list[str] = []
+    try:
+        prompts = extract_prompts(reply)
+    except ValueError:
+        pass
+    for step in plan.steps:
+        if not step.source and path_m:
+            step.source = path_m.group(0)
+        if not step.prompts and prompts:
+            step.prompts = prompts

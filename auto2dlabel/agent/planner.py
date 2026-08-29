@@ -5,10 +5,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from auto2dlabel.agent import json, logging
+from auto2dlabel.agent.dialog import parse_with_dialog
 from auto2dlabel.agent.llm import LLMClient
+from auto2dlabel.benchmarks.datasets import format_datasets_summary
 from auto2dlabel.models.model_catalog import format_catalog_summary
 from auto2dlabel.schema.task_plan import (
     BENCHMARK_DATASETS,
@@ -24,6 +27,7 @@ from auto2dlabel.schema.task_plan import (
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,
     BenchmarkRequest,
+    PlanQuestion,
     TaskPlan,
     TaskStep,
 )
@@ -65,6 +69,14 @@ Rules:
 - num_workers/batch_size: extract ONLY if the user explicitly specifies them
   (e.g. "batch_size=8", "num_workers=4", "批量4"). Otherwise null — the CLI will
   ask interactively or auto-fill a GPU-based recommendation.
+- questions: ONLY when key fields are missing (source / prompts), e.g.
+  "questions": [{"id": "step1.source", "question": "图像目录在哪里？"}],
+  "questions": [{"id": "step1.prompts", "question": "要检测哪些类别？(如 car, person)"}].
+  id = "step{step_id}.{field}". questions MUST accompany the full steps JSON
+  (same step list, missing fields left empty). No questions when nothing is missing.
+- Dialog: next round user's answers are fed back as
+  "补充信息（用户在以下问题的回答，请据此更新 JSON）：" + "- [step1.source] <question>" + "用户回答：<answers>".
+  Then fill the previously-missing fields from the answers and output empty/omit questions.
 - Multiple tasks separated by 然后/再/；/; → multiple steps.
 - Only JSON. No other text."""
 
@@ -78,6 +90,16 @@ Model selection:
   instance_segmentation→sam_b.pt, classification→openai/clip-vit-base-patch32,
   semantic_segmentation→fcn_resnet50
 - 自主选型时在该 step 加 "model_hint": "<一行中文理由>"
+"""
+
+# 追加数据集路径摘要（方案 A：LLM 路径引导；运行时取当前值，env 覆盖生效）
+_PLANNER_SYSTEM_PROMPT = _PLANNER_SYSTEM_PROMPT + f"""
+
+{format_datasets_summary()}
+Dataset resolution:
+- 指令中的数据集名（如「检测 COCO2017 验证集」/「KITTI 帧」）→ 用上表路径构造 source
+  （如 /root/autodl-tmp/Documents/datasets/COCO2017/val2017），source 用绝对路径
+- 指令给的是具体路径/文件名 → source 原样保留，不查上表
 """
 
 
@@ -180,15 +202,40 @@ class TaskPlanner:
         plan = _parse_json_response(response.content)
         plan.raw_instruction = instruction
 
-        # 应用用户指定的 timeout
-        for step in plan.steps:
-            if plan.confirm_timeout == DEFAULT_TIMEOUT:
-                plan.confirm_timeout = confirm_timeout
+        _apply_confirm_timeout(plan, confirm_timeout)
 
         logger.info("Parsed plan: %d steps", len(plan.steps))
         for s in plan.steps:
             logger.info("  %s", s.summary)
 
+        return plan
+
+    def parse_dialog(
+        self,
+        instruction: str,
+        ask_fn: Callable[[list[PlanQuestion]], str],
+        confirm_timeout: int = DEFAULT_TIMEOUT,
+        max_rounds: int = 3,
+    ) -> TaskPlan:
+        """多轮对话解析（v0.6 P1）：缺参时 LLM 出 questions → 收集回答 → 回喂。
+
+        复用 parse_with_dialog 通用骨架（agent/dialog.py，schema 无关）；
+        system prompt 与 parse 同源（catalog 摘要 + GPU 上下文，设备信息放
+        system 角色——与 parse 的 user 角色差异无语义影响）。
+        轮次耗尽 / 用户放弃 → 返回缺参 plan（调用方 _fill_missing_params 兜底）。
+        LLM 响应非法 / 空响应 → ValueError 传播（调用方降级链处理）。
+        """
+        system_prompt = _PLANNER_SYSTEM_PROMPT + "\n\n" + _gpu_context_line()
+        plan = parse_with_dialog(
+            llm=self.llm,
+            system_prompt=system_prompt,
+            parse_fn=_parse_json_response,
+            ask_fn=ask_fn,
+            instruction=instruction,
+            max_rounds=max_rounds,
+        )
+        _apply_confirm_timeout(plan, confirm_timeout)
+        logger.info("Parsed plan via dialog: %d steps", len(plan.steps))
         return plan
 
     def parse_benchmark(self, instruction: str) -> BenchmarkRequest:
@@ -213,6 +260,12 @@ class TaskPlanner:
         request = _parse_benchmark_json(response.content)
         logger.info("Parsed benchmark: %s", request.summary)
         return request
+
+
+def _apply_confirm_timeout(plan: TaskPlan, confirm_timeout: int) -> None:
+    """应用 CLI 指定 timeout（仅当 LLM 未显式给出时；v0.5 语义原样，parse/parse_dialog 共用）。"""
+    if plan.confirm_timeout == DEFAULT_TIMEOUT:
+        plan.confirm_timeout = confirm_timeout
 
 
 def _parse_json_response(content: str) -> TaskPlan:
@@ -274,6 +327,8 @@ def _dict_to_plan(data: dict[str, Any]) -> TaskPlan:
     return TaskPlan(
         steps=steps,
         confirm_timeout=data.get("confirm_timeout", DEFAULT_TIMEOUT),
+        # v0.6 对话问题（致命点：LLM JSON → plan 走本函数，不经过 TaskPlan.from_dict）
+        questions=PlanQuestion.from_list(data.get("questions")),
     )
 
 

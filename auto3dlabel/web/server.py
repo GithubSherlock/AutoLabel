@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 from auto3dlabel.export.kitti_label import build_label_file
 from auto3dlabel.schema.box3d import Box3D
+from auto3dlabel.web.payloads import frame_payload, validate_queue_name
 
 # 复核队列扫描目录（CLI HITL 分流输出目录，可环境变量覆盖供测试/部署）
 REVIEW_DIR = Path(os.environ.get("REVIEW3D_DIR", "outputs/kitti3d/reviews"))
@@ -92,7 +93,7 @@ async def list_review_files() -> JSONResponse:
 @app.get("/api/review-file")
 async def get_review_file(name: str = "") -> JSONResponse:
     """读取单个复核队列文件内容（含已复核的 _reviewed.json 供重开）。"""
-    if not name.endswith(("_review.json", "_reviewed.json")) or "/" in name or "\\" in name:
+    if not validate_queue_name(name):
         return JSONResponse({"error": f"非法队列文件: {name}"}, status_code=400)
     src = REVIEW_DIR / name
     if not src.is_file():
@@ -112,6 +113,23 @@ async def get_review_image(path: str = "") -> JSONResponse | FileResponse:
     return FileResponse(str(p))
 
 
+@app.get("/api/frame-data")
+async def get_frame_data(name: str = "") -> JSONResponse:
+    """四视图渲染数据（v0.3 P4）：相机系点云下采样 + 逐框 8x3 角点。
+
+    只收队列文件名（pcd/calib 路径从队列文件读，零任意路径读取面）；前端零
+    calib 依赖（yaw/尺寸/标定数学在 payloads.frame_payload，见其 docstring）。
+    """
+    if not validate_queue_name(name):
+        return JSONResponse({"error": f"非法队列文件: {name}"}, status_code=400)
+    if not (REVIEW_DIR / name).is_file():
+        return JSONResponse({"error": f"队列文件不存在: {name}"}, status_code=404)
+    payload = frame_payload(name, REVIEW_DIR)
+    if payload is None:
+        return JSONResponse({"error": f"队列文件损坏或点云/标定缺失: {name}"}, status_code=400)
+    return JSONResponse(payload)
+
+
 @app.post("/api/review-save")
 async def save_review(payload: dict[str, Any] = Body(...)) -> JSONResponse:
     """保存人工复核修正（3D 版）：过滤删除框 → 写 3D _reviewed.json + 导出 KITTI label。
@@ -125,7 +143,7 @@ async def save_review(payload: dict[str, Any] = Body(...)) -> JSONResponse:
     """
     name = str(payload.get("queue_file", ""))
     is_reviewed = name.endswith("_reviewed.json")
-    if not name.endswith(("_review.json", "_reviewed.json")) or "/" in name or "\\" in name:
+    if not validate_queue_name(name):
         return JSONResponse({"error": f"非法队列文件: {name}"}, status_code=400)
 
     src = REVIEW_DIR / name

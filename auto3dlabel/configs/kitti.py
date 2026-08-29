@@ -114,6 +114,22 @@ DETECTOR3D_NAMES = {
         ),
         "weights_dir": "centerpoint_nus",
     },
+    # v0.3 P2：KITTI 精度升级（v1.4.0 无 KITTI centerpoint → 走 PV-RCNN；zoo car moderate 81.4）
+    "pvrcnn_kitti": {
+        "config": "configs/pv_rcnn/pv_rcnn_8xb2-80e_kitti-3d-3class.py",
+        "checkpoint": "pv_rcnn_8xb2-80e_kitti-3d-3class_20221117_234428-b384d22f.pth",
+        "weights_dir": "pvrcnn_kitti",
+    },
+}
+
+# v0.3 P3：KITTI 单目 3D 检测器（LiDAR 不可用时的降级方案，交叉验证基准）
+# 输出 = 相机系 7 值 [x,y,z,l,h,w,ry] 底面中心（与 label_2 同构，Det3DResult 直通）
+MONO3D_NAMES = {
+    "pgd_kitti": {
+        "config": "configs/pgd/pgd_r101-caffe_fpn_head-gn_4xb3-4x_kitti-mono3d.py",
+        "checkpoint": "pgd_r101_caffe_fpn_gn-head_3x4_4x_kitti-mono3d_20211022_102608-8a97533b.pth",
+        "weights_dir": "pgd_kitti",
+    },
 }
 
 # KITTI 图像统一尺寸（image_2 全数据集同尺寸；3D 直检 2D 投影框外接用）

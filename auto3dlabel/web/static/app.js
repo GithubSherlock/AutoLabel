@@ -1,108 +1,104 @@
-// Auto3dLabel 简版复核前端：队列文件 → 相机图 + BEV 图 + 3D 框列表（删除/保存）。
-// 无画布拖拽/无点云上传——v0.1 刻意最小化（红线：复用 2D Web 协议，不加新端点）。
+// Auto3dLabel v0.3 P4 复核前端薄壳：侧栏/图像/表格 DOM 挂载 + 状态机委托 logic3d.js。
+// 状态与纯函数全在 L3D（jsdom 可测）；本文件只做 DOM 装配与事件绑定。
+// 所有 fetch 用**相对路径**（"api/..."）：独立模式 :8766 与挂载模式 /3d/ 双兼容。
+(function () {
+  "use strict";
+  const L3D = window.L3D;
+  const $ = (sel) => document.querySelector(sel);
 
-let state = { name: null, data: null, deleted: new Set() };
+  function esc(s) { return L3D.esc(s); }
 
-const $ = (sel) => document.querySelector(sel);
+  async function loadFiles() {
+    const res = await L3D.loadFiles();
+    if (res.error) return;
+    const html = L3D.renderFilesHtml(res);
+    $("#dir").textContent = html.dir;
+    $("#files").innerHTML = html.files;
+    $("#reviewed").innerHTML = html.reviewed;
+    document.querySelectorAll("#files .file-item, #reviewed .file-item").forEach((el) => {
+      el.onclick = () => loadFrame(el.dataset.name);
+    });
+  }
 
-async function jget(url) {
-  const r = await fetch(url);
-  return r.json();
-}
+  async function loadFrame(name) {
+    const data = await L3D.loadFrame(name);
+    if (data.error) {
+      $("#detail").innerHTML = `<div class="empty">${esc(data.error)}</div>`;
+      $("#view3d-wrap").style.display = "none";
+      return;
+    }
+    document.querySelectorAll(".file-item").forEach((el) =>
+      el.classList.toggle("active", el.dataset.name === name));
+    renderDetail();
+  }
 
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
-}
+  function renderDetail() {
+    const d = L3D.state.data;
+    const anns = d.annotations || [];
+    const cam = d.image_path
+      ? `<figure><img src="api/review-image?path=${encodeURIComponent(d.image_path)}"><figcaption>相机图</figcaption></figure>` : "";
+    const bev = d.bev_path
+      ? `<figure><img src="api/review-image?path=${encodeURIComponent(d.bev_path)}"><figcaption>BEV 鸟瞰</figcaption></figure>` : "";
+    $("#detail").innerHTML = `
+      <h3 style="margin-top:0">${esc(d.image || L3D.state.name)} <span style="color:var(--dim);font-weight:400">— ${anns.length} 框待复核</span></h3>
+      <div class="imgs">${cam}${bev}</div>
+      <div id="table-wrap">${L3D.renderTableHtml()}</div>
+      <div class="toolbar">
+        <button id="save">保存复核结果</button>
+        <span id="status"></span>
+      </div>`;
+    bindTable();
+    $("#save").onclick = save;
+  }
 
-async function loadFiles() {
-  const res = await jget("/api/review-files");
-  $("#dir").textContent = res.dir || "";
-  $("#files").innerHTML = (res.files || []).map((f) => `
-    <div class="file-item" data-name="${esc(f.name)}">
-      <div class="name">${esc(f.image_stem || f.name)}</div>
-      <div class="meta">${f.count} 框</div>
-    </div>`).join("") || '<div class="empty">无待复核队列</div>';
-  $("#reviewed").innerHTML = (res.reviewed || []).map((f) => `
-    <div class="file-item" data-name="${esc(f.name)}">
-      <div class="name">${esc(f.image_stem || f.name)}</div>
-      <div class="meta">${f.count} 框 · 已复核</div>
-    </div>`).join("") || '<div class="empty">无</div>';
-  document.querySelectorAll("#files .file-item, #reviewed .file-item").forEach((el) => {
-    el.onclick = () => loadFile(el.dataset.name);
+  function bindTable() {
+    $("#table-wrap").querySelectorAll("tr").forEach((tr) => {
+      tr.onclick = (e) => {
+        if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON") return;
+        const i = Number(tr.dataset.i ?? tr.querySelector("[data-i]")?.dataset.i);
+        if (!Number.isNaN(i)) L3D.selectObject(i);
+      };
+    });
+    $("#table-wrap").querySelectorAll("button.del").forEach((b) => {
+      b.onclick = () => L3D.toggleDelete(Number(b.dataset.i));
+    });
+    // 双击类别单元格 → inline 改标签（保存时经 buildSaveBody 全量回写）
+    $("#table-wrap").querySelectorAll("td.label").forEach((td) => {
+      td.ondblclick = () => {
+        const i = Number(td.dataset.i);
+        const input = document.createElement("input");
+        input.value = L3D.state.data.annotations[i].label;
+        td.textContent = "";
+        td.appendChild(input);
+        input.focus();
+        const commit = () => {
+          L3D.changeLabel(i, input.value.trim() || L3D.state.data.annotations[i].label);
+        };
+        input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); };
+        input.onblur = commit;
+      };
+    });
+  }
+
+  async function save() {
+    const res = await fetch("api/review-save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(L3D.buildSaveBody()),
+    });
+    const out = await res.json();
+    $("#status").textContent = out.ok
+      ? `已保存：保留 ${out.kept} 框，删除 ${out.deleted} 框 → ${out.saved_path}`
+      : `保存失败: ${out.error || res.status}`;
+    if (out.ok) { $("#detail").innerHTML = '<div class="empty">已保存 ✓</div>'; loadFiles(); }
+  }
+
+  // 订阅状态机：选中/删除/改标签 → 表格重渲染（保持四视图 canvas 不动）
+  L3D.on((state) => {
+    if (!state.data || !$("#table-wrap")) return;
+    $("#table-wrap").innerHTML = L3D.renderTableHtml();
+    bindTable();
   });
-}
 
-async function loadFile(name) {
-  const data = await jget("/api/review-file?name=" + encodeURIComponent(name));
-  if (data.error) { $("#detail").innerHTML = `<div class="empty">${esc(data.error)}</div>`; return; }
-  state = { name, data, deleted: new Set() };
-  document.querySelectorAll(".file-item").forEach((el) => el.classList.toggle("active", el.dataset.name === name));
-  render();
-}
-
-function render() {
-  const d = state.data;
-  if (!d) return;
-  const anns = d.annotations || [];
-  const rows = anns.map((a, i) => {
-    const del = state.deleted.has(i);
-    const flag = a.review_flag ? ' <span class="flag">⚠ review</span>' : "";
-    const dims = `${a.h?.toFixed(2)}×${a.w?.toFixed(2)}×${a.l?.toFixed(2)}`;
-    const rot = a.rotation_y == null ? "—" : a.rotation_y.toFixed(2);
-    return `<tr style="${del ? "opacity:.35" : ""}">
-      <td>${i}</td><td>${esc(a.label)}</td>
-      <td class="num">${(a.confidence ?? 0).toFixed(2)}</td>
-      <td class="num">${esc(dims)}</td>
-      <td class="num">${rot}${flag}</td>
-      <td class="num">${a.fit_points ?? "—"}</td>
-      <td><button class="del" data-i="${i}">${del ? "恢复" : "删除"}</button></td>
-    </tr>`;
-  }).join("");
-
-  const cam = d.image_path
-    ? `<figure><img src="/api/review-image?path=${encodeURIComponent(d.image_path)}"><figcaption>相机图</figcaption></figure>` : "";
-  const bev = d.bev_path
-    ? `<figure><img src="/api/review-image?path=${encodeURIComponent(d.bev_path)}"><figcaption>BEV 鸟瞰</figcaption></figure>` : "";
-
-  $("#detail").innerHTML = `
-    <h3 style="margin-top:0">${esc(d.image || state.name)} <span style="color:var(--dim);font-weight:400">— ${anns.length} 框待复核</span></h3>
-    <div class="imgs">${cam}${bev}</div>
-    <table>
-      <tr><th>#</th><th>类别</th><th>conf</th><th>h×w×l (m)</th><th>rotation_y</th><th>拟合点数</th><th></th></tr>
-      ${rows || '<tr><td colspan="7" class="empty">无框</td></tr>'}
-    </table>
-    <div class="toolbar">
-      <button id="save">保存复核结果</button>
-      <span id="status"></span>
-    </div>`;
-  document.querySelectorAll("button.del").forEach((b) => {
-    b.onclick = () => {
-      const i = Number(b.dataset.i);
-      state.deleted.has(i) ? state.deleted.delete(i) : state.deleted.add(i);
-      render();
-    };
-  });
-  $("#save").onclick = save;
-}
-
-async function save() {
-  const anns = state.data.annotations || [];
-  // edited 全量重建：保留框原样直通（Box3D dict），删除框剔除；每框标人工复核
-  const edited = anns
-    .map((a, i) => ({ ...a, edited_by_human: true }))
-    .filter((_, i) => !state.deleted.has(i));
-  const res = await fetch("/api/review-save", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ queue_file: state.name, edited }),
-  });
-  const out = await res.json();
-  $("#status").textContent = out.ok
-    ? `已保存：保留 ${out.kept} 框，删除 ${out.deleted} 框 → ${out.saved_path}`
-    : `保存失败: ${out.error || res.status}`;
-  if (out.ok) { state = { name: null, data: null, deleted: new Set() }; loadFiles(); }
-}
-
-loadFiles();
+  loadFiles();
+})();

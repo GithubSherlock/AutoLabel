@@ -95,6 +95,34 @@ class Detector3D(Protocol):
         ...
 
 
+def _init_model_trusted(config: Any, checkpoint_path: str, device: str) -> Any:
+    """init_model + 可信来源权重加载（torch 2.6+ weights_only 兼容，v0.3 P2）。
+
+    config: config 文件路径（str/Path）或 mmengine Config 对象——v0.3 P3 放宽：
+    BEVFusion Swin init_cfg 需运行时 patch（checkpoint=None）后传对象，
+    init_model 官方签名即接受 Union[str, Path, Config]。
+    torch 2.6 起 torch.load 默认 weights_only=True：2022 年 zoo checkpoint
+    （pv_rcnn 含 numpy scalar/dtype 与 mmengine HistoryBuffer 对象）会被拒。
+    权重来自 download_detector3d.sh 钉死的 openmmlab 官方直链（可信来源），
+    按 torch 官方指引以 weights_only=False 加载；patch 作用域仅限本次
+    init_model 调用（finally 恢复，进程内其他加载路径零影响）。
+    """
+    import torch
+    from mmdet3d.apis import init_model  # pyright: ignore[reportMissingImports]
+
+    orig_load = torch.load
+
+    def _trusted_load(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("weights_only", False)
+        return orig_load(*args, **kwargs)
+
+    setattr(torch, "load", _trusted_load)
+    try:
+        return init_model(config=config, checkpoint=checkpoint_path, device=device)
+    finally:
+        setattr(torch, "load", orig_load)
+
+
 class Mmdet3dDetector:
     """mmdet3d 检测器（懒加载：构造零加载，detect 时 _load 幂等 + ImportError 守卫）。"""
 
@@ -120,8 +148,8 @@ class Mmdet3dDetector:
         if self._model is not None:
             return self._model
         try:
+            import mmdet3d  # noqa: F401  # 守卫探测：未装时抛 ImportError（helper 内部再 import apis）
             import torch
-            from mmdet3d.apis import init_model  # pyright: ignore[reportMissingImports]
             from mmengine.config import Config
         except ImportError as e:
             raise ImportError(
@@ -136,9 +164,7 @@ class Mmdet3dDetector:
         # 无法跨 shape 强绑 kernel）——远低于人工标注方差（±10cm），接受并记录。
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
-        model = init_model(
-            config=self._config_path, checkpoint=self._checkpoint_path, device=device
-        )
+        model = _init_model_trusted(self._config_path, self._checkpoint_path, device)
         self._class_names = _extract_class_names(Config.fromfile(self._config_path), model)
         self._model = model
         return self._model

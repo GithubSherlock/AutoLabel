@@ -5,13 +5,118 @@
 
 from __future__ import annotations
 
+import os
 import tarfile
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 DATASETS_ROOT = Path.home() / "autodl-tmp" / "Documents" / "datasets"
 ARCHIVE_ROOT = Path("/root/autodl-pub")
+
+
+# ================================================================
+# 数据集路径速查表（LLM 路径引导单一事实源）
+# ================================================================
+
+# 说明：key 与 schema/task_plan.BENCHMARK_DATASETS 对齐（planner 校验同源）；
+# path 与下方 ensure_* 解压目标一致（改动需同步）。env 覆盖与
+# auto3dlabel/configs/{kitti,nuscenes}.py 同语义（本模块不 import auto3dlabel，
+# 避免 2D→3D 依赖方向反转）。
+
+
+@dataclass(frozen=True)
+class DatasetInfo:
+    """单个数据集：路径 / 关键子目录 / 任务描述（供 LLM 路径引导摘要）。"""
+
+    path: Path
+    subdirs: tuple[str, ...] = ()
+    task: str = ""
+    note: str = ""
+
+
+DATASET_DIRS: dict[str, DatasetInfo] = {
+    "coco": DatasetInfo(
+        DATASETS_ROOT / "COCO2017", ("annotations", "val2017"),
+        "目标检测 + 实例分割（80 类，金标准）",
+        "coco_seg 分割标注同目录 instances_val2017.json",
+    ),
+    "voc2007": DatasetInfo(
+        DATASETS_ROOT / "VOCdevkit" / "VOC2007", ("JPEGImages", "Annotations"),
+        "经典目标检测（20 类）",
+    ),
+    "kitti": DatasetInfo(
+        DATASETS_ROOT / "KITTI" / "object", ("training", "testing"),
+        "自动驾驶 2D/3D 检测（8 类）",
+        "training/{calib,image_2,label_2,velodyne}；KITTI/yolo = 微调产物",
+    ),
+    "dota": DatasetInfo(
+        DATASETS_ROOT / "DOTA", ("images", "labels", "labels_obb"),
+        "航拍目标检测（水平框）+ OBB 旋转框（15 类）",
+        "labels = 水平框，labels_obb = 旋转框（dota_obb 用）",
+    ),
+    "mot": DatasetInfo(
+        DATASETS_ROOT / "MOT17", ("train", "test"),
+        "多目标跟踪（14 序列 × 3 检测器）",
+        "train/MOT17-XX-FRCNN；mot20 在 MOT20/train",
+    ),
+    "cityscapes": DatasetInfo(
+        DATASETS_ROOT / "cityscapes", ("gtFine", "leftImg8bit"),
+        "城市场景语义/实例分割（域内 Mask R-CNN）",
+    ),
+    "nuimages": DatasetInfo(
+        DATASETS_ROOT / "nuImages", ("samples", "sweeps", "v1.0-mini"),
+        "2D 实例分割 mini（nuScenes 图像子集）",
+    ),
+    "d2sa": DatasetInfo(
+        DATASETS_ROOT / "D2SA", ("annotations", "images"),
+        "密集零售货架商品检测（SKU 级）",
+    ),
+    "imagenet100": DatasetInfo(
+        DATASETS_ROOT / "imagenet100", (),
+        "图像分类（ImageNet 100 类子集）",
+        "100 个 wnid 目录即标签",
+    ),
+    "imagenet1k": DatasetInfo(
+        DATASETS_ROOT / "imagenet1k", ("val",),
+        "图像分类（ILSVRC2012，1000 类）",
+    ),
+    "nuscenes_mini": DatasetInfo(
+        DATASETS_ROOT / "nuscenes_mini", ("maps", "samples", "sweeps", "v1.0-mini"),
+        "3D 检测冒烟（pointpillars_nus，10 类）",
+    ),
+}
+
+# 数据集名 → env 覆盖变量（与 auto3dlabel/configs 同语义，运行时取当前值）
+DATASET_ENV: dict[str, str] = {"kitti": "KITTI_OBJECT_ROOT", "nuscenes_mini": "NUSCENES_ROOT"}
+
+
+def resolve_dataset_dir(name: str) -> Path:
+    """解析数据集目录：env 覆盖 > DATASET_DIRS 默认路径。"""
+    if name not in DATASET_DIRS:
+        raise KeyError(f"未知数据集: {name}（可选: {', '.join(DATASET_DIRS)}）")
+    env = DATASET_ENV.get(name)
+    if env:
+        return Path(os.environ.get(env, str(DATASET_DIRS[name].path)))
+    return DATASET_DIRS[name].path
+
+
+def format_datasets_summary() -> str:
+    """数据集路径速查摘要（注入 planner prompt，运行时取当前值含 env 覆盖）。
+
+    用途：LLM 把指令中的数据集名映射为真实 source 目录（如「检测 COCO2017
+    验证集」→ /root/autodl-tmp/Documents/datasets/COCO2017/val2017）。
+    """
+    lines = ["可用数据集（指令含数据集名时，用下路径构造 source 目录）："]
+    for name, info in DATASET_DIRS.items():
+        path = resolve_dataset_dir(name)
+        extra = f"（子目录: {', '.join(info.subdirs)}）" if info.subdirs else ""
+        env = DATASET_ENV.get(name)
+        env_s = f"（env {env} 可覆盖）" if env else ""
+        task_s = f" — {info.task}" if info.task else ""
+        lines.append(f"- {name}: {path}{extra}{task_s}{env_s}")
+    return "\n".join(lines)
 
 
 def extract_zip_members(
@@ -120,7 +225,10 @@ def extract_zip_members_uniform(
             print(f"  ✓ 已存在 {len(selected)} 个文件: {dest}")
             return dest
 
-        print(f"  解压 {len(missing)} 个文件（{len(groups)} 个目录，每目录最多 {per_class} 个）→ {dest} ...")
+        print(
+            f"  解压 {len(missing)} 个文件"
+            f"（{len(groups)} 个目录，每目录最多 {per_class} 个）→ {dest} ..."
+        )
         for m in missing:
             zf.extract(m, dest)
     return dest
@@ -443,7 +551,8 @@ def ensure_mot17_frcnn() -> Path:
     seqs = sorted(dest.glob("MOT17-*-FRCNN"))
     if not seqs:
         raise FileNotFoundError(f"未找到 MOT17 FRCNN 序列: {dest}")
-    print(f"  ✓ MOT17 FRCNN: {len(seqs)} 个序列 ({sum(1 for s in seqs for _ in (s / 'img1').glob('*.jpg'))} 张图)")
+    img_count = sum(1 for s in seqs for _ in (s / "img1").glob("*.jpg"))
+    print(f"  ✓ MOT17 FRCNN: {len(seqs)} 个序列 ({img_count} 张图)")
     return dest
 
 
@@ -461,7 +570,8 @@ def ensure_mot20() -> Path:
     seqs = sorted(dest.glob("MOT20-*"))
     if not seqs:
         raise FileNotFoundError(f"未找到 MOT20 序列: {dest}")
-    print(f"  ✓ MOT20: {len(seqs)} 个序列 ({sum(1 for s in seqs for _ in (s / 'img1').glob('*.jpg'))} 张图)")
+    img_count = sum(1 for s in seqs for _ in (s / "img1").glob("*.jpg"))
+    print(f"  ✓ MOT20: {len(seqs)} 个序列 ({img_count} 张图)")
     return dest
 
 
@@ -485,7 +595,12 @@ def ensure_imagenet100(per_class: int = 50) -> Path:
     print(f"📦 解压 ImageNet100（每类 {per_class} 张）...")
 
     zip_path = ARCHIVE_ROOT / "ImageNet100" / "imagenet100.zip"
-    extract_zip_members_uniform(zip_path, DATASETS_ROOT, member_prefix="imagenet100/", per_class=per_class)
+    extract_zip_members_uniform(
+        zip_path,
+        DATASETS_ROOT,
+        member_prefix="imagenet100/",
+        per_class=per_class,
+    )
 
     print(f"  ✓ ImageNet100: {dest}")
     return dest

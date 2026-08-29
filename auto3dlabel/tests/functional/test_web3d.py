@@ -13,10 +13,11 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from auto3dlabel.tests.helpers.synth import write_frame
+from auto3dlabel.tests.helpers.synth import ANCHOR_CAM, VELO_ANCHOR, write_calib, write_frame
 
 BOX = {
     "label": "Car", "confidence": 0.62, "cx": 8.0, "cy": 1.4, "cz": 18.0,
@@ -180,6 +181,35 @@ def test_save_delete_all_no_label(web: Any, client: Any, tmp_path: Any) -> None:
     saved = json.loads((review_dir / "000000_reviewed.json").read_text())
     assert saved["annotations"] == []
     assert not (server.LABELS_DIR / "000000.txt").exists()  # 全删不导出 label
+
+
+def test_frame_data_endpoint(web: Any, client: Any, tmp_path: Any) -> None:
+    """frame-data 端点（v0.3 P4）：相机系点（真实 calib 锚点）+ 8x3 角点 + 安全态。"""
+    pcd = tmp_path / "000000.pcd.bin"
+    np.asarray([[*(VELO_ANCHOR), 0.5]], dtype=np.float32).tofile(pcd)
+    calib = tmp_path / "000000.txt"
+    write_calib(calib)
+    data = _queue("/tmp/a.png")
+    data["pcd_path"] = str(pcd)
+    data["calib_path"] = str(calib)
+    _write_queue(web, "000000_review.json", data)
+
+    res = client.get("/api/frame-data", params={"name": "000000_review.json"})
+    assert res.status_code == 200
+    payload = res.json()
+    points = np.asarray(payload["points"])
+    assert points.shape == (1, 3)
+    # velo_to_cam 数值：velodyne 锚点 → 相机系 (1.7834,1.4169,8.4302)
+    np.testing.assert_allclose(points[0], ANCHOR_CAM, atol=1e-5)
+    corners = np.asarray(payload["objects"][0]["corners"])
+    assert corners.shape == (8, 3)
+
+    # 安全态：非法名 400 / 不存在 404 / pcd 缺失 400
+    assert client.get("/api/frame-data", params={"name": "../x"}).status_code == 400
+    assert client.get("/api/frame-data", params={"name": "000999_review.json"}).status_code == 404
+    no_pcd = dict(_queue("/tmp/a.png"), pcd_path="/tmp/nope.bin")
+    _write_queue(web, "000001_review.json", no_pcd)
+    assert client.get("/api/frame-data", params={"name": "000001_review.json"}).status_code == 400
 
 
 def test_reopen_reviewed_and_resave(web: Any, client: Any, tmp_path: Any) -> None:
