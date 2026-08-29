@@ -11,7 +11,8 @@ from typing import Any
 from auto2dlabel.agent import json, logging
 from auto2dlabel.agent.dialog import parse_with_dialog
 from auto2dlabel.agent.llm import LLMClient
-from auto2dlabel.benchmarks.datasets import format_datasets_summary
+from auto2dlabel.configs.datasets import format_datasets_summary
+from auto2dlabel.configs.task_params import format_task_params_summary
 from auto2dlabel.models.model_catalog import format_catalog_summary
 from auto2dlabel.schema.task_plan import (
     BENCHMARK_DATASETS,
@@ -30,6 +31,8 @@ from auto2dlabel.schema.task_plan import (
     PlanQuestion,
     TaskPlan,
     TaskStep,
+    sanitize_benchmark_request,
+    sanitize_task_plan,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,8 +70,14 @@ Rules:
   "mot" if task_type=tracking; otherwise "coco" (pose keypoints 内嵌 COCO JSON，无需单独格式)
 - sahi: true if user mentions SAHI/切片/切块/slicing/sahi/大图. default false.
 - num_workers/batch_size: extract ONLY if the user explicitly specifies them
-  (e.g. "batch_size=8", "num_workers=4", "批量4"). Otherwise null — the CLI will
-  ask interactively or auto-fill a GPU-based recommendation.
+  (e.g. "batch_size=8", "num_workers=4", "批量4"). 用户说「跑最大/最大批量/自动/
+  尽可能大」→ batch_size=null（null 语义 = 执行阶段自动实测最大 batch，不是 1；
+  无批量能力的模型自动逐图）。Otherwise null — the CLI will ask interactively
+  or auto-fill a GPU-based recommendation.
+- HYPERPARAM values come ONLY from explicit specs (batch_size=N/批量N/
+  num_workers=N/进程N/conf X/iou X). Digits inside paths/filenames
+  (COCO2017, 000000000139.jpg, 000123.png) are NEVER hyperparameters —
+  do NOT extract them as batch_size/num_workers/confidence_threshold.
 - questions: ONLY when key fields are missing (source / prompts), e.g.
   "questions": [{"id": "step1.source", "question": "图像目录在哪里？"}],
   "questions": [{"id": "step1.prompts", "question": "要检测哪些类别？(如 car, person)"}].
@@ -99,7 +108,18 @@ _PLANNER_SYSTEM_PROMPT = _PLANNER_SYSTEM_PROMPT + f"""
 Dataset resolution:
 - 指令中的数据集名（如「检测 COCO2017 验证集」/「KITTI 帧」）→ 用上表路径构造 source
   （如 /root/autodl-tmp/Documents/datasets/COCO2017/val2017），source 用绝对路径
+- 图像在子目录时，source 指向图像所在子目录而非数据集根目录：
+  KITTI → .../KITTI/object/training/image_2；COCO → .../COCO2017/val2017；
+  其余按上表 subdirs/note 定位图像目录
 - 指令给的是具体路径/文件名 → source 原样保留，不查上表
+"""
+
+# 追加任务参数规格摘要（规格表单一事实源：REQUIRED 字段缺失时 CLI 会追问）
+_PLANNER_SYSTEM_PROMPT = _PLANNER_SYSTEM_PROMPT + f"""
+
+{format_task_params_summary()}
+- 缺参指令（未提 REQUIRED 字段）→ 对应字段留空/默认 + questions 追问，
+  不要臆造路径/类别
 """
 
 
@@ -202,6 +222,9 @@ class TaskPlanner:
         plan = _parse_json_response(response.content)
         plan.raw_instruction = instruction
 
+        for fix in sanitize_task_plan(plan):  # LLM 输出守卫（路径数字误提等）
+            logger.info("参数守卫修正: %s", fix)
+
         _apply_confirm_timeout(plan, confirm_timeout)
 
         logger.info("Parsed plan: %d steps", len(plan.steps))
@@ -234,6 +257,8 @@ class TaskPlanner:
             instruction=instruction,
             max_rounds=max_rounds,
         )
+        for fix in sanitize_task_plan(plan):  # LLM 输出守卫（对话路径同源）
+            logger.info("参数守卫修正: %s", fix)
         _apply_confirm_timeout(plan, confirm_timeout)
         logger.info("Parsed plan via dialog: %d steps", len(plan.steps))
         return plan
@@ -258,6 +283,8 @@ class TaskPlanner:
             raise ValueError("LLM 返回空响应，无法解析 benchmark 参数")
 
         request = _parse_benchmark_json(response.content)
+        for fix in sanitize_benchmark_request(request, instruction):
+            logger.info("benchmark 参数守卫修正: %s", fix)
         logger.info("Parsed benchmark: %s", request.summary)
         return request
 

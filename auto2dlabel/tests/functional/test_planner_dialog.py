@@ -54,6 +54,9 @@ def _plan_json(
     source: str = "",
     prompts: list[str] | None = None,
     questions: Any = None,
+    conf: float = 0.1,
+    iou: float = 0.3,
+    model: str = "yolo26x.pt",
 ) -> str:
     """构造 TaskPlan JSON（questions 为 None 时省略键）。"""
     step = {
@@ -61,9 +64,9 @@ def _plan_json(
         "task_type": "object_detection",
         "source": source,
         "prompts": prompts or [],
-        "confidence_threshold": 0.1,
-        "iou_threshold": 0.3,
-        "model_name": "yolo26x.pt",
+        "confidence_threshold": conf,
+        "iou_threshold": iou,
+        "model_name": model,
         "export_format": "coco",
         "sahi": False,
         "num_workers": None,
@@ -364,7 +367,7 @@ def test_fill_missing_params_no_key_code_mapping(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(
         "auto2dlabel.tools.confirm.ask_missing_params",
-        lambda missing, timeout=30: "数据在 /data/images/，检测汽车和行人",
+        lambda missing, timeout=30, optional=None: "数据在 /data/images/，检测汽车和行人",
     )
     _fill_missing_params(plan, planner, timeout=30)
 
@@ -382,7 +385,7 @@ def test_fill_missing_params_no_key_partial_mapping(monkeypatch: Any) -> None:
 
     monkeypatch.setattr(
         "auto2dlabel.tools.confirm.ask_missing_params",
-        lambda missing, timeout=30: "随便写点啥，没路径也没类别",
+        lambda missing, timeout=30, optional=None: "随便写点啥，没路径也没类别",
     )
     _fill_missing_params(plan, planner, timeout=30)
 
@@ -390,6 +393,139 @@ def test_fill_missing_params_no_key_partial_mapping(monkeypatch: Any) -> None:
     assert plan.steps[0].source == ""
     assert plan.steps[0].prompts == []
     assert plan.all_missing_params  # 保持缺参 → 后续步骤接管
+
+
+def test_fill_missing_params_asks_optional_model_conf(monkeypatch: Any) -> None:
+    """追问扩展（2026-08-29）：缺模型/缺超参数 → optional 进入追问，回答重解析提取。"""
+    # 第一响应：全默认参数计划（模型/阈值未指定）；第二响应：重解析提取回答
+    planner, llm = _make_planner([
+        {"content": _plan_json(source="/d", prompts=["car"])},
+        {"content": _plan_json(
+            source="/d", prompts=["car"],
+            conf=0.5, model="fasterrcnn_resnet50_fpn_v2",
+        )},
+    ])
+    plan = _parse_plan_dialog(planner, "检测 /d 中的汽车", timeout=30)
+    assert not plan.all_missing_params  # required 已满足
+
+    asked: dict[str, Any] = {}
+
+    def _ask(missing: Any, timeout: int = 30, optional: Any = None) -> str:
+        asked["missing"] = missing
+        asked["optional"] = optional
+        return "模型用 fasterrcnn，置信度 0.5"
+
+    monkeypatch.setattr("auto2dlabel.tools.confirm.ask_missing_params", _ask)
+    _fill_missing_params(plan, planner, timeout=30)
+
+    assert asked["missing"] == {}  # 必填无缺失
+    step = plan.steps[0]
+    # optional 覆盖 model + conf（iou 仍在默认 → 保持默认继续）
+    opt_text = "\n".join(asked["optional"][1])
+    assert "model_name（模型）（默认 yolo26x.pt）" in opt_text
+    assert "confidence_threshold（置信度）（默认 0.1）" in opt_text
+    assert step.model_name == "fasterrcnn_resnet50_fpn_v2"
+    assert step.confidence_threshold == 0.5
+    assert step.iou_threshold == 0.3  # 未回答 → 默认
+    assert llm.messages_seen  # 有 key：回答经 LLM 重解析提取
+
+
+def test_fill_missing_params_optional_abort_keeps_defaults(monkeypatch: Any) -> None:
+    """追问扩展：回车/超时（None）→ 可选参数保持默认继续（必填也不硬造）。"""
+    planner, llm = _make_planner([{"content": _plan_json(source="/d", prompts=["car"])}])
+    plan = _parse_plan_dialog(planner, "检测 /d 中的汽车", timeout=30)
+
+    monkeypatch.setattr(
+        "auto2dlabel.tools.confirm.ask_missing_params",
+        lambda missing, timeout=30, optional=None: None,  # 用户回车跳过
+    )
+    _fill_missing_params(plan, planner, timeout=30)
+
+    step = plan.steps[0]
+    assert step.model_name == "yolo26x.pt"  # 默认设置继续
+    assert step.confidence_threshold == 0.1
+    assert len(llm.messages_seen) == 1  # 无重解析（回答为空）
+
+
+def test_fill_missing_params_appends_dialog_context(monkeypatch: Any) -> None:
+    """追问回答进 dialog_context（2026-08-29 实测：确认编辑后 conf 0.3→0.1）。
+
+    回答必须成为后续重解析的基础文本，否则 Step 4 确认时改一句参数，
+    追问成果全丢（v0.6 G3 同款教训）。
+    """
+    planner, llm = _make_planner([
+        {"content": _plan_json(source="/d", prompts=["car"])},
+        {"content": _plan_json(source="/d", prompts=["car"], conf=0.3, iou=0.3)},
+    ])
+    plan = _parse_plan_dialog(planner, "检测 /d 中的汽车", timeout=30)
+
+    monkeypatch.setattr(
+        "auto2dlabel.tools.confirm.ask_missing_params",
+        lambda missing, timeout=30, optional=None: "confidence 和 iou 都设置为 0.3",
+    )
+    _fill_missing_params(plan, planner, timeout=30)
+
+    assert "confidence 和 iou 都设置为 0.3" in (plan.dialog_context or "")
+    assert plan.steps[0].confidence_threshold == 0.3
+
+
+def test_reparse_confirm_edit_preserves_earlier_answers() -> None:
+    """确认编辑不丢前序追问设置（实测洞端到端回归）。
+
+    用户先回答 conf=0.3（追问链），确认时改任务类型/模型；LLM 重解析
+    把 conf 回归默认 0.1 → 代码级 carry-over：编辑未提及的 conf 保留 0.3，
+    显式提及的 model 信任新解析（sam3.pt）。
+    """
+    planner, llm = _make_planner([
+        # 重解析响应：LLM 只带出模型变更，conf 丢回默认（模拟实测）
+        {"content": _plan_json(
+            source="llm_test_data/llm_test_data_nuscenes",
+            prompts=["car", "person"],
+            conf=0.1, iou=0.3, model="sam3.pt",
+        )},
+    ])
+    old = _dict_to_plan(json.loads(_plan_json(
+        source="llm_test_data/llm_test_data_nuscenes",
+        prompts=["car", "person"],
+        conf=0.3, iou=0.3, model="yolo26x.pt",
+    )))
+    old.raw_instruction = "检测 llm_test_data/llm_test_data_nuscenes 中的汽车和行人"
+
+    updated = _reparse_confirm_edit(
+        planner, old, "改为实例分割任务, 模型采用 sam3", timeout=30
+    )
+
+    step = updated.steps[0]
+    assert step.model_name == "sam3.pt"  # 编辑显式提及 → 新解析胜出
+    assert step.confidence_threshold == 0.3  # 未提及 → 前序回答保留（曾回归 0.1）
+    assert step.prompts == ["car", "person"]
+    assert len(llm.messages_seen) == 1
+
+
+def test_reparse_confirm_edit_explicit_edit_wins() -> None:
+    """编辑显式提及的参数信任新解析（不被 carry-over 回滚）。"""
+    planner, llm = _make_planner([
+        {"content": _plan_json(
+            source="/d", prompts=["car"],
+            conf=0.1, iou=0.3, model="yolo12n.pt",
+        )},
+    ])
+    old = _dict_to_plan(json.loads(_plan_json(
+        source="/d", prompts=["car"],
+        conf=0.5, iou=0.4, model="fasterrcnn_resnet50_fpn_v2",
+    )))
+    old.raw_instruction = "检测 /d 中的汽车，置信度 0.5"
+
+    updated = _reparse_confirm_edit(
+        planner, old, "置信度改为 0.1，模型改为 yolo12n.pt", timeout=30
+    )
+
+    step = updated.steps[0]
+    # 编辑显式提及 conf/model → 新解析值生效（即使 conf 0.1 == 默认）
+    assert step.model_name == "yolo12n.pt"
+    assert step.confidence_threshold == 0.1
+    # iou 未提及且新解析为默认 → 前序 0.4 保留
+    assert step.iou_threshold == 0.4
 
 
 def test_create_client_has_credentials(monkeypatch: Any) -> None:
@@ -422,7 +558,7 @@ def test_chat_command_no_key_full_chain(monkeypatch: Any) -> None:
     # 无 key 下缺失追问由代码级映射兜底（零 LLM）
     monkeypatch.setattr(
         "auto2dlabel.tools.confirm.ask_missing_params",
-        lambda missing, timeout=30: "数据在 /data/images/，检测汽车",
+        lambda missing, timeout=30, optional=None: "数据在 /data/images/，检测汽车",
     )
     monkeypatch.setattr(
         "auto2dlabel.tools.confirm.ask_with_timeout",
@@ -493,9 +629,17 @@ def test_chat_command_dialog_flow(monkeypatch: Any) -> None:
 
 
 def test_chat_command_complete_no_wait(monkeypatch: Any) -> None:
-    """串联直行：完整指令 + --no-wait → 单轮解析，零对话零确认直达执行。"""
+    """串联直行：完整指令 + --no-wait → 单轮解析，零对话零确认直达执行。
+
+    组 1 控制变量场景：指令显式指定「模型用 yolo26x.pt，置信度 0.5，
+    IoU 0.4」→ 即使 LLM 提取的 model 恰为默认值（yolo26x.pt），
+    guard_explicit_params 视为已指定 → optional 追问为空，不误追问。
+    """
     llm = _ScriptedLLM([
-        {"content": _plan_json(source="/data/images", prompts=["car"])},
+        {"content": _plan_json(
+            source="/data/images", prompts=["car"],
+            conf=0.5, iou=0.4, model="yolo26x.pt",
+        )},
     ])
     executed: list[TaskPlan] = []
 
@@ -516,7 +660,7 @@ def test_chat_command_complete_no_wait(monkeypatch: Any) -> None:
     )
 
     cli_commands.chat_command(
-        instruction="检测 /data/images 中的汽车",
+        instruction="检测 /data/images 中的汽车，模型用 yolo26x.pt，置信度 0.5，IoU 0.4",
         det_model=None,
         confirm_timeout=30,
         no_wait=True,

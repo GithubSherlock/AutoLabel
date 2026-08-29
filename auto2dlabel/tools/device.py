@@ -91,6 +91,38 @@ def get_gpu_free_memory_gb() -> float | None:
     return free / (1024 ** 3)
 
 
+# 启动体检阈值（GB）：低于此值黄字提醒（实测洞：上次运行 Ctrl+Z 挂起的
+# 进程残留 10GB，空闲仅 7MiB，SAM3 加载 OOM 崩溃且异常被 typer 吞掉）
+_HEADROOM_WARN_GB = 2.0
+
+
+def check_gpu_headroom() -> bool:
+    """启动显存体检（2026-08-29）：显存紧张时黄字提醒，True = 显存充足。
+
+    场景：上次运行未正常退出（终端挂起/未关闭）→ 残留进程占显存 →
+    本次运行跑到一半神秘 OOM。体检在开跑前给出可操作的指引
+    （nvidia-smi 检查清理 / 换小模型），且不阻断执行（用户可能有意共存）。
+
+    Returns:
+        True = 空闲 ≥ 阈值（无需提醒）；False = 已提醒（执行继续）。
+    """
+    free_gb = get_gpu_free_memory_gb()
+    if free_gb is None:
+        return True  # 无 CUDA（CPU/MPS）无需体检
+    if free_gb >= _HEADROOM_WARN_GB:
+        return True
+    # 普通 print 不渲染 markup（与 print_device 同风格，勿带 [yellow] 标记）
+    print(
+        f"⚠ GPU 显存紧张（空闲 {free_gb:.2f} GiB < {_HEADROOM_WARN_GB:.0f} GiB）"
+        "——可能上次运行未正常退出、仍有进程占用。"
+    )
+    print(
+        "  请 nvidia-smi 检查并清理残留进程后重跑；若属正常共存可忽略"
+        "（单图 OOM 时会自动跳过并提示）。"
+    )
+    return False
+
+
 def recommend_num_workers() -> int:
     """DataLoader workers 按 CPU 核数推荐（与 GPU 显存无关）。
 

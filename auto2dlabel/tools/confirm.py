@@ -38,8 +38,8 @@ def ask_with_timeout(
 
     print(prompt)
     print(
-        f"\n[yellow]等待 {timeout} 秒后自动执行。"
-        "回复 'cancel' 取消，或直接输入修改指令...[/yellow]"
+        f"\n等待 {timeout} 秒后自动执行。"
+        "回复 'cancel' 取消，或直接输入修改指令..."
     )
 
     user_input: list[str | None] = [None]
@@ -63,21 +63,22 @@ def ask_with_timeout(
 
     if reader.is_alive():
         # 超时
-        print(f"\n[dim]超时 {timeout}s，自动继续...[/dim]")
+        print(f"\n超时 {timeout}s，自动继续...")
         return ConfirmResult(confirmed=True)
     elif reply is None:
-        # Ctrl+C / EOF
-        print("\n[red]已取消[/red]")
+        # 空回车 / Ctrl+C / EOF（调用方按各自语义处理：
+        # 追问=跳过按默认继续；最终确认=取消）
+        print("\n未收到输入")
         return ConfirmResult(confirmed=False)
     elif reply.lower() in ("cancel", "c", "no", "n", "取消"):
-        print("[red]用户取消[/red]")
+        print("用户取消")
         return ConfirmResult(confirmed=False)
     elif reply.lower() in ("ok", "y", "yes", "确认", "好", "继续"):
-        print("[green]用户确认，立即执行[/green]")
+        print("用户确认，立即执行")
         return ConfirmResult(confirmed=True)
     else:
         # 用户输入了修改指令
-        print(f"[dim]收到修改: {reply}[/dim]")
+        print(f"收到修改: {reply}")
         return ConfirmResult(confirmed=True, user_input=reply)
 
 
@@ -99,8 +100,8 @@ def ask_text(prompt: str, timeout: int = 30) -> str | None:
 
     print(prompt)
     print(
-        f"\n[yellow]等待 {timeout} 秒后跳过对话。"
-        "回复 'cancel' 放弃补充，或直接输入回答...[/yellow]"
+        f"\n等待 {timeout} 秒后跳过对话。"
+        "回复 'cancel' 放弃补充，或直接输入回答..."
     )
 
     user_input: list[str | None] = [None]
@@ -124,10 +125,10 @@ def ask_text(prompt: str, timeout: int = 30) -> str | None:
 
     if reader.is_alive():
         # 超时
-        print(f"\n[dim]超时 {timeout}s，跳过对话，使用计划默认值...[/dim]")
+        print(f"\n超时 {timeout}s，跳过对话，使用计划默认值...")
         return None
     elif reply is None or reply.lower() in ("cancel", "c", "no", "n", "取消"):
-        print("[dim]跳过对话，使用计划默认值继续。[/dim]")
+        print("跳过对话，使用计划默认值继续。")
         return None
     return reply
 
@@ -135,23 +136,28 @@ def ask_text(prompt: str, timeout: int = 30) -> str | None:
 def ask_missing_params(
     missing: dict[int, list[str]],
     timeout: int = 30,
+    optional: dict[int, list[str]] | None = None,
 ) -> str | None:
-    """追问缺失参数。
+    """追问缺失参数（required + 可选 ask 标记，2026-08-29 追问扩展）。
 
     Args:
-        missing: {step_id: [missing_param_names]}。
+        missing: {step_id: [required 缺失参数]}（必填，回答后必须补齐）。
         timeout: 等待秒数。
+        optional: {step_id: [未指定的可选参数]}——文案带默认提醒，
+            回车/超时按默认设置继续。
 
     Returns:
-        用户输入的补充信息，或 None 表示超时/取消。
+        用户输入的补充信息，或 None 表示超时/取消/回车跳过（用默认）。
     """
-    lines = ["检测到以下参数缺失，请补充："]
+    lines = ["检测到以下参数未指定，请补充（直接回车或超时按默认设置继续）："]
     for step_id, params in missing.items():
+        lines.append(f"  Step {step_id}: {', '.join(params)}（必填）")
+    for step_id, params in (optional or {}).items():
         lines.append(f"  Step {step_id}: {', '.join(params)}")
 
     lines.append("")
-    lines.append("例如回复: \"数据在 /data/images/，检测汽车和行人\"")
-    lines.append("直接回车或超时将使用默认值继续。")
+    lines.append("例如回复: \"数据在 /data/images/，模型用 yolo26x，置信度 0.5\"")
+    lines.append("直接回车或超时将使用默认设置继续。")
 
     result = ask_with_timeout("\n".join(lines), timeout=timeout, default_confirm=True)
     return result.user_input

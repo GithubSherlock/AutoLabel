@@ -24,12 +24,28 @@ def setup_logging(verbose: bool) -> None:
 
 
 def collect_images(path: Path, batch: bool) -> list[Path]:
-    """收集图像文件列表。"""
+    """收集图像文件列表。
+
+    目录模式（batch=True）：顶层有图 → 只收顶层（历史语义不变）；顶层无图 →
+    递归子目录兜底——LLM 路径引导可能把 source 指向数据集根目录而非图像目录
+    （如 KITTI training/ 的图像实际在 training/image_2/，2026-08-29）。
+    """
     extensions = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".bmp"}
     if path.is_file():
         return [path] if path.suffix.lower() in extensions else []
     if path.is_dir() and batch:
-        return sorted([p for p in path.iterdir() if p.suffix.lower() in extensions])
+        images = sorted([p for p in path.iterdir() if p.suffix.lower() in extensions])
+        if images:
+            return images
+        nested = sorted(
+            p
+            for sub in path.iterdir()
+            if sub.is_dir()
+            for p in sub.rglob("*")
+            if p.is_file() and p.suffix.lower() in extensions
+        )
+        if nested:
+            return nested
     if path.is_dir():
         console.print("[yellow]目录模式需要 --batch 参数[/yellow]")
         return []

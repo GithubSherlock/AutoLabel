@@ -445,7 +445,13 @@ from auto2dlabel.tools.device import get_device  # noqa: E402
 
 
 def _match_prompt(label: str, prompts: list[str]) -> bool:
-    """检查检测到的标签是否匹配用户指定的任意 prompt。"""
+    """检查检测到的标签是否匹配用户指定的任意 prompt。
+
+    空 prompts = 用户未指定类别 = 不过滤（全类别输出）——曾为恒 False 把
+    所有框过滤掉，导致 prompts 空时静默零框（2026-08-29 KITTI 全量零框事故）。
+    """
+    if not prompts:
+        return True
     label_lower = label.lower()
     for p in prompts:
         p_lower = p.lower()

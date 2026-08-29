@@ -41,6 +41,55 @@ def sample_command(top_k: int, review_dir: str, output: str) -> None:
         )
 
 
+def dataset_add_command(
+    name: str,
+    path: str,
+    *,
+    subdirs: list[str] | None = None,
+    task: str = "",
+    note: str = "",
+) -> None:
+    """`dataset add` 命令实现：注册自建数据集（供 LLM 路径引导）。"""
+    from auto2dlabel.configs.datasets import (
+        USER_DATASETS_FILE,
+        register_user_dataset,
+    )
+
+    info = register_user_dataset(name, path, subdirs=subdirs, task=task, note=note)
+    console.print(
+        f"[green]✓ 已注册[/green] {name} → {info.path}"
+        f"（写入 {USER_DATASETS_FILE}，chat 指令可直接引用该数据集名）"
+    )
+
+
+def dataset_list_command() -> None:
+    """`dataset list` 命令实现：列出已注册的自建数据集。"""
+    from auto2dlabel.configs.datasets import load_user_datasets
+
+    datasets = load_user_datasets()
+    if not datasets:
+        console.print("[yellow]尚未注册自建数据集（dataset add <name> <path>）[/yellow]")
+        return
+    table = Table(title="用户自建数据集")
+    table.add_column("名称", style="cyan")
+    table.add_column("路径")
+    table.add_column("任务")
+    table.add_column("备注", style="dim")
+    for name, info in sorted(datasets.items()):
+        table.add_row(name, str(info.path), info.task, info.note)
+    console.print(table)
+
+
+def dataset_remove_command(name: str) -> None:
+    """`dataset remove` 命令实现：删除自建数据集。"""
+    from auto2dlabel.configs.datasets import remove_user_dataset
+
+    if remove_user_dataset(name):
+        console.print(f"[green]✓ 已删除[/green] {name}")
+    else:
+        console.print(f"[yellow]未找到自建数据集: {name}[/yellow]")
+
+
 def tools_command() -> None:
     """`tools` 命令实现：列出所有已注册 Tool。"""
     from auto2dlabel.tools.detection import register as reg_detect
@@ -139,7 +188,9 @@ def chat_command(
 
     # ---- Step 4: 展示计划 + 确认 ----
     if not no_wait:
-        confirm_msg = f"[bold]执行计划如下：[/bold]\n{plan.summary}"
+        # 注意：此文本走 ask_with_timeout 的普通 print（非 Rich console），
+        # 不能带 [bold] 等 markup 标记——会原样泄漏到终端
+        confirm_msg = f"执行计划如下：\n{plan.summary}"
         result = ask_with_timeout(confirm_msg, timeout=timeout)
         if not result.confirmed:
             console.print("[yellow]用户取消[/yellow]")
@@ -253,6 +304,18 @@ def _maybe_recommend_classes(plan: TaskPlan, timeout: int, no_wait: bool) -> Non
             console.print(f"[dim]已自动选择: {recommended}[/dim]")
 
 
+def _is_auto_batch_input(text: str) -> bool:
+    """识别「跑最大/最大/自动/尽可能大/max」等自然语言表述 → 自动实测最大 batch。
+
+    2026-08-29：用户说「批量处理时跑最大」曾被 _parse_batch_input 判为格式无效，
+    白问一轮——现在视同留空回车（执行阶段动态实测最大 batch）。
+    """
+    t = text.strip().lower()
+    if not t or any(ch.isdigit() for ch in t):
+        return False
+    return any(k in t for k in ("最大", "自动", "尽可能", "跑满", "拉满", "max", "auto"))
+
+
 def _parse_batch_input(text: str) -> tuple[int, int] | None:
     """解析 'batch_size=8 num_workers=4' 或 '8 4' → (batch_size, num_workers)。
 
@@ -305,13 +368,16 @@ def _fill_batch_params(
         first = plan.steps[0]
         rec_bs, rec_nw = recommend_batch_params(first.task_type, gpu_mem)
         msg = (
-            "[bold]批量推理超参数[/bold]（留空回车 = 自动实测最大 batch，"
+            "批量推理超参数（留空回车 = 自动实测最大 batch，"
             f"静态参考 batch_size={rec_bs} num_workers={rec_nw}）\n"
             "  格式: batch_size=N num_workers=M"
         )
         for _ in range(3):
             result = ask_with_timeout(msg, timeout=timeout)
             if not result.confirmed or not result.user_input:
+                break
+            if _is_auto_batch_input(result.user_input):
+                console.print("[dim]收到「跑最大」→ 执行阶段自动实测最大 batch[/dim]")
                 break
             parsed = _parse_batch_input(result.user_input)
             if parsed is None:
@@ -376,7 +442,7 @@ def _plan_without_llm(user_text: str) -> TaskPlan:
 def _reparse_confirm_edit(
     planner: TaskPlanner, plan: TaskPlan, user_input: str, timeout: int
 ) -> TaskPlan:
-    """Step 4 确认修改重解析（v0.6 G3 修复）。
+    """Step 4 确认修改重解析（v0.6 G3 修复 + 2026-08-29 参数保留）。
 
     对话收集的参数只存 dialog_context、不在 raw_instruction——重解析必须带上，
     否则用户确认时改一句参数，对话成果全丢、字段回归缺失。
@@ -384,25 +450,68 @@ def _reparse_confirm_edit(
     否则第二次修改 base 退化为 raw_instruction、对话字段再次回归缺失）。
     raw_instruction 还原为「原指令 + 用户修改」（v0.5 语义：Step 4.5+
     代码级扫描能看到修改文本，但看不到对话回喂噪声）。
+
+    另加代码级兜底（LLM 重解析仍可能丢前序设置）：编辑文本未显式提及的
+    参数，旧值非默认而新值为默认时旧值胜出——实测「先回答置信度 0.3，
+    再在确认时改任务类型」场景，LLM 重解析把 conf 回归 0.1。
     """
     original = plan.raw_instruction
     base = plan.dialog_context or original
     updated = planner.parse(f"{base} {user_input}", confirm_timeout=timeout)
     updated.dialog_context = f"{base} {user_input}"
     updated.raw_instruction = f"{original} {user_input}"
+    _carry_over_user_params(plan, updated, user_input)
     return updated
 
 
+def _carry_over_user_params(old: TaskPlan, new: TaskPlan, user_input: str) -> None:
+    """代码级保留用户前序参数设置（2026-08-29 实测洞：确认编辑丢 conf）。
+
+    编辑文本显式提及的键信任新解析（用户正在改它们）；未提及的键，
+    旧值非默认而新值为默认 → 旧值胜出（LLM 漏提取，宁保用户已答过的值）。
+    prompts/source 同理：新解析为空时保留旧值（编辑未提类别/路径时）。
+    """
+    from auto2dlabel.configs.task_params import TASK_PARAM_SPECS, guard_explicit_params
+
+    explicit = guard_explicit_params(user_input)
+    old_by_id = {s.step_id: s for s in old.steps}
+    for new_step in new.steps:
+        old_step = old_by_id.get(new_step.step_id)
+        if old_step is None:
+            continue
+        # prompts/source 同表覆盖：旧值非空而新解析为空（== 默认）→ 保留旧值
+        for key, spec in TASK_PARAM_SPECS.items():
+            if key in explicit:
+                continue
+            old_v = getattr(old_step, key)
+            new_v = getattr(new_step, key)
+            if old_v != spec.default and new_v == spec.default:
+                setattr(new_step, key, old_v)
+
+
 def _fill_missing_params(plan: TaskPlan, planner: TaskPlanner, timeout: int) -> None:
-    """如果 TaskPlan 有缺失参数，追问用户。"""
+    """如果 TaskPlan 有缺失参数（必填 + 可选 ask 标记），追问用户。
+
+    v0.6 追问扩展（2026-08-29）：缺模型选择 / 缺部分超参数（conf/iou）也
+    进入追问链——文案带默认提醒，回车/超时按默认设置继续。
+    """
+    from auto2dlabel.configs.task_params import guard_explicit_params
     from auto2dlabel.tools.confirm import ask_missing_params
 
     missing = plan.all_missing_params
-    if not missing:
+    # 指令显式提及的（模型/阈值）→ 即使值==默认也视为已指定，不误追问
+    explicit = guard_explicit_params(plan.raw_instruction)
+    optional = plan.all_optional_missing(explicit)
+    if not missing and not optional:
         return
 
-    reply = ask_missing_params(missing, timeout=timeout)
+    reply = ask_missing_params(missing, optional=optional, timeout=timeout)
     if reply:
+        # 追问回答进 dialog_context——Step 4 确认修改重解析以它为基础
+        # （2026-08-29 实测：conf 0.3 在确认编辑后回归 0.1，追问成果全丢）
+        plan.dialog_context = (
+            f"{plan.dialog_context} {reply}".strip() if plan.dialog_context else reply
+        )
         if not planner.llm.has_credentials:
             _apply_reply_without_llm(plan, reply)  # v0.6：无 key 代码级字段映射
             return

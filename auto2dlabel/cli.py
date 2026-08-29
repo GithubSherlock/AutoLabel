@@ -11,7 +11,14 @@ from __future__ import annotations
 
 import typer
 
-from auto2dlabel.cli_commands import chat_command, sample_command, tools_command
+from auto2dlabel.cli_commands import (
+    chat_command,
+    dataset_add_command,
+    dataset_list_command,
+    dataset_remove_command,
+    sample_command,
+    tools_command,
+)
 from auto2dlabel.cli_run import run_command
 
 app = typer.Typer(
@@ -134,6 +141,44 @@ def sample(
 def tools() -> None:
     """列出所有可用的标注 Tool。"""
     tools_command()
+
+
+dataset_app = typer.Typer(help="管理用户自建数据集注册（供 LLM 路径引导）")
+app.add_typer(dataset_app, name="dataset")
+
+
+@dataset_app.command("add")
+def dataset_add(
+    name: str = typer.Argument(..., help="数据集名（chat 指令中引用的名字）"),
+    path: str = typer.Argument(..., help="数据集根目录（必须存在）"),
+    subdirs: str = typer.Option(
+        "", "--subdirs", help="关键子目录，逗号分隔（如 images,annotations）"
+    ),
+    task: str = typer.Option("", "--task", help="任务描述（如 实例分割）"),
+    note: str = typer.Option("", "--note", help="备注"),
+) -> None:
+    """注册用户自建数据集 → configs/user_datasets.yaml（LLM 路径引导用）。"""
+    dataset_add_command(
+        name=name,
+        path=path,
+        subdirs=[s.strip() for s in subdirs.split(",") if s.strip()],
+        task=task,
+        note=note,
+    )
+
+
+@dataset_app.command("list")
+def dataset_list() -> None:
+    """列出已注册的自建数据集。"""
+    dataset_list_command()
+
+
+@dataset_app.command("remove")
+def dataset_remove(
+    name: str = typer.Argument(..., help="数据集名"),
+) -> None:
+    """删除已注册的自建数据集。"""
+    dataset_remove_command(name=name)
 
 
 @app.command()

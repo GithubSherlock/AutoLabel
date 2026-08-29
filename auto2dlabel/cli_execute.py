@@ -58,6 +58,12 @@ def execute_plan(
     _plan_t0 = _time.time()
     steps_results: list[dict[str, Any]] = []
 
+    # 启动显存体检（2026-08-29）：上次运行未正常退出（Ctrl+Z 挂起/终端未关）
+    # 残留进程占显存 → 开跑前黄字提醒（不阻断，单图 OOM 时另有跳过保护）
+    from auto2dlabel.tools.device import check_gpu_headroom
+
+    check_gpu_headroom()
+
     for step in plan.steps:
         _print_step_header(step)
 
@@ -152,13 +158,29 @@ def execute_plan(
             import torch
 
             torch.cuda.empty_cache()
+            # 单图仍 OOM（如大模型加载都装不下，2026-08-29 SAM3 实测）：不崩整批，
+            # 跳图带指引继续（其余图像照常产出，失败可见不静默）
+            oom_hint_shown = False
             for img in images[idx:]:
-                _execute_chunk(
-                    step, [img], det_name, seg_name, model, seg_model,
-                    sahi, _t0, _ts, steps_results,
-                    obb_model=obb_model, cls_model=cls_model, pose_model=pose_model,
-                    num_workers=num_workers,
-                )
+                try:
+                    _execute_chunk(
+                        step, [img], det_name, seg_name, model, seg_model,
+                        sahi, _t0, _ts, steps_results,
+                        obb_model=obb_model, cls_model=cls_model, pose_model=pose_model,
+                        num_workers=num_workers,
+                    )
+                except RuntimeError as e2:
+                    if "out of memory" not in str(e2).lower():
+                        raise
+                    torch.cuda.empty_cache()
+                    if not oom_hint_shown:
+                        console.print(
+                            "[yellow]⚠ 单图仍 OOM：GPU 显存不足（可能被其他进程占用，"
+                            "请用 nvidia-smi 检查并清理后重跑，或换更小的模型"
+                            "（如分割 SAM3 → sam2_l.pt）。剩余图像继续尝试...[/yellow]"
+                        )
+                        oom_hint_shown = True
+                    console.print(f"[yellow]跳过: {img}（显存不足）[/yellow]")
 
     _log_plan(plan, steps_results, _plan_t0)
 
@@ -1086,6 +1108,14 @@ def _segmentation_step(
                 Bbox(x=0, y=0, width=1, height=1, label=p, confidence=1.0)
                 for p in step.prompts
             ]
+            if not prompt_bboxes:
+                # SAM3 等文本驱动模型无类别无法检测（曾静默零输出，2026-08-29）
+                console.print(
+                    "[yellow]未指定检测类别（prompts 为空）——SAM3 文本驱动分割"
+                    "无法运行，分割跳过（检测结果照常导出）。重新执行时请指定类别，"
+                    "如「检测 KITTI 中的汽车、行人」[/yellow]"
+                )
+                return
             masks = seg_model.generate(str(img_path), prompt_bboxes)
         if masks:
             ann.bboxes = []  # 用分割模型的检测结果替换

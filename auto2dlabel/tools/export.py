@@ -108,6 +108,7 @@ class ExportTool(Tool):
         from auto2dlabel.export.voc import export_voc
         from auto2dlabel.export.yolo import export_yolo, export_yolo_obb
 
+        # 新增格式须同步 schema/task_plan.EXPORT_FORMATS（LLM 守卫白名单）
         exporters = {
             "coco": export_coco,
             "cls": export_cls,

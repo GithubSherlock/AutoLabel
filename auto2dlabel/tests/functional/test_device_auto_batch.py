@@ -18,6 +18,7 @@ import pytest
 from auto2dlabel.tests import Path, np
 from auto2dlabel.tools.device import (
     auto_tune_batch_size,
+    check_gpu_headroom,
     disable_tf32,
     get_gpu_free_memory_gb,
     measure_single_image_memory,
@@ -126,6 +127,44 @@ def test_get_gpu_free_memory_value(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _dev=0: (8 * 1024 ** 3, 24 * 1024 ** 3))
     assert get_gpu_free_memory_gb() == pytest.approx(8.0)
+
+
+# ── 启动显存体检（2026-08-29：残留进程早提醒）────────────────────
+
+
+def test_check_gpu_headroom_no_cuda(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """无 CUDA → 免检不提醒。"""
+    monkeypatch.setattr(
+        "auto2dlabel.tools.device.get_gpu_free_memory_gb", lambda: None
+    )
+    assert check_gpu_headroom() is True
+    assert "GPU 显存紧张" not in capsys.readouterr().out
+
+
+def test_check_gpu_headroom_plenty(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """空闲充足（≥2 GiB）→ 静默通过。"""
+    monkeypatch.setattr(
+        "auto2dlabel.tools.device.get_gpu_free_memory_gb", lambda: 8.0
+    )
+    assert check_gpu_headroom() is True
+    assert capsys.readouterr().out == ""
+
+
+def test_check_gpu_headroom_warns_when_tight(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """空闲 <2 GiB（实测洞：残留进程致空闲 7MiB）→ 黄字提醒 + nvidia-smi 指引。"""
+    monkeypatch.setattr(
+        "auto2dlabel.tools.device.get_gpu_free_memory_gb", lambda: 0.007
+    )
+    assert check_gpu_headroom() is False  # 已提醒，执行继续
+    out = capsys.readouterr().out
+    assert "GPU 显存紧张" in out
+    assert "nvidia-smi" in out
 
 
 # ── 单图显存增量测量 ─────────────────────────────────────────────

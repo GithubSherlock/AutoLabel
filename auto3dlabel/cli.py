@@ -306,6 +306,68 @@ def _run_tracked_sequence(
     return stat
 
 
+dataset_app = typer.Typer(help="管理自建 3D 数据集注册（供 LLM 数据集识别）")
+app.add_typer(dataset_app, name="dataset")
+
+
+@dataset_app.command("add")
+def dataset_add(
+    name: str = typer.Argument(..., help="数据集名（chat 指令中引用的名字）"),
+    path: str = typer.Argument(..., help="数据集根目录（必须存在；须符 KITTI 目录结构）"),
+    subdirs: str = typer.Option(
+        "", "--subdirs", help="关键子目录，逗号分隔（如 training,testing）"
+    ),
+    task: str = typer.Option("", "--task", help="任务描述（如 3D 检测标注）"),
+    note: str = typer.Option("", "--note", help="备注"),
+) -> None:
+    """注册自建 3D 数据集 → configs/user_datasets.yaml（LLM 数据集识别用）。"""
+    from auto3dlabel.configs.datasets import USER_DATASETS_FILE, register_user_dataset
+
+    info = register_user_dataset(
+        name,
+        path,
+        subdirs=[s.strip() for s in subdirs.split(",") if s.strip()],
+        task=task,
+        note=note,
+    )
+    console.print(
+        f"[green]✓ 已注册[/green] {name} → {info.path}（写入 {USER_DATASETS_FILE}；"
+        "须符 KITTI 目录结构 training/{calib,image_2,label_2,velodyne}）"
+    )
+
+
+@dataset_app.command("list")
+def dataset_list() -> None:
+    """列出已注册的自建 3D 数据集。"""
+    from auto3dlabel.configs.datasets import USER_DATASETS_FILE, load_user_datasets
+
+    datasets = load_user_datasets(USER_DATASETS_FILE)
+    if not datasets:
+        console.print("[yellow]尚未注册自建 3D 数据集（dataset add <name> <path>）[/yellow]")
+        return
+    table = Table(title="用户自建 3D 数据集")
+    table.add_column("名称", style="cyan")
+    table.add_column("路径")
+    table.add_column("任务")
+    table.add_column("备注", style="dim")
+    for name, info in sorted(datasets.items()):
+        table.add_row(name, str(info.path), info.task, info.note)
+    console.print(table)
+
+
+@dataset_app.command("remove")
+def dataset_remove(
+    name: str = typer.Argument(..., help="数据集名"),
+) -> None:
+    """删除已注册的自建 3D 数据集。"""
+    from auto3dlabel.configs.datasets import remove_user_dataset
+
+    if remove_user_dataset(name):
+        console.print(f"[green]✓ 已删除[/green] {name}")
+    else:
+        console.print(f"[yellow]数据集 {name} 未注册[/yellow]")
+
+
 @app.command()
 def run(
     target: Annotated[str, typer.Argument(help="帧 ID（000123/123）、范围（003712-003731）或目录")],
@@ -453,9 +515,14 @@ def chat(
             console.print(f"[red]解析失败: {e2}[/red]")
             raise typer.Exit(code=1)
     console.print(f"[dim]plan: {plan.summary}[/dim]")
-    if not plan.frame_id:
-        raise typer.BadParameter("指令中未指定 KITTI 帧 ID")
-    frame = resolve_frame(plan.frame_id)
+    missing = plan.missing_params  # 规格表驱动（frame_id + prompts，缺参清单直显）
+    if missing:
+        raise typer.BadParameter(f"缺少参数: {', '.join(missing)}")
+    try:
+        frame = resolve_frame(plan.frame_id)
+    except (ValueError, FileNotFoundError) as e:
+        # 帧号非法/帧不存在 → 干净报错，不裸 traceback
+        raise typer.BadParameter(str(e))
     det_name = _resolve_det_model(det_model or plan.det_model)
 
     t0 = time.perf_counter()

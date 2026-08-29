@@ -66,4 +66,6 @@ Thumbs.db
 # ===== 其他 =====
 gitpush.sh
 clear_cache.sh
-cvat
+cvatauto2dlabel
+
+auto2dlabel/configs/user_datasets.yaml

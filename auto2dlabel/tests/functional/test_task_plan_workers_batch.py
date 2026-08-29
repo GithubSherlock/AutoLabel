@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from auto2dlabel.cli_commands import _parse_batch_input
+from auto2dlabel.cli_commands import _is_auto_batch_input, _parse_batch_input
 from auto2dlabel.schema.task_plan import (
     TaskStep,
     detect_gpu_memory_gb,
@@ -58,6 +58,22 @@ def test_task_step_summary_shows_batch() -> None:
     step = _make_step(batch_size=8, num_workers=4)
     assert "batch=8/4w" in step.summary
     assert "batch=" not in _make_step().summary
+
+
+def test_task_step_summary_rich_safe() -> None:
+    """回归（2026-08-29）：summary 经 console.print 渲染后 prompts 可见。
+
+    半角方括号 [car, person] 会被 Rich 当无效 markup 标签吞掉（实测终端
+    「参数已更新」行类别显示为空），故 summary 用全角括号。
+    """
+    from rich.console import Console
+
+    step = _make_step(prompts=["car", "person"])
+    console = Console(width=200)
+    with console.capture() as capture:
+        console.print(f"[dim]参数已更新: {step.summary}[/dim]")
+    rendered = capture.get()
+    assert "car, person" in rendered  # 曾为空（[car, person] 被 Rich 吞掉）
 
 
 def test_recommend_no_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,3 +160,51 @@ def test_parse_batch_input_valid(text: str, expected: tuple[int, int]) -> None:
 )
 def test_parse_batch_input_invalid(text: str) -> None:
     assert _parse_batch_input(text) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "跑最大",
+        "批量处理时跑最大",
+        "最大",
+        "用最大批量",
+        "自动",
+        "尽可能大",
+        "拉满",
+        "跑满",
+        "max",
+        "MAX",
+        "auto",
+    ],
+)
+def test_is_auto_batch_input_recognizes(text: str) -> None:
+    """回归：自然语言「跑最大」→ 自动实测最大（曾被判格式无效白问一轮，2026-08-29）。"""
+    assert _is_auto_batch_input(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",           # 空
+        "批量8",       # 带数字 = 显式指定，不是自动
+        "batch_size=8 num_workers=4",
+        "abc",        # 无关键词
+        "   ",        # 纯空白
+    ],
+)
+def test_is_auto_batch_input_rejects(text: str) -> None:
+    assert _is_auto_batch_input(text) is False
+
+
+def test_planner_batch_rule_recognizes_auto_max() -> None:
+    """planner 规则明确「跑最大」→ batch_size=null（执行阶段自动实测最大 batch）。
+
+    2026-08-29 实测：LLM 对「批量处理时跑最大」无规则可依，null 语义不被
+    理解——规则现在写死「跑最大/最大批量/自动 → null = 自动实测最大（非 1）」。
+    """
+    from auto2dlabel.agent.planner import _PLANNER_SYSTEM_PROMPT
+
+    assert "跑最大" in _PLANNER_SYSTEM_PROMPT
+    assert "自动实测最大" in _PLANNER_SYSTEM_PROMPT
+    assert "不是 1" in _PLANNER_SYSTEM_PROMPT

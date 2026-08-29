@@ -5,9 +5,22 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Set
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+from auto2dlabel.configs.task_params import (
+    TASK_PARAM_SPECS,
+    coerce_bool,
+    coerce_float,
+    coerce_int,
+    coerce_str,
+    coerce_strs,
+    guard_batch_size,
+    guard_num_workers,
+)
 
 
 class TaskType(str, Enum):
@@ -21,11 +34,12 @@ class TaskType(str, Enum):
     TRACKING = "tracking"
 
 
-# 默认值（标注工具）
-DEFAULT_CONFIDENCE = 0.1  # 标注工具低阈值，宁多勿漏
-DEFAULT_IOU = 0.3
-DEFAULT_MODEL = "yolo26x.pt"  # 统一默认检测模型（VOC 实测 2.4× fasterrcnn）
-DEFAULT_EXPORT = "coco"
+# 默认值（标注工具）——单一事实源在 configs/task_params.py 规格表（default 字段派生）
+DEFAULT_CONFIDENCE = float(TASK_PARAM_SPECS["confidence_threshold"].default)  # 低阈值，宁多勿漏
+DEFAULT_IOU = float(TASK_PARAM_SPECS["iou_threshold"].default)
+# 统一默认检测模型（VOC 实测 2.4× fasterrcnn）
+DEFAULT_MODEL = str(TASK_PARAM_SPECS["model_name"].default)
+DEFAULT_EXPORT = str(TASK_PARAM_SPECS["export_format"].default)
 DEFAULT_TIMEOUT = 30
 
 # 默认值（benchmark）
@@ -73,8 +87,13 @@ DATASET_CN_MAP: dict[str, str] = {
     "image net 1k": "imagenet1k",
 }
 
-# 必填参数集合
-REQUIRED_PARAMS = {"source", "prompts"}
+# 必填参数集合（由规格表派生——required 字段单一事实源）
+REQUIRED_PARAMS = {s.key for s in TASK_PARAM_SPECS.values() if s.required}
+
+# 合法导出格式（tools/export.py exporters 注册表键；新增格式须同步该处）
+EXPORT_FORMATS = frozenset(
+    {"coco", "cls", "dota", "labelme", "mot", "yolo", "yolo_obb", "voc"}
+)
 
 
 @dataclass
@@ -132,21 +151,40 @@ class TaskStep:
 
     @property
     def missing_params(self) -> list[str]:
-        """返回缺失的必填参数名列表。"""
-        missing = []
-        if not self.source:
-            missing.append("source（数据路径）")
-        if not self.prompts:
-            missing.append("prompts（检测类别）")
-        return missing
+        """返回缺失的必填参数名列表（规格表驱动：required 字段值 falsy 即缺失）。"""
+        return [
+            spec.label
+            for spec in TASK_PARAM_SPECS.values()
+            if spec.required and not getattr(self, spec.key)
+        ]
 
     @property
     def is_complete(self) -> bool:
         return len(self.missing_params) == 0
 
+    def optional_missing(self, explicit: Set[str] = frozenset()) -> list[str]:
+        """未指定的可选参数（规格表 ask 标记；2026-08-29 追问扩展）。
+
+        值为默认值即视为「未指定」（LLM 未提取）→ 进入追问链；
+        文案带默认提醒——回车/超时按默认继续。
+        explicit: 指令文本显式提及的 key（guard_explicit_params）——
+            「模型用 yolo26x.pt」值恰为默认也视为已指定，不误追问。
+        """
+        return [
+            f"{spec.label}（默认 {spec.default}）"
+            for spec in TASK_PARAM_SPECS.values()
+            if spec.ask
+            and getattr(self, spec.key) == spec.default
+            and spec.key not in explicit
+        ]
+
     @property
     def summary(self) -> str:
-        """一行摘要。"""
+        """一行摘要。
+
+        注：prompts 用全角括号（markup 安全）——summary 会经 console.print
+        渲染，半角方括号 [car, person] 会被 Rich 当作无效标签吞掉（实测）。
+        """
         batch_note = (
             f" batch={self.batch_size}/{self.num_workers}w"
             if self.batch_size is not None or self.num_workers is not None
@@ -154,7 +192,7 @@ class TaskStep:
         )
         return (
             f"Step {self.step_id}: {self.task_type} → {self.source} → "
-            f"[{', '.join(self.prompts)}] → conf={self.confidence_threshold} "
+            f"（{', '.join(self.prompts)}） → conf={self.confidence_threshold} "
             f"iou={self.iou_threshold} → {self.model_name} → {self.export_format}"
             f"{batch_note}"
         )
@@ -266,8 +304,22 @@ class TaskPlan:
 
     @property
     def all_missing_params(self) -> dict[int, list[str]]:
-        """返回所有步骤的缺失参数。"""
+        """返回所有步骤的缺失参数（required，必问）。"""
         return {s.step_id: s.missing_params for s in self.steps if not s.is_complete}
+
+    def all_optional_missing(
+        self, explicit: Set[str] = frozenset()
+    ) -> dict[int, list[str]]:
+        """返回所有步骤未指定的可选参数（ask 标记，2026-08-29 追问扩展）。
+
+        explicit: 指令文本显式提及的 key 集合（guard_explicit_params），
+            透传给每步 optional_missing 过滤——显式指定默认值不误追问。
+        """
+        return {
+            s.step_id: s.optional_missing(explicit)
+            for s in self.steps
+            if s.optional_missing(explicit)
+        }
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -291,6 +343,70 @@ class TaskPlan:
             questions=PlanQuestion.from_list(d.get("questions")),
             dialog_context=str(d.get("dialog_context", "")),
         )
+
+
+# ================================================================
+# LLM 输出代码级守卫（防御纵深，2026-08-29）
+# ================================================================
+
+_TASK_TYPES = frozenset({t.value for t in TaskType})
+
+
+def sanitize_task_plan(plan: TaskPlan) -> list[str]:
+    """LLM 输出校验/强转（LLM 不可全信——实测「COCO2017」→ batch_size=2017）。
+
+    - batch_size/num_workers：以指令文本代码级提取为准（guard_*），
+      LLM 值不采信；无显式表述 → None（自动实测/交互）
+    - conf/iou：值域 (0,1] 外回默认（路径数字误提 → 全零静默失败的根治）
+    - 类型强转：prompts 单字符串 → 列表（防逐字符 join）、
+      sahi "false" 字符串 → False（防 Python truthy 坑）、
+      confirm_timeout 垃圾 → 默认（防 thread.join TypeError）
+    - 枚举白名单：task_type/export_format 垃圾 → 默认（防 KeyError/静默误路由）
+
+    Returns:
+        修正记录（"key: old -> new"），供调用方日志——守卫触发必须可见。
+    """
+    fixes: list[str] = []
+    # 对话回喂可能含用户补充的超参（如回答里说「批量4」），一并纳入提取文本
+    text = f"{plan.dialog_context} {plan.raw_instruction}"
+
+    def _fix(step: TaskStep, key: str, new: Any) -> None:
+        old = getattr(step, key)
+        if old != new:
+            fixes.append(f"{key}: {old!r} -> {new!r}")
+            setattr(step, key, new)
+
+    for i, step in enumerate(plan.steps):
+        _fix(step, "source", coerce_str(step.source))
+        _fix(step, "prompts", coerce_strs(step.prompts))
+        _fix(
+            step,
+            "confidence_threshold",
+            coerce_float(step.confidence_threshold, DEFAULT_CONFIDENCE, lo=0.0, hi=1.0),
+        )
+        _fix(
+            step,
+            "iou_threshold",
+            coerce_float(step.iou_threshold, DEFAULT_IOU, lo=0.0, hi=1.0),
+        )
+        _fix(step, "batch_size", guard_batch_size(text))
+        _fix(step, "num_workers", guard_num_workers(text))
+        _fix(step, "sahi", coerce_bool(step.sahi))
+        _fix(step, "model_name", coerce_str(step.model_name, DEFAULT_MODEL) or DEFAULT_MODEL)
+        _fix(step, "model_hint", coerce_str(step.model_hint))
+        fmt = coerce_str(step.export_format).replace("-", "_")  # yolo-obb → yolo_obb
+        _fix(step, "export_format", fmt if fmt in EXPORT_FORMATS else DEFAULT_EXPORT)
+        if step.task_type not in _TASK_TYPES:
+            _fix(step, "task_type", "object_detection")
+        if not isinstance(step.step_id, int) or isinstance(step.step_id, bool):
+            _fix(step, "step_id", i + 1)  # 枚举索引保唯一，防字典键覆盖
+
+    ct = coerce_int(plan.confirm_timeout)
+    new_ct = ct if ct is not None and 0 <= ct <= 3600 else DEFAULT_TIMEOUT
+    if plan.confirm_timeout != new_ct:
+        fixes.append(f"confirm_timeout: {plan.confirm_timeout!r} -> {new_ct!r}")
+        plan.confirm_timeout = new_ct
+    return fixes
 
 
 # ================================================================
@@ -395,3 +511,55 @@ class BenchmarkRequest:
             top_classes=d.get("top_classes", 20),
             sahi=d.get("sahi", False),
         )
+
+
+# 图片数显式表述（代码级提取为准：LLM 把路径里的 2017 误提为 max_images
+# → 全量长跑几小时，必须守卫）
+_IMAGE_COUNT_RE = re.compile(
+    r"(?:(\d+)\s*(?:张|幅|images?|imgs?|frames?|张图))|(?:max(?:[_-]?images?)?\s*[=:：]?\s*(\d+))",
+    re.IGNORECASE,
+)
+_ALL_IMAGES_RE = re.compile(r"全部|所有|\ball\b", re.IGNORECASE)
+
+
+def _guard_max_images(instruction: str) -> int:
+    """max_images 守卫：「全部/所有/all」→ 0（全量）；「N张/N images/max=N」→ N；
+    无表述 → 默认（LLM 值不采信——路径数字 2017 会被误提为图片数）。"""
+    if _ALL_IMAGES_RE.search(instruction):
+        return 0
+    m = _IMAGE_COUNT_RE.search(instruction)
+    if m:
+        return int(next(g for g in m.groups() if g))
+    return BENCHMARK_DEFAULT_MAX_IMAGES
+
+
+def sanitize_benchmark_request(request: BenchmarkRequest, instruction: str) -> list[str]:
+    """Benchmark 参数守卫（与 sanitize_task_plan 同漏洞类，2026-08-29）。
+
+    - dataset 未知（非 BENCHMARK_DATASETS 键）→ ""（缺参追问，防下游 KeyError）
+    - conf/iou 值域外回默认；max_images 以指令文本代码级提取为准
+    - top_classes/model/sahi 类型强转 + 值域白名单
+    """
+    fixes: list[str] = []
+
+    def _fix(key: str, new: Any) -> None:
+        old = getattr(request, key)
+        if old != new:
+            fixes.append(f"{key}: {old!r} -> {new!r}")
+            setattr(request, key, new)
+
+    _fix("dataset", request.dataset if request.dataset in BENCHMARK_DATASETS else "")
+    _fix("conf", coerce_float(request.conf, BENCHMARK_DEFAULT_CONF, lo=0.0, hi=1.0))
+    _fix("iou", coerce_float(request.iou, BENCHMARK_DEFAULT_IOU, lo=0.0, hi=1.0))
+    _fix("max_images", _guard_max_images(instruction))
+    tc = coerce_int(request.top_classes)
+    _fix("top_classes", tc if tc is not None and 1 <= tc <= 1000 else 20)
+    _fix("sahi", coerce_bool(request.sahi))
+    _fix("model", coerce_str(request.model, BENCHMARK_DEFAULT_MODEL) or BENCHMARK_DEFAULT_MODEL)
+    _fix(
+        "seg_model",
+        coerce_str(request.seg_model, BENCHMARK_DEFAULT_SEG_MODEL) or BENCHMARK_DEFAULT_SEG_MODEL,
+    )
+    if request.task_type not in {"detection", "segmentation", "classification", "obb_detection"}:
+        _fix("task_type", "detection")
+    return fixes
