@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from auto2dlabel.models.model_catalog import POSE_MODELS, WEIGHTS_DIR
+from auto2dlabel.configs.model_catalog import POSE_MODELS, WEIGHTS_DIR
 
 if TYPE_CHECKING:
     # 仅用于类型标注与 cast（字符串前向引用），运行时保持懒加载
@@ -165,7 +165,21 @@ def create_pose_model(
     model_name: str = "yolo11n-pose.pt",
     **kwargs: Any,
 ) -> PoseModel:
-    """工厂函数：创建姿态估计模型。"""
+    """工厂函数：创建姿态估计模型。
+
+    自动识别：ultralytics YOLO-pose（-pose.pt 或目录内名）/
+    mmpose RTMPose（前缀 "rtmpose"，top-down 精度档）。
+    """
+    if model_name.lower().startswith("rtmpose"):
+        # mmpose RTMPose 精度档（v0.6 Phase 3b）：config/权重经
+        # download_mmpose_weights.sh 就位；类内 ImportError 守卫（零加载）
+        from auto2dlabel.models.mmpose_engines import MMposeRTMPoseModel
+
+        kwargs.setdefault(
+            "model_name",
+            MMposeRTMPoseModel.DEFAULT_NAME if model_name.lower() == "rtmpose" else model_name,
+        )
+        return MMposeRTMPoseModel(**kwargs)
     if not model_name.endswith("-pose.pt") and model_name not in POSE_MODELS:
         raise ValueError(
             f"无法识别的姿态模型: '{model_name}'。\n"

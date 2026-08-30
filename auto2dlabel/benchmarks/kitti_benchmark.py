@@ -16,19 +16,18 @@ from typing import Any
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from auto2dlabel.benchmarks import datetime, json, np, time  # noqa: E402
+from auto2dlabel.benchmarks import datetime, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (
     IOU_MATCH_THRESHOLD,
     OUTPUT_DIR,
     build_parser,
-    compute_iou,
     detect_batch_or_fallback,
     evaluate_per_class,
     format_result_table,
     sample_image_paths,
     save_results,
 )
-from auto2dlabel.benchmarks.datasets import ensure_kitti, DATASETS_ROOT
+from auto2dlabel.benchmarks.datasets import ensure_kitti
 
 # ── 配置 ──────────────────────────────────────────────────────
 KITTI_CLASSES = ["Car", "Pedestrian", "Cyclist", "Van", "Truck", "Tram", "Person_sitting"]
@@ -314,7 +313,7 @@ def main():
     json_path, md_path = save_results(result_data, "kitti", args.model, ts)
     diff_line = " | ".join(f"{t} {v['mAP@0.5']:.4f}" for t, v in per_tier.items())
     md_path.write_text("\n".join([
-        f"# KITTI object Benchmark",
+        "# KITTI object Benchmark",
         f"- **模型**: {args.model} | **conf**: {args.conf} | **mAP@0.5**: {primary['mAP@0.5']:.4f}",
         f"- **难度分层**: {diff_line}",
         f"```\n{primary_summary}\n```",

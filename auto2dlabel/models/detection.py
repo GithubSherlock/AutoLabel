@@ -10,8 +10,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from auto2dlabel.configs.model_catalog import COCO_CLASSES
 from auto2dlabel.models import Image, os
-from auto2dlabel.models.model_catalog import COCO_CLASSES
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL
 
 if TYPE_CHECKING:
@@ -83,7 +83,7 @@ class GroundingDINOModel:
         except ImportError:
             raise ImportError("transformers 未安装，请运行: pip install transformers")
 
-        from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+        from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
 
         os.environ.setdefault("HF_HOME", str(WEIGHTS_DIR / "hf"))
         self._processor = AutoProcessor.from_pretrained(self._model_name)
@@ -165,7 +165,7 @@ class UltralyticsModel:
         except ImportError:
             raise ImportError("ultralytics 未安装，请运行: pip install ultralytics")
 
-        from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+        from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
 
         # 权重目录和下载目录统一指向 auto2dlabel/weights/
         settings.update({
@@ -232,7 +232,7 @@ class UltralyticsModel:
         preds = cast("list[Results]", model(image_paths, **kwargs))
         return [self._parse_pred(p, prompts) for p in preds]
 
-    def _parse_pred(self, pred: "Results", prompts: list[str]) -> list[DetectionResult]:
+    def _parse_pred(self, pred: Results, prompts: list[str]) -> list[DetectionResult]:
         """单个 ultralytics Results → DetectionResult 列表（单图/批量共用）。"""
         results = []
         if pred.boxes is None:
@@ -309,7 +309,7 @@ class PyTorchVisionModel:
         if self._model is not None:
             return self._model
 
-        from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+        from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
 
         # 权重下载目录
         os.environ.setdefault("TORCH_HOME", str(WEIGHTS_DIR))
@@ -405,7 +405,7 @@ class PyTorchVisionModel:
         confidence_threshold: float,
     ) -> list[DetectionResult]:
         """torchvision 检测输出 dict → DetectionResult 列表（单图/批量共用）。"""
-        from auto2dlabel.models.model_catalog import COCO_CLASSES
+        from auto2dlabel.configs.model_catalog import COCO_91_TO_80, COCO_CLASSES
 
         results = []
         for box, label_idx, score in zip(
@@ -415,14 +415,14 @@ class PyTorchVisionModel:
             if conf < confidence_threshold:
                 continue
 
-            # PyTorch 使用 1-based 索引（0=background），做 -1 偏移
-            cls_id = int(label_idx) - 1
-            if cls_id == -1:  # 跳过背景
+            # torchvision COCO_V1 权重输出 detectron 91 类 1-based 索引
+            # （0=background，10 个占位类）——经映射转 80 类索引。曾直接
+            # label-1 索引：前 11 类一致掩盖错位（cat 预测标成 dog），
+            # 见 model_catalog.COCO_91_TO_80 注释
+            cls_id = COCO_91_TO_80.get(int(label_idx))
+            if cls_id is None:  # 背景/占位类：无 80 类对应，跳过
                 continue
-            if 0 <= cls_id < len(COCO_CLASSES):
-                label = COCO_CLASSES[cls_id]
-            else:
-                label = str(cls_id)
+            label = COCO_CLASSES[cls_id]
 
             if not _match_prompt(label, prompts):
                 continue
@@ -485,6 +485,7 @@ def create_detection_model(model_name: str | None = None, **kwargs) -> Detection
     - Grounding DINO：含 "/"（HuggingFace ID）
     - Ultralytics YOLO：以 .pt 结尾
     - PyTorch Vision：前缀 "fasterrcnn_" | "retinanet_" | "ssd" | "fcos_"
+    - mmdet RTMDet：前缀 "rtmdet"（高召回档）
 
     Args:
         model_name: 模型名。为 None 时按优先级:
@@ -504,8 +505,18 @@ def create_detection_model(model_name: str | None = None, **kwargs) -> Detection
         return GroundingDINOModel(model_name=model_name, **kwargs)
     elif _is_pytorch_model(model_name):
         return PyTorchVisionModel(model_name=model_name, **kwargs)
+    elif model_name.lower().startswith("rtmdet"):
+        # mmdet RTMDet 高召回档（v0.6 Phase 3a）：config/权重经
+        # download_mmdet_weights.sh 就位；类内 ImportError 守卫（零加载）
+        from auto2dlabel.models.mmdet_engines import MMDetRTMDetModel
+
+        kwargs.setdefault(
+            "model_name",
+            MMDetRTMDetModel.DEFAULT_NAME if model_name.lower() == "rtmdet" else model_name,
+        )
+        return MMDetRTMDetModel(**kwargs)
     else:
-        from auto2dlabel.models.model_catalog import ALL_DETECTION_MODELS
+        from auto2dlabel.configs.model_catalog import ALL_DETECTION_MODELS
 
         raise ValueError(
             f"无法识别的模型名: '{model_name}'。\n"
@@ -552,13 +563,16 @@ def sahi_infer_torchvision(
     with torch.no_grad():
         outputs = model._model([tile_tensor])[0]
 
+    from auto2dlabel.configs.model_catalog import COCO_91_TO_80
+
     dets: list[dict[str, Any]] = []
     for box, label_idx, score in zip(outputs["boxes"], outputs["labels"], outputs["scores"]):
         conf_val = float(score)
         if conf_val < conf:
             continue
-        cls_id = int(label_idx) - 1  # 1-based → 0-based
-        if cls_id < 0 or cls_id >= len(COCO_CLASSES):
+        # detectron 91 类索引 → 80 类索引（见 model_catalog.COCO_91_TO_80 注释）
+        cls_id = COCO_91_TO_80.get(int(label_idx))
+        if cls_id is None:
             continue
         label = COCO_CLASSES[cls_id]
         # prompt 过滤

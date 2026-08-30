@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from auto2dlabel.models.model_catalog import VOC_CLASSES
+from auto2dlabel.configs.model_catalog import VOC_CLASSES
 from auto2dlabel.models.segmentation import (
     FastSAMModel,
     TorchVisionSegModel,

@@ -114,6 +114,9 @@ def _llm_plan_once(
             {"role": "user", "content": instruction},
         ],
         temperature=0.0,
+        max_tokens=512,
+        json_mode=True,
+        call_site="track.plan",
     )
     content = (response.content or "").strip()
     # 剥离可能的 markdown 代码块

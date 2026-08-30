@@ -244,14 +244,83 @@
 - 误差归因（如实记录）：① yaw 与 GT 中位差 44.2°（PCA 主方向估计，±180° 歧义）；② 深度对齐位置偏差（003712 Car cz 差 ~3m）——相对深度 + 中位比例缩放在 KITTI 远距透视下放大误差；③ 40% 对象被小目标过滤；④ 3D 高度（cy/h）受 depth 精度与 ground alignment 双重影响。耗时 ~3.5min/帧 vs pgd 秒级
 - **结论**：LabelAny3D 方法学在 KITTI 自动驾驶域不成立——与其论文定位一致（面向 COCO 日常物体无 GT 域的伪标签训练间接指标，非直接标注精度）；「无 LiDAR 数据源 3D 预标注候选」维持 v2+ 议题不变，验证门槛已有实测数据支撑（本表）。单目系 pgd 31.6 仍是无 LiDAR 域最高可及基线
 
+## P6：mmdet3d 模型矩阵扩展 + 共享 Token 工程（2026-08-30）
+
+### P6a：P3 收尾前置
+
+- P3 冒烟出表（BEVFusion mAP 27.0 / pgd 33.7）已在本文件 P3 段验收——P6a 无需新工作，前置条件满足 ✅
+
+### P6b：模型矩阵扩展（质量/速度档）
+
+**接入与权重**：
+
+- **TransFusion / VoxelNeXt：不接入（如实记录降级）**——v1.4.0 主线 `configs/` 与 `projects/` 均无（TransFusion 在 OpenPCDet 框架、VoxelNeXt 未进 v1.4.0 configs）；速度档由 **FreeAnchor regnet-400mf** 替代（`configs/free_anchor/` 主线现成 + 20210827 权重直链；backbone init_cfg Pretrained 由 `_patch_pretrained_init` 阻断——全量 ckpt 已含 backbone 权重）
+- **FCOS3D**（单目质量档，nuScenes 侧——pgd 是 KITTI 侧单目）：`configs/fcos3d/` nus-mono3d_finetune + 20210717 权重；SMOKE 仅 KITTI config（与 pgd 档位重叠）不重复接入
+- 接入形态：free_anchor 走 `DETECTOR3D_NAMES`（LiDAR 协议，Mmdet3dDetector 复用）；fcos3d 走 `FCOS3D_NAMES` 独立路由 + `benchmarks/smoke_nuscenes_mono.py`（detect_sample(sample, nusc, conf) 协议，同 BEVFUSION_NAMES 纪律，**不进 DETECTOR3D_NAMES**）
+
+**FCOS3D 输出语义考古与实测定案（本版关键）**：
+
+- 权重 2021-07 训练（v0.15 converter 时代）。源码考古（v0.15 converter/dataset/head + devkit `Box.wlh` + 2021-07 训练时点代码）：GT 训练语义为 (w,l,h) 直传 + 正相机系 yaw——**按考古实现转换 mAP 全 0**
+- 实测探针（单样本 pred vs GT 相机系对照）：pred dims (4.44,1.51,1.84) 按 **(l,h,w)** 解读匹配 GT wlh (2.00,4.73,1.48)；yaw = **-GT 相机系 yaw**
+- 决定性实验（Mini 全量 81 samples 一次前向缓存 + 4 组合评测）：仅 **D「dims 重排 (t5,t3,t4) + yaw 负号」mAP 非零（0.8 / car 8.0）**，其余三组全 0
+- 与 v1.4.0 head 推理路径（零重排零负号，与 v0.15 逐行一致）矛盾 → **矛盾源于权重本身，以实测为准**；适配层 `_fcos3d_reorder_dims_yaw` 归一 (w,l,h)+正 yaw 后仍走 v0.15 版 output_to_nusc_box 定式（`boxes_cam_to_global`）。单测 `test_fcos3d_reorder_dims_yaw` 锁定（实测锚点 + copy 语义 + 空批量）
+
+**fcos3d_nus 简化评测**（Mini val 2 场景 81 samples，conf 0.3，CAM_FRONT 单相机，P2-2 同口径）：
+
+- 执行：`python3 -m auto3dlabel.benchmarks.smoke_nuscenes_mono fcos3d_nus 0.3`；前向 8.3s（0.10s/sample）、510 框
+
+| 范围 | barrier | bicycle | bus | car | constr. | motorc. | pedest. | traff.cone | trailer | truck |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| overall | 0.0 (0) | 0.0 (43) | 0.0 (41) | **8.0 (1991)** | 0.0 (0) | 0.0 (232) | 0.0 (1254) | 0.0 (35) | 0.0 (0) | 0.0 (122) |
+| 0-25m | 0.0 | 0.0 | 0.0 | 9.4 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+| 25-50m | 0.0 | 0.0 | 0.0 | 6.1 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 |
+
+**mAP = 0.8、car 8.0**——单相机口径 recall 受限（bevfusion/centerpoint 用 LiDAR 全 360°；单目前向 FOV 天然少框），数字与 LiDAR 系不可直接对等，作**单目交叉验证基准**（pgd 是 KITTI 侧：官方口径 33.7 / 11-point 31.6）。ped 0.0 归因：per-class IoU 诊断——car 中位 bestIoU 0.63（239/362 ≥0.5）证转换正确，ped 中位 0.12 = 单目深度误差对小目标（0.7×0.6m）的固有放大，非转换残留（如实记录）。
+
+**free_anchor_nus 简化评测**（同口径）：
+
+- 执行：`python3 -m auto3dlabel.benchmarks.smoke_nuscenes free_anchor_nus 0.3`；**5.6s/81 samples（0.07s/sample）——全 Mini 最快**（CP 0.18s/sample）、7672 框
+
+| 范围 | barrier | bicycle | bus | car | constr. | motorc. | pedest. | traff.cone | trailer | truck |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| overall | 0.0 (0) | 3.8 (43) | 77.5 (41) | **76.1 (1991)** | 0.0 (0) | 20.4 (232) | 36.5 (1254) | 0.2 (35) | 0.0 (0) | 43.9 (122) |
+| 0-25m | 0.0 | 6.7 | 100.0 | 88.6 | 0.0 | 26.7 | 47.8 | 0.2 | 0.0 | 68.4 |
+| 25-50m | 0.0 | 2.8 | 91.8 | 68.0 | 0.0 | 6.2 | 17.8 | 0.0 | 0.0 | 30.8 |
+
+**mAP = 25.8 > centerpoint_nus 23.4 > pointpillars_nus 17.7**——**速度档成立**：精度超 CP 且速度 2.6×（regnet-400mf 轻骨干）；提交 JSON 自检通过（81 samples）。
+
+### P6b 验收对照
+
+| 验收条款 | 结果 |
+| --- | --- |
+| 每模型 20 帧冒烟 + 简化评测出表（vs 既有数字） | ✅ fcos3d_nus mAP 0.8 / car 8.0（单目基准）；free_anchor_nus mAP 25.8（vs 17.7 / 23.4）；单样本探针 + Mini 全量 4 组合决定实验（详见 FCOS3D 语义段） |
+| 速度档报耗时（对照 CenterPoint 基线） | ✅ free_anchor 5.6s/81（0.07s/sample）vs CP 14.5s（0.18s/sample）——2.6×；单目 fcos3d 前向 8.3s（0.10s/sample） |
+| 不可得模型如实记录 | ✅ TransFusion / VoxelNeXt 不在 v1.4.0 主线（OpenPCDet 框架）→ 不接入；速度档由 FreeAnchor 替代；SMOKE 仅 KITTI config（与 pgd 重叠）不重复接入 |
+
+### P6c：共享 Token 工程（LLM Harness 3D 受益）
+
+- 3D 与 2D 共用同一 LLMClient——v0.6 Phase 4 的 usage 台账 / max_tokens / json mode / 前缀缓存 / Evaluate 降级**自动覆盖 3D 侧**，零实现受益
+- 3D 侧唯一接线改动：`planner3d.py` parse 走 `max_tokens=1024 + json_mode=True + call_site="planner3d.parse"`、对话路径 `call_site="planner3d.dialog"`——3D chat 调用进同一台账（cost-report 按调用点区分 2D/3D）
+- 回归：`test_dialog3d.py` 全绿（Fake LLM 注入，kwargs 穿透断言）
+
+### P6d：模型路由表收拢（2026-08-31，照 2D 母版）
+
+- 4 张路由表（DETECTOR3D_NAMES / MONO3D_NAMES / BEVFUSION_NAMES / FCOS3D_NAMES）自 `configs/kitti.py`、`configs/nuscenes.py` **收拢至 `configs/model_catalog.py`**（单一事实源，含协议纪律注释：detect(frame) vs detect_sample 互斥）；原两文件留指针注释防散副本
+- 消费方（`models/detection3d.py` / `mono3d.py` / `bevfusion3d.py` + 3 个测试文件 + `cli.py` help 动态生成）全部 import 引用该表
+- **planner3d prompt 注入**：新增 `format_catalog_summary3d()`（5 组 × 9 引擎名 + 用途 hint），注入 system prompt——原硬编码仅 3 个 LiDAR 引擎（P3/P6 新增的 pgd/bevfusion/fcos3d/free_anchor 对 LLM 不可见），现全量可见且新增模型零改 prompt；中文关键词映射行（点柱→pointpillars_kitti 等）保留并补齐新引擎
+- 回归：新增 `test_model_catalog3d.py` 9 用例（表字段锚点 / 4 表 key 互斥 / summary 覆盖全部引擎 / groups 与表同步 / prompt 注入不断开 / 消费方同对象引用 / 旧散副本不复存）
+- 连带收尾：2D 侧 `auto2dlabel/models/model_catalog.py` → `configs/model_catalog.py` 的半成品迁移（文件已删、40+ 处 import 未改完导致收集错误）——sed 批量改指 configs 完成，configs 版含 COCO_91_TO_80 等全部表
+
 ## 质量门
 
-全绿（与全 val 推理并行跑，2026-08-28）：
+P6d 收拢终局数字（2026-08-31 重跑）：
 
-- pytest base 环境：**816 passed, 1 skipped**（守卫测试运行 + 新 trusted-patch 测试 skip）
-- pytest autolabel 环境：**816 passed, 1 skipped**（守卫测试 skip + 新 trusted-patch 测试运行）
+- pytest autolabel 环境（全项目）：**1056 passed, 4 skipped**（+10 = test_model_catalog3d 新用例）
+- pytest base 环境（全项目）：**1059 passed, 1 skipped**（守卫测试运行 + 新 trusted-patch 测试 skip）
 - `ruff check auto3dlabel/`：All checks passed（0）
-- `mypy auto3dlabel/ --follow-imports=silent`：Success（0）
-- `pyright auto3dlabel/`：0 errors, 0 warnings
+- `mypy auto3dlabel/ --follow-imports=silent`：Success（0，86 source files）
+- `pyright auto3dlabel/ + auto2dlabel/`：0 errors, 0 warnings
+
+auto2dlabel 侧不恶化（2D catalog 迁移连带）：ruff **75**（--fix 修 53 处迁移引发项，< 119 基线）/ mypy **167**（< 169 基线）/ pyright 0——明细见 `auto2dlabel/tests/test-v0.6.md` 质量门段。
 
 修复记录（首轮门检发现，均有源头修复）：`test_detection3d.py` 新增测试的 `Any` 标注缺 `from typing import Any`（mypy 3 / pyright 5 / ruff F821 ×5）；`detection3d.py` 守卫 import 块未按 isort 排序（I001，mmdet3d 排 torch 前，守卫语义不变）。

@@ -120,6 +120,50 @@ def tools_command() -> None:
     console.print(table)
 
 
+def cost_report_command(path: str | None = None) -> None:
+    """`cost-report` 命令实现：按调用点聚合 LLM usage 台账出表（v0.6 Phase 4）。"""
+    from pathlib import Path
+
+    from auto2dlabel.agent.llm import USAGE_LOG_PATH, aggregate_usage, load_usage_logs
+
+    target = Path(path) if path else USAGE_LOG_PATH
+    entries = load_usage_logs(target)
+    if not entries:
+        console.print(f"[yellow]台账为空或不存在: {target}[/yellow]")
+        return
+
+    rows = aggregate_usage(entries)
+    table = Table(title=f"LLM Usage 台账聚合（{target}）")
+    table.add_column("调用点", style="cyan")
+    table.add_column("模型", style="magenta")
+    table.add_column("调用数", justify="right")
+    table.add_column("prompt", justify="right")
+    table.add_column("completion", justify="right")
+    table.add_column("cached", justify="right")
+    table.add_column("缓存命中率", justify="right")
+    table.add_column("费用(元)", justify="right", style="green")
+
+    total_cost = 0.0
+    for r in rows:
+        table.add_row(
+            str(r["call_site"]),
+            str(r["model"]),
+            str(r["calls"]),
+            f"{r['prompt_tokens']:,}",
+            f"{r['completion_tokens']:,}",
+            f"{r['cached_tokens']:,}",
+            f"{r['cache_hit_rate']:.1%}",
+            f"{r['cost_rmb']:.6f}",
+        )
+        total_cost += float(r["cost_rmb"])
+
+    console.print(table)
+    console.print(
+        f"[bold]合计费用: ¥{total_cost:.6f}[/bold]"
+        f"（{len(entries)} 条记录，{len(rows)} 个调用点 × 模型组合）"
+    )
+
+
 def chat_command(
     instruction: str | None,
     det_model: str | None,

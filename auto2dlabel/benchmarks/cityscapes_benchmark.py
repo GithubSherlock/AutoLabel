@@ -19,6 +19,8 @@ from typing import Any
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
+from PIL import Image  # noqa: E402  # load_cityscapes_ground_truth 用（原靠 __main__ 块注入）
+
 from auto2dlabel.benchmarks import datetime, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (  # noqa: E402
     IOU_MATCH_THRESHOLD,
@@ -38,7 +40,6 @@ from auto2dlabel.benchmarks.common import (  # noqa: E402
 )
 from auto2dlabel.benchmarks.datasets import ensure_cityscapes_val  # noqa: E402
 from auto2dlabel.cli_execute import _is_self_detect_seg  # noqa: E402
-from PIL import Image  # noqa: E402  # load_cityscapes_ground_truth 用（原靠 __main__ 块注入）
 
 # ── 配置 ──────────────────────────────────────────────────────
 DET_MODEL = "yolo26x.pt"

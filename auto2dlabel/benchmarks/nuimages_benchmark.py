@@ -285,7 +285,7 @@ def main():
 
     json_path, md_path = save_results(result_data, "nuimages", SEG_MODEL, ts)
     md_path.write_text("\n".join([
-        f"# nuImages Mini Instance Segmentation Benchmark",
+        "# nuImages Mini Instance Segmentation Benchmark",
         f"- **分割模型**: {SEG_MODEL} | **检测 backbone**: {DET_MODEL} | **mask mAP@0.5**: {mAP:.4f}",
         f"```\n{summary}\n```",
     ]))

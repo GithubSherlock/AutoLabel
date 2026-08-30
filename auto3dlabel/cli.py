@@ -18,6 +18,7 @@ from rich.console import Console
 from rich.table import Table
 
 from auto3dlabel.configs.kitti import DEFAULT_KITTI_ROOT
+from auto3dlabel.configs.model_catalog import DETECTOR3D_NAMES
 from auto3dlabel.data.kitti import normalize_frame_id, resolve_frame
 
 app = typer.Typer(help="Agentic 3D 标注（KITTI 单帧 → 3D bbox 初稿 + HITL 三档）")
@@ -379,7 +380,7 @@ def run(
             "-d",
             help=(
                 "检测模型：2D（kitti_finetune/gdino…）或 3D LiDAR"
-                "（pointpillars_kitti/pvrcnn_kitti/pointpillars_nus/centerpoint_nus）"
+                f"（{'/'.join(DETECTOR3D_NAMES)}）"
             ),
         ),
     ] = None,

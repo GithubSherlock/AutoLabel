@@ -12,15 +12,16 @@ from typing import Any
 import pytest
 
 from auto3dlabel.configs.kitti import (
-    DETECTOR3D_NAMES,
     MMDET3D_CONFIG_DIR,
     WEIGHTS_DIR,
     prompts_to_kitti_labels,
 )
+from auto3dlabel.configs.model_catalog import DETECTOR3D_NAMES
 from auto3dlabel.models.detection3d import (
     Det3DResult,
     Mmdet3dDetector,
     _init_model_trusted,
+    _patch_pretrained_init,
     create_detector3d,
 )
 
@@ -68,6 +69,14 @@ def test_create_detector3d_routing() -> None:
         WEIGHTS_DIR / entry_pv["weights_dir"] / entry_pv["checkpoint"]
     )
     assert det_pv._config_path == str(MMDET3D_CONFIG_DIR / entry_pv["config"])
+    # v0.3 P6b：free_anchor_nus 速度档路由（detect_points 协议兼容，零改动复用）
+    det_fa = create_detector3d("free_anchor_nus")
+    assert isinstance(det_fa, Mmdet3dDetector)
+    entry_fa = DETECTOR3D_NAMES["free_anchor_nus"]
+    assert det_fa._checkpoint_path == str(
+        WEIGHTS_DIR / entry_fa["weights_dir"] / entry_fa["checkpoint"]
+    )
+    assert det_fa._config_path == str(MMDET3D_CONFIG_DIR / entry_fa["config"])
 
 
 @pytest.mark.skipif(MMDET3D_INSTALLED, reason="mmdet3d 已装，守卫路径跳过")
@@ -119,3 +128,25 @@ def test_prompts_to_kitti_labels() -> None:
     assert prompts_to_kitti_labels(["truck"]) is None  # 3-class 模型无 Truck
     assert prompts_to_kitti_labels(["dog", "cat"]) is None
     assert prompts_to_kitti_labels([]) is None
+
+
+def test_patch_pretrained_init() -> None:
+    """P6b：只删 Pretrained 型 backbone init_cfg（阻断 open-mmlab:// 下载）；
+    非 Pretrained init_cfg 与无 init_cfg 的组件不动（零误伤）。"""
+    cfg: dict[str, Any] = {
+        "model": {
+            "pts_backbone": {
+                "init_cfg": {
+                    "type": "Pretrained",
+                    "checkpoint": "open-mmlab://regnetx_400mf",
+                }
+            },
+            "pts_neck": {"init_cfg": {"type": "Constant", "val": 0.0}},
+            "pts_bbox_head": {},
+        }
+    }
+    _patch_pretrained_init(cfg)
+    assert "init_cfg" not in cfg["model"]["pts_backbone"]
+    assert cfg["model"]["pts_neck"]["init_cfg"]["type"] == "Constant"  # 非 Pretrained 保留
+    assert cfg["model"]["pts_bbox_head"] == {}
+    _patch_pretrained_init({"model": {}})  # 空 model 零异常

@@ -101,6 +101,7 @@ class FakeLLM:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.1,
+    **kwargs: Any,
     ) -> LLMResponse:
         self.tools_seen.append(list(tools or []))
         assert self.responses, "LLM 脚本耗尽"

@@ -58,7 +58,7 @@ class _ScriptedLLM:
         self.responses = list(responses)
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
-             temperature: float = 0.1) -> LLMResponse:
+             temperature: float = 0.1, **kwargs: Any) -> LLMResponse:
         assert self.responses, "LLM 脚本耗尽"
         r = self.responses.pop(0)
         return LLMResponse(content=r.get("content"), tool_calls=r.get("tool_calls"))

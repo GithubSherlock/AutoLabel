@@ -17,6 +17,7 @@ from auto2dlabel.configs.task_params import coerce_float, coerce_str
 from auto2dlabel.schema.task_plan import PlanQuestion
 from auto3dlabel.configs.datasets import format_datasets_summary
 from auto3dlabel.configs.kitti import DEFAULT_CONF, DEFAULT_DET_MODEL, DEFAULT_SEG_MODEL
+from auto3dlabel.configs.model_catalog import format_catalog_summary3d
 from auto3dlabel.configs.task_params import PARAM_SPECS_3D
 
 logger = logging.getLogger(__name__)
@@ -45,10 +46,11 @@ Rules:
   Map: yolo→yolo11s.pt, yolo26→yolo26x.pt, grounding dino/gdino→
   IDEA-Research/grounding-dino-tiny, kitti微调/kitti权重/kitti_yolo→kitti_finetune
   (a KITTI-finetuned YOLO).
-  LiDAR 3D engines: pointpillars/点柱→pointpillars_kitti (KITTI),
-  pvrcnn/pv-rcnn/PV-RCNN→pvrcnn_kitti (KITTI),
-  centerpoint→centerpoint_nus (nuScenes)
-  (LiDAR-only detectors, no SAM needed).
+  LiDAR 3D engines (keyword map; full catalog with exact names below):
+  pointpillars/点柱→pointpillars_kitti, pvrcnn/pv-rcnn/PV-RCNN→pvrcnn_kitti,
+  centerpoint→centerpoint_nus, free anchor→free_anchor_nus,
+  bevfusion→bevfusion_nus, 单目/mono/pgd→pgd_kitti, fcos3d→fcos3d_nus
+  (3D detectors, no SAM needed).
   If user names a model ending with .pt or containing /, use it directly.
 - seg_model: SAM mask model. Default "sam2_l.pt". Map: sam/sam2→sam2_l.pt, \
 fastsam→FastSAM-s.pt, sam3→sam3.pt
@@ -62,13 +64,16 @@ fastsam→FastSAM-s.pt, sam3→sam3.pt
   answers and output empty/omit questions.
 - Only JSON. No other text."""
 
-# 追加数据集摘要（字符串拼接：原文含 JSON 花括号，不可改 f-string；与 2D planner 同模式）
+# 追加数据集摘要 + 3D 引擎目录摘要（字符串拼接：原文含 JSON 花括号，不可改 f-string；
+# 与 2D planner 同模式——引擎清单注入自 model_catalog（单一事实源，新增模型零改 prompt）
 _PLANNER3D_SYSTEM_PROMPT = _PLANNER3D_SYSTEM_PROMPT + f"""
 
 {format_datasets_summary()}
 Dataset rules:
 - 3D 帧根目录由 CLI 决定，LLM 不解析路径——「KITTI 数据集/对 KITTI」→ 照常输出 6 位 frame_id
-- 指令含自建数据集名 → 该数据集可用，帧标注方式同 KITTI（frame_id 照填）"""
+- 指令含自建数据集名 → 该数据集可用，帧标注方式同 KITTI（frame_id 照填）
+
+{format_catalog_summary3d()}"""
 
 
 @dataclass
@@ -183,7 +188,14 @@ class TaskPlanner3D:
             {"role": "system", "content": _PLANNER3D_SYSTEM_PROMPT},
             {"role": "user", "content": instruction},
         ]
-        response = self.llm.chat(messages, tools=None, temperature=0.0)
+        response = self.llm.chat(
+            messages,
+            tools=None,
+            temperature=0.0,
+            max_tokens=1024,
+            json_mode=True,
+            call_site="planner3d.parse",
+        )
         if not response.content:
             raise ValueError("LLM 返回空响应，无法解析 3D 任务")
         plan = parse_plan3d_json(response.content)
@@ -210,6 +222,7 @@ class TaskPlanner3D:
             ask_fn=ask_fn,
             instruction=instruction,
             max_rounds=max_rounds,
+            call_site="planner3d.dialog",
         )
         for fix in sanitize_plan3d(plan):  # LLM 输出守卫（对话路径同源）
             logger.info("3D 参数守卫修正: %s", fix)

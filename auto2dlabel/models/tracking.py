@@ -39,8 +39,8 @@ from typing import Any, Protocol
 import numpy as np
 import scipy.linalg
 
+from auto2dlabel.configs.model_catalog import REID_MODELS, WEIGHTS_DIR
 from auto2dlabel.models import Image, os
-from auto2dlabel.models.model_catalog import REID_MODELS, WEIGHTS_DIR
 from auto2dlabel.schema.annotation import Bbox
 from auto2dlabel.tools.device import get_device
 

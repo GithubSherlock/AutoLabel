@@ -211,6 +211,7 @@ class TestOrchestratorQualityEval:
                 messages: list[dict[str, Any]],
                 tools: list[dict[str, Any]] | None = None,
                 temperature: float = 0.1,
+            **kwargs: Any,
             ) -> LLMResponse:
                 self.n_calls += 1
                 if self.n_calls == 1:

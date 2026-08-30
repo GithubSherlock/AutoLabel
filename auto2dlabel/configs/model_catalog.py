@@ -50,7 +50,21 @@ PYTORCH_DETECTION_MODELS = [
 ]
 
 # ============================================================
-ALL_DETECTION_MODELS = GROUNDING_DINO_MODELS + ULTRALYTICS_MODELS + PYTORCH_DETECTION_MODELS
+# mmdet 运行时检测模型（RTMDet 高召回档；config + 权重经
+# auto2dlabel/weights/download_mmdet_weights.sh 下载）
+# ============================================================
+MMDET_DETECTION_MODELS = ["rtmdet_s", "rtmdet_m", "rtmdet_l", "rtmdet_x"]
+
+# ============================================================
+# mmdet 运行时分割模型（Mask2Former 实例分割质量档，同上脚本下载）
+# ============================================================
+MMDET_SEGMENTATION_MODELS = ["mask2former_r50_8xb2-lsj-50e_coco"]
+
+# ============================================================
+ALL_DETECTION_MODELS = (
+    GROUNDING_DINO_MODELS + ULTRALYTICS_MODELS + PYTORCH_DETECTION_MODELS
+    + MMDET_DETECTION_MODELS
+)
 
 # ============================================================
 # COCO 80 类别名（标准 YOLO / PyTorch 模型默认训练集）
@@ -69,6 +83,27 @@ COCO_CLASSES = [
     "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier",
     "toothbrush",
 ]
+
+# torchvision COCO_V1 权重（fasterrcnn/retinanet/maskrcnn/ssd/fcos）输出
+# detectron 91 类 1-based 索引（0=background）→ 80 类索引。10 个占位类
+# （street sign/hat/shoe/eye glasses/plate/mirror/window/desk/door/blender）
+# 无 80 类对应（COCO 数据集无此类 GT），映射为 None 调用方跳过。
+# 曾直接 label-1 索引 80 类表：前 11 类一致掩盖错位，cat(17) 起全错位
+# （cat 预测标成 dog），COCO 全量 fasterrcnn mAP@0.5 0.0998 实测暴露
+# （见 test-v0.6.md）。
+COCO_91_TO_80: dict[int, int | None] = {
+    1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6, 8: 7, 9: 8, 10: 9,
+    11: 10, 12: None, 13: 11, 14: 12, 15: 13, 16: 14, 17: 15, 18: 16,
+    19: 17, 20: 18, 21: 19, 22: 20, 23: 21, 24: 22, 25: 23, 26: None,
+    27: 24, 28: 25, 29: None, 30: None, 31: 26, 32: 27, 33: 28, 34: 29,
+    35: 30, 36: 31, 37: 32, 38: 33, 39: 34, 40: 35, 41: 36, 42: 37,
+    43: 38, 44: 39, 45: None, 46: 40, 47: 41, 48: 42, 49: 43, 50: 44,
+    51: 45, 52: 46, 53: 47, 54: 48, 55: 49, 56: 50, 57: 51, 58: 52,
+    59: 53, 60: 54, 61: 55, 62: 56, 63: 57, 64: 58, 65: 59, 66: None,
+    67: 60, 68: None, 69: None, 70: 61, 71: None, 72: 62, 73: 63, 74: 64,
+    75: 65, 76: 66, 77: 67, 78: 68, 79: 69, 80: 70, 81: 71, 82: 72,
+    83: None, 84: 73, 85: 74, 86: 75, 87: 76, 88: 77, 89: 78, 90: 79,
+}
 
 # ============================================================
 # DOTA v1 15 类别（YOLO-OBB 预训练集，ultralytics dota8.yaml 权威顺序）
@@ -176,7 +211,8 @@ ULTRALYTICS_OBB_MODELS = [
 ]
 
 # ============================================================
-# 姿态估计模型（Ultralytics YOLO-pose，COCO 17 点）
+# 姿态估计模型（Ultralytics YOLO-pose，COCO 17 点；
+# + mmpose RTMPose top-down 精度档，config/权重经 download_mmpose_weights.sh）
 # ============================================================
 POSE_MODELS = [
     # YOLO11-pose（COCO person keypoints 预训练）
@@ -188,6 +224,8 @@ POSE_MODELS = [
     # YOLO26-pose（COCO person keypoints 预训练）
     "yolo26n-pose.pt", "yolo26s-pose.pt", "yolo26m-pose.pt",
     "yolo26l-pose.pt", "yolo26x-pose.pt",
+    # mmpose RTMPose（top-down，person 检测 + 逐框单人姿态）
+    "rtmpose_l",
 ]
 
 # ============================================================

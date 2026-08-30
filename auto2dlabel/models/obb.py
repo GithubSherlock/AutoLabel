@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from auto2dlabel.models.model_catalog import DOTA_CLASSES, DOTA_PROMPT_ALIASES
+from auto2dlabel.configs.model_catalog import DOTA_CLASSES, DOTA_PROMPT_ALIASES
 
 if TYPE_CHECKING:
     # 仅用于类型标注与 cast（字符串前向引用），运行时保持懒加载
@@ -99,7 +99,7 @@ class UltralyticsOBBModel:
         except ImportError:
             raise ImportError("ultralytics 未安装，请运行: pip install ultralytics")
 
-        from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+        from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
 
         # 权重目录和下载目录统一指向 auto2dlabel/weights/
         cast(Any, settings).update({
@@ -158,7 +158,7 @@ class UltralyticsOBBModel:
         preds = cast("list[Results]", model(image_paths, **kwargs))
         return [self._parse_pred(p, prompts) for p in preds]
 
-    def _parse_pred(self, pred: "Results", prompts: list[str]) -> list[OBBResult]:
+    def _parse_pred(self, pred: Results, prompts: list[str]) -> list[OBBResult]:
         """单个 ultralytics Results → OBBResult 列表（单图/批量共用）。"""
         # checkpoint 的 names dict（权威类名表，dict[int, str]）
         model_names = cast(Any, self._model).names
@@ -190,7 +190,7 @@ def create_obb_model(
 ) -> OBBModel:
     """工厂函数：创建旋转框检测模型。"""
     if not model_name.endswith(".pt"):
-        from auto2dlabel.models.model_catalog import ULTRALYTICS_OBB_MODELS
+        from auto2dlabel.configs.model_catalog import ULTRALYTICS_OBB_MODELS
 
         raise ValueError(
             f"无法识别的 OBB 模型: '{model_name}'。\n"

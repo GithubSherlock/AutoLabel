@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from auto2dlabel import cli_commands
-from auto2dlabel.models.model_catalog import COCO_CLASSES
+from auto2dlabel.configs.model_catalog import COCO_CLASSES
 from auto2dlabel.schema.task_plan import TaskPlan, TaskStep
 from auto2dlabel.tools.confirm import ConfirmResult
 from auto2dlabel.tools.recommend import (

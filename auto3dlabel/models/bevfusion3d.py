@@ -37,7 +37,8 @@ from typing import Any
 import numpy as np
 
 from auto3dlabel.configs.kitti import DEFAULT_CONF, MMDET3D_CONFIG_DIR, WEIGHTS_DIR
-from auto3dlabel.configs.nuscenes import BEVFUSION_NAMES, NUSCENES_CAMERAS
+from auto3dlabel.configs.model_catalog import BEVFUSION_NAMES
+from auto3dlabel.configs.nuscenes import NUSCENES_CAMERAS
 from auto3dlabel.data.nuscenes import lidar_sample_data, rot_matrix
 from auto3dlabel.models.detection3d import _extract_class_names, _init_model_trusted
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from auto2dlabel.models.model_catalog import DOTA_CLASSES, DOTA_PROMPT_ALIASES
+from auto2dlabel.configs.model_catalog import DOTA_CLASSES, DOTA_PROMPT_ALIASES
 from auto2dlabel.models.obb import _match_obb_prompt, _resolve_obb_label
 
 

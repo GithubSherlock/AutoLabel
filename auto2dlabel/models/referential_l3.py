@@ -25,7 +25,7 @@ import os
 import re
 from typing import Any
 
-from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
 from auto2dlabel.models.referential import (
     ReferentialResolver,
     match_boxes_by_center,

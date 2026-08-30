@@ -88,15 +88,20 @@ strict = true
 ignore_missing_imports = true
 # exclude 只对递归发现（`mypy .`）生效，显式目录 `mypy auto2dlabel/` 走 overrides
 # cvat = 本地 CVAT 调研克隆（.gitignore 排除，不入库不检查）
-exclude = ["auto2dlabel/models/vendor_florence2", "cvat", "auto3dlabel/weights"]
+exclude = ["auto2dlabel/models/vendor_florence2", "cvat",
+           "auto3dlabel/weights", "auto2dlabel/weights"]
 
 [[tool.mypy.overrides]]
 module = "auto2dlabel.models.vendor_florence2.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-# weights/ = 下载产物（模型权重 + mmdet3d 官方 configs，不入库不检查）
+# weights/ = 下载产物（模型权重 + 官方 configs，不入库不检查）
 module = "auto3dlabel.weights.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "auto2dlabel.weights.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
@@ -112,10 +117,11 @@ exclude = [
     "**/__pycache__",
     "**/.*",
     # cvat = 本地 CVAT 调研克隆（.gitignore 排除，不入库不检查）
-    # weights/ = 下载产物（模型权重 + mmdet3d 官方 configs，不入库不检查）
+    # weights/ = 下载产物（模型权重 + 官方 configs，不入库不检查）
     "auto2dlabel/models/vendor_florence2",
     "cvat",
     "auto3dlabel/weights",
+    "auto2dlabel/weights",
 ]
 
 [tool.pytest.ini_options]

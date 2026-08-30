@@ -1,4 +1,4 @@
-"""test_mono3d：单目 3D 检测器封装（v0.3 P3；零真实权重铁律 + 守卫路径双态兼容）。
+"""test_mono3d：单目 3D 检测器封装（v0.3 P3 / P6b；零真实权重铁律 + 守卫路径双态兼容）。
 
 mmdet3d 未装状态下全绿是设计目标（ImportError 守卫在 _load）；已装环境
 守卫测试自动跳过（skipif）——双态质量门均归零。
@@ -11,12 +11,16 @@ import importlib.util
 import numpy as np
 import pytest
 
-from auto3dlabel.configs.kitti import MMDET3D_CONFIG_DIR, MONO3D_NAMES, WEIGHTS_DIR
+from auto3dlabel.configs.kitti import MMDET3D_CONFIG_DIR, WEIGHTS_DIR
+from auto3dlabel.configs.model_catalog import FCOS3D_NAMES, MONO3D_NAMES
 from auto3dlabel.models.detection3d import MMDET3D_KITTI_CLASSES
 from auto3dlabel.models.mono3d import (
+    Fcos3dNuScenesDetector,
     Mono3dDetector,
+    _fcos3d_reorder_dims_yaw,
     _mono_output_to_det3d,
     build_mono_data,
+    create_fcos3d_detector,
     create_mono3d_detector,
 )
 
@@ -83,5 +87,61 @@ def test_create_mono3d_detector_routing() -> None:
 def test_mono3d_load_guard_import() -> None:
     """mmdet3d 未装 → _load 抛 ImportError（守卫路径；已装环境自动跳过）。"""
     det = Mono3dDetector("missing_config.py", "missing.pth")
+    with pytest.raises(ImportError):
+        det._load()
+
+
+def test_build_mono_data_camera_key() -> None:
+    """P6b：camera 参数泛化——nuScenes 用 CAM_FRONT 单键（LoadImageFromFileMono3D
+    单键 images 分支）；默认 CAM2 向后兼容（KITTI pgd）。"""
+    cam2img = np.arange(9, dtype=np.float64).reshape(3, 3)
+    data = build_mono_data("/tmp/n.jpg", cam2img, camera="CAM_FRONT")
+    assert set(data["images"]) == {"CAM_FRONT"}
+    assert data["images"]["CAM_FRONT"]["img_path"] == "/tmp/n.jpg"
+    np.testing.assert_allclose(data["images"]["CAM_FRONT"]["cam2img"], cam2img)
+    # 默认键回归
+    assert set(build_mono_data("/tmp/k.png", cam2img)["images"]) == {"CAM2"}
+
+
+def test_fcos3d_reorder_dims_yaw() -> None:
+    """P6b 实测定序锁定：head 输出 [d0,d1,d2,yaw,vx,vz]=(l,h,w)+负 yaw
+    → 归一 [w,l,h,+yaw,vx,vz]（w=d2、l=d0、h=d1、yaw 取负、速度直传）。
+
+    实测锚点（Mini 单样本探针）：pred car dims (4.44,1.51,1.84) 按 (l,h,w)
+    解读匹配 GT wlh (2.00,4.73,1.48)；yaw=-GT 相机系 yaw。4 组合评测中
+    仅「dims 重排 + yaw 负号」mAP 非零（0.8 / car 8.0），其余全 0。
+    """
+    tail = np.asarray([[4.44, 1.51, 1.84, 5.051, 0.05, 4.49]])
+    out = _fcos3d_reorder_dims_yaw(tail)
+    assert out.shape == tail.shape
+    np.testing.assert_allclose(out[0, :3], [1.84, 4.44, 1.51])  # (w,l,h)
+    assert out[0, 3] == pytest.approx(-5.051)  # yaw 负号
+    np.testing.assert_allclose(out[0, 4:], [0.05, 4.49])  # 速度直传
+    # 输入不被就地修改（copy 语义）
+    assert tail[0, 3] == 5.051 and tail[0, 0] == 4.44
+    # 空批量零异常
+    assert _fcos3d_reorder_dims_yaw(np.zeros((0, 6))).shape == (0, 6)
+
+
+def test_create_fcos3d_detector_routing() -> None:
+    """P6b 工厂路由：None/未知名/LiDAR 名 → None；fcos3d_nus → Fcos3dNuScenesDetector。"""
+    assert create_fcos3d_detector(None) is None
+    assert create_fcos3d_detector("unknown3d") is None
+    assert create_fcos3d_detector("pgd_kitti") is None  # KITTI 单目名不误路由
+    assert create_fcos3d_detector("pointpillars_nus") is None  # LiDAR 名不误路由
+    det = create_fcos3d_detector("fcos3d_nus")
+    assert isinstance(det, Fcos3dNuScenesDetector)
+    entry = FCOS3D_NAMES["fcos3d_nus"]
+    assert det._config_path == str(MMDET3D_CONFIG_DIR / entry["config"])
+    assert det._checkpoint_path == str(
+        WEIGHTS_DIR / entry["weights_dir"] / entry["checkpoint"]
+    )
+    assert det._class_names == ()  # 构造零加载：类序延迟到 _load（mmdet3d 序 10 类）
+
+
+@pytest.mark.skipif(MMDET3D_INSTALLED, reason="mmdet3d 已装，守卫路径跳过")
+def test_fcos3d_load_guard_import() -> None:
+    """P6b：mmdet3d 未装 → _load 抛 ImportError（共享 _load_mono_engine 守卫）。"""
+    det = Fcos3dNuScenesDetector("missing_config.py", "missing.pth")
     with pytest.raises(ImportError):
         det._load()

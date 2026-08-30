@@ -34,6 +34,13 @@
   let cloudCenter = new THREE.Vector3(0, 0, 0);
   let cloudRadius = 30;
 
+  // ── v0.4 P1 编辑手柄：选中框的正交视图手柄（Top 4 角 + 4 边 + yaw 球 / Side 顶底 + 前后）
+  const handleGeo = new THREE.SphereGeometry(0.25, 10, 8);
+  const handleMat = new THREE.MeshBasicMaterial({ color: 0xffd166, transparent: true, opacity: 0.95 });
+  const handlesGroup = new THREE.Group();
+  scene.add(handlesGroup);
+  let handles = []; // {view, mode, sx, sy, pos, mesh}
+
   // 四视图：左上透视 / 右上 Top / 左下 Side / 右下 Front
   const persp = new THREE.PerspectiveCamera(55, 1, 0.1, 1000);
   const makeOrtho = () => new THREE.OrthographicCamera(-20, 20, 20, -20, 0.1, 1000);
@@ -111,6 +118,7 @@
         label: obj.label,
         group,
         edges,
+        head: hline,
         center: new THREE.Vector3(...focus.center),
         radius: focus.radius,
       });
@@ -123,7 +131,79 @@
       setCloud(st.payload && st.payload.points ? st.payload.points : []);
       rebuildObjects(st.payload);
     }
-    focusSelected();
+    if (st.editing) refreshSelectedGeo(); // 编辑中选中框几何实时跟随（相机锁定不聚焦）
+    else focusSelected();
+    updateHandles();
+  }
+
+  // 编辑中选中框几何刷新：boxToCorners(annotations[i]) → 重建 edges/headLine + 更新
+  // center（拖拽平面求交跟随；P4a 的 rebuildObjects 只在 payload 变化时重建，编辑单独走这里）
+  function refreshSelectedGeo() {
+    const st = L3D.state;
+    const sel = objects.find((o) => o.index === st.editing.i);
+    const ann = st.data && st.data.annotations && st.data.annotations[st.editing.i];
+    if (!sel || !ann) return;
+    const corners = L3D.boxToCorners(ann);
+    const pts = [];
+    for (const e of L3D.edgesOf(corners)) {
+      for (const c of e) pts.push(...L3D.camToThree(c[0], c[1], c[2]));
+    }
+    sel.edges.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pts), 3));
+    sel.edges.geometry.attributes.position.needsUpdate = true;
+    const head = L3D.headLine(corners);
+    if (head && sel.head) {
+      const hp = [...L3D.camToThree(head[0][0], head[0][1], head[0][2]),
+        ...L3D.camToThree(head[1][0], head[1][1], head[1][2])];
+      sel.head.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(hp), 3));
+      sel.head.geometry.attributes.position.needsUpdate = true;
+      sel.head.visible = true;
+    } else if (sel.head) {
+      sel.head.visible = false;
+    }
+    const focus = L3D.orthoFocus(corners);
+    sel.center.copy(new THREE.Vector3(...focus.center));
+  }
+
+  // 手柄重建（选中变化/编辑中每 emit 跟随）：Top = 低 4 角 + 4 边中点 + yaw 球（车头线伸出点）；
+  // Side = 顶面中心（高 4）/底面中心（低 4）/前（角 0,3 中点）/后（角 1,2 中点）。sx/sy = 2D 母版
+  // 手柄符号（resizeTopEdit 锚）：corner/edge 用，yaw/top/bottom/move 无关。
+  function updateHandles() {
+    for (const h of handles) handlesGroup.remove(h.mesh);
+    handles = [];
+    const st = L3D.state;
+    if (!st.data || !st.data.annotations) return;
+    const sel = st.selected != null ? st.data.annotations[st.selected] : null;
+    if (!sel || sel.cx == null) return; // 无选中或非 3D annotation
+    const corners = L3D.boxToCorners(sel);
+    const to3 = (c) => new THREE.Vector3(...L3D.camToThree(c[0], c[1], c[2]));
+    const add = (view, mode, sx, sy, pos) => {
+      const mesh = new THREE.Mesh(handleGeo, handleMat);
+      mesh.position.copy(pos);
+      handlesGroup.add(mesh);
+      handles.push({ view, mode, sx, sy, pos, mesh });
+    };
+    const CORNER_SIGN = [[1, 1], [1, -1], [-1, -1], [-1, 1]]; // 右前/右后/左后/左前
+    for (let i = 0; i < 4; i++) {
+      add(1, "corner", CORNER_SIGN[i][0], CORNER_SIGN[i][1], to3(corners[i]));
+    }
+    const EDGE_PAIRS = [[0, 1], [1, 2], [2, 3], [3, 0]];     // 右/尾/左/头
+    const EDGE_SIGN = [[1, 0], [0, -1], [-1, 0], [0, 1]];
+    for (let i = 0; i < 4; i++) {
+      const [a, b] = EDGE_PAIRS[i];
+      const p = to3(corners[a]).add(to3(corners[b])).multiplyScalar(0.5);
+      add(1, "edge", EDGE_SIGN[i][0], EDGE_SIGN[i][1], p);
+    }
+    const head = L3D.headLine(corners);
+    if (head) add(1, "yaw", 0, 0, to3(head[1]));
+    const mean4 = (idx) => {
+      const p = new THREE.Vector3();
+      for (const k of idx) p.add(to3(corners[k]));
+      return p.multiplyScalar(1 / idx.length);
+    };
+    add(2, "top", 0, 0, mean4([4, 5, 6, 7]));   // 顶面（高 4）
+    add(2, "bottom", 0, 0, mean4([0, 1, 2, 3])); // 底面（低 4）
+    add(2, "move", 0, 0, mean4([0, 3]));        // 前（车头边）
+    add(2, "move", 0, 0, mean4([1, 2]));        // 后（车尾边）
   }
 
   // 选中对象 → 正交三视图自动聚焦（CVAT 借鉴：正交投影只显选中对象 + 自动聚焦）
@@ -154,6 +234,7 @@
     pointsMat.sizeAttenuation = !ortho;
     pointsMat.size = ortho ? 1.0 : 1.2;
     const st = L3D.state;
+    handlesGroup.visible = ortho && st.selected != null;
     for (const o of objects) {
       const sel = st.selected === o.index;
       // 正交视图只显选中框；透视视图全部显示
@@ -206,8 +287,9 @@
     renderer.setScissorTest(false);
   }
 
-  // ── 交互：拖拽旋转 / 滚轮缩放 / 点击选中 ──────────────────────
-  let drag = null; // {x, y, qi, moved}
+  // ── 交互：手柄编辑 / 拖拽旋转 / 滚轮缩放 / 点击选中 ─────────────
+  let drag = null; // {type:'view', x, y, qi, moved} | {type:'edit', qi}
+  let suppressClickUntil = 0; // 拖拽/编辑后拦截紧随 click（click 在 mouseup 之后，drag 已清）
   function viewAt(e) {
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left, py = e.clientY - rect.top;
@@ -220,20 +302,100 @@
     };
   }
 
+  // 手柄投影命中：NDC → 视图内像素，< 14px 最近者（正交视图手柄）
+  function hitHandle(qi, px, py) {
+    const w = canvas.clientWidth || 640, h = canvas.clientHeight || 480;
+    const halfW = w / 2, halfH = h / 2;
+    const vx = px % halfW, vy = py % halfH;
+    cams[qi].updateMatrixWorld();
+    let best = null, bestD = 14;
+    for (const hd of handles) {
+      if (hd.view !== qi) continue;
+      const ndc = hd.pos.clone().project(cams[qi]);
+      if (ndc.z > 1 || ndc.z < -1) continue;
+      const sx = (ndc.x + 1) / 2 * halfW, sy = (1 - ndc.y) / 2 * halfH;
+      const d = Math.hypot(sx - vx, sy - vy);
+      if (d < bestD) { bestD = d; best = hd; }
+    }
+    return best;
+  }
+
+  // 拖拽求交：「选中框中心平面（法线 = 视图轴）∩ 指针射线」→ cam 系平面坐标
+  // Top ptr = {x, z}（cam xz 地面平面）、Side ptr = {z, y}（cam zy 立面）
+  function editPointer(v) {
+    const st = L3D.state;
+    const sel = st.selected != null ? objects.find((o) => o.index === st.selected) : null;
+    if (!sel) return null;
+    const normal = ORTHO_AXIS[v.qi];
+    const plane = new THREE.Plane(normal, -normal.dot(sel.center));
+    const ray = new THREE.Raycaster(new THREE.Vector2(v.nx, v.ny), cams[v.qi]).ray;
+    const W = ray.intersectPlane(plane);
+    if (!W) return null;
+    if (v.qi === 1) return { x: W.x, z: W.y }; // Top：cam (x, z)（cam y = -W.z 垂直平面）
+    return { z: W.y, y: -W.z };                // Side：cam (z, y)
+  }
+
+  // mousedown 手柄几何锚（各编辑纯函数的 drag 参数，快照式绝无增量累积）
+  function buildHandleDrag(h, ptr0, ann) {
+    const yaw = L3D.rotationYToYaw(ann.rotation_y || 0);
+    if (h.view === 1) {
+      if (h.mode === "yaw") {
+        return {
+          yaw0: yaw,
+          t0: Math.atan2(ptr0.z - ann.cz, ptr0.x - ann.cx),
+          cx0: ann.cx, cz0: ann.cz,
+        };
+      }
+      return { t0: -yaw, cx0: ann.cx, cz0: ann.cz, w0: ann.w, l0: ann.l, sx: h.sx, sy: h.sy };
+    }
+    if (h.mode === "top" || h.mode === "bottom") return { mode: h.mode, h0: ann.h, cy0: ann.cy };
+    return { cz0: ann.cz }; // move：cz 平移
+  }
+
   canvas.addEventListener("mousedown", (e) => {
-    drag = { x: e.clientX, y: e.clientY, qi: viewAt(e).qi, moved: false };
+    const rect = canvas.getBoundingClientRect();
+    const v = viewAt(e);
+    if (v.qi > 0) {
+      const h = hitHandle(v.qi, e.clientX - rect.left, e.clientY - rect.top);
+      if (h) {
+        const st = L3D.state;
+        const ann = st.data && st.data.annotations && st.data.annotations[st.selected];
+        const ptr0 = editPointer(v);
+        if (ann && ptr0) {
+          L3D.beginEdit(st.selected, h.view, h.mode, buildHandleDrag(h, ptr0, ann));
+          drag = { type: "edit", qi: v.qi };
+          return;
+        }
+      }
+    }
+    drag = { type: "view", x: e.clientX, y: e.clientY, qi: v.qi, moved: false };
   });
   window.addEventListener("mousemove", (e) => {
     if (!drag) return;
+    if (drag.type === "edit") {
+      const v = viewAt(e);
+      const ptr = editPointer(v);
+      if (ptr) L3D.editTo(drag.qi, ptr); // 编辑中禁用视图旋转拖拽
+      return;
+    }
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    if (Math.abs(dx) + Math.abs(dy) > 3) {
+      drag.moved = true;
+      suppressClickUntil = Date.now() + 300; // 拖拽后不选中
+    }
     if (drag.qi === 0) {
       theta -= dx * 0.006;
       phi = Math.min(1.45, Math.max(0.15, phi - dy * 0.006));
     }
     drag.x = e.clientX; drag.y = e.clientY;
   });
-  window.addEventListener("mouseup", () => { drag = null; });
+  window.addEventListener("mouseup", () => {
+    if (drag && drag.type === "edit") {
+      L3D.endEdit();
+      suppressClickUntil = Date.now() + 300; // 编辑结束（含点击手柄无移动）后不选中
+    }
+    drag = null;
+  });
 
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
@@ -249,7 +411,7 @@
   }, { passive: false });
 
   canvas.addEventListener("click", (e) => {
-    if (drag && drag.moved) return; // 拖拽不算点击
+    if (Date.now() < suppressClickUntil) return; // 拖拽/编辑后的 click 不算选中
     const v = viewAt(e);
     const ray = new THREE.Raycaster(
       new THREE.Vector2(v.nx, v.ny), cams[v.qi]

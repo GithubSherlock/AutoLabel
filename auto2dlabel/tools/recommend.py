@@ -5,7 +5,7 @@ v0.2 Phase 2：让 Agent 主动告诉用户"哪些类值得标、哪些不值得
 
 from __future__ import annotations
 
-from auto2dlabel.models.model_catalog import COCO_CLASSES
+from auto2dlabel.configs.model_catalog import COCO_CLASSES
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL
 
 

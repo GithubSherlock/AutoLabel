@@ -13,8 +13,8 @@ from typing import Any
 import numpy as np
 import pytest
 
+from auto2dlabel.configs.model_catalog import REID_MODELS, format_catalog_summary
 from auto2dlabel.models import Image
-from auto2dlabel.models.model_catalog import REID_MODELS, format_catalog_summary
 from auto2dlabel.models.tracking import (
     ClipReIDModel,
     SigLIPReIDModel,

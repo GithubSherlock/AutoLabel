@@ -18,7 +18,7 @@ from typing import Any
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from auto2dlabel.benchmarks import datetime, json, np, time  # noqa: E402
+from auto2dlabel.benchmarks import datetime, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (
     IOU_MATCH_THRESHOLD,
     OUTPUT_DIR,
@@ -254,7 +254,7 @@ def main():
         "# DOTA Aerial Detection Benchmark",
         f"- **模型**: {args.model} | **conf**: {args.conf} | **mAP@0.5**: {mAP:.4f}",
         f"- **类映射**: {mapped_note}",
-        f"  (其余 11 类无 COCO 对应，跳过评估)",
+        "  (其余 11 类无 COCO 对应，跳过评估)",
         f"```\n{summary}\n```",
     ]))
     print(f"结果: {json_path}")

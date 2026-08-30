@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
 
 # 官方 configs/tusimple.py + data/constant.py 常量（UFLD 训练/解码协议）
 LANE_INFER_W = 800

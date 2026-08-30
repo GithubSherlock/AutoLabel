@@ -103,15 +103,23 @@ def gt_boxes_of_sample(nusc: Any, sample_token: str) -> list[NusBox]:
     return boxes
 
 
-def lidar_sample_data(sample: dict, nusc: Any) -> dict:
-    """sample → LIDAR_TOP 的 sample_data 记录（filename/ego_pose/calibrated_sensor/timestamp）。
+def sensor_sample_data(
+    sample: dict, nusc: Any, sensor: str = "LIDAR_TOP"
+) -> dict:
+    """sample → 指定 sensor 的 sample_data 记录（默认 LIDAR_TOP）。
 
-    ego_pose 与 LIDAR 位姿都挂在 LIDAR_TOP 的 sample_data 记录上（sample 表无此字段）——
-    补偿链与 BEVFusion data_ 构建都从这里取。
+    ego_pose 与 sensor 位姿都挂在各自 sample_data 记录上（sample 表无此字段）——
+    补偿链与 BEVFusion data_ 构建都从这里取。P6b 单目走 CAM_FRONT 记录
+    （calibrated_sensor_token → camera_intrinsic 即 FCOS3D cam2img 内参）。
     """
-    record = nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
+    record = nusc.get("sample_data", sample["data"][sensor])
     assert isinstance(record, dict)
     return record
+
+
+def lidar_sample_data(sample: dict, nusc: Any) -> dict:
+    """sample → LIDAR_TOP 的 sample_data 记录（sensor_sample_data 薄壳，向后兼容）。"""
+    return sensor_sample_data(sample, nusc, "LIDAR_TOP")
 
 
 def rot_matrix(q: tuple[float, float, float, float]) -> np.ndarray:
@@ -143,6 +151,23 @@ def quat_mul(
     )
 
 
+def _label_mask(
+    labels: np.ndarray, class_names: list[str] | tuple[str, ...]
+) -> np.ndarray:
+    """标签越界丢弃 + 每调用一次向 stderr 诊断（类表与 head 类数不符时）。
+
+    boxes_sensor_to_global / boxes_cam_to_global 共用（复用不复制）。
+    """
+    mask = (labels >= 0) & (labels < len(class_names))
+    if not bool(mask.all()):
+        print(
+            f"[诊断] 标签越界跳过 {int((~mask).sum())} 个框 "
+            f"len(class_names)={len(class_names)}",
+            file=sys.stderr,
+        )
+    return mask
+
+
 def boxes_sensor_to_global(
     boxes: np.ndarray,
     scores: np.ndarray,
@@ -168,23 +193,82 @@ def boxes_sensor_to_global(
     t_calib = np.asarray(calib["translation"], dtype=np.float64)
     q_calib = tuple(calib["rotation"])
     out: list[NusBox] = []
-    warned = False
+    keep = _label_mask(labels, class_names)
     for i in range(len(boxes)):
-        idx = int(labels[i])
-        if idx < 0 or idx >= len(class_names):
-            if not warned:  # 诊断：类表与模型 head 类数不符（每调用一次）
-                print(
-                    f"[诊断] 标签越界跳过 idx={idx} len(class_names)={len(class_names)}",
-                    file=sys.stderr,
-                )
-                warned = True
+        if not keep[i]:
             continue
+        idx = int(labels[i])
         x, y, z, l, w, h, yaw = (float(v) for v in boxes[i, :7])
         center = r_ego @ (r_calib @ np.array([x, y, z]) + t_calib) + t_ego
         quat = quat_mul(q_ego, quat_mul(q_calib, yaw_to_quat(yaw)))
         velocity: tuple[float, float] | None = None
         if boxes.shape[1] >= 9:
             v_glob = r_ego @ (r_calib @ np.array([float(boxes[i, 7]), float(boxes[i, 8]), 0.0]))
+            velocity = (float(v_glob[0]), float(v_glob[1]))
+        out.append(
+            NusBox(
+                label=class_names[idx],
+                confidence=float(scores[i]),
+                translation=(float(center[0]), float(center[1]), float(center[2])),
+                size=(w, l, h),
+                quaternion=quat,
+                velocity=velocity,
+            )
+        )
+    return out
+
+
+# 相机系→ego 的固定四元数：绕相机 x 轴转 π/2（v0.15 output_to_nusc_box 的 q2）
+# = (cos(π/4), sin(π/4), 0, 0)。与 yaw_to_quat 组合时位于 yaw 旋转**之后**（q2 ⊗ q1）。
+QX_HALF_PI: tuple[float, float, float, float] = (
+    0.7071067811865476,
+    0.7071067811865476,
+    0.0,
+    0.0,
+)
+
+
+def boxes_cam_to_global(
+    boxes: np.ndarray,
+    scores: np.ndarray,
+    labels: np.ndarray,
+    class_names: list[str] | tuple[str, ...],
+    ego: dict,
+    calib: dict,
+) -> list[NusBox]:
+    """相机系 9 值单目输出 → 全局系 NusBox（复刻 v0.15 output_to_nusc_box 定式，P6b）。
+
+    FCOS3D nuScenes 权重 = 2021-07 训练（v0.15 旧 converter 语义）：
+    输出 [x,y,z,w,l,h,yaw,vx,vz] = **几何中心** + dims 直传 (w,l,h) +
+    yaw 无负号（相机系 nuScenes yaw）+ 相机 x-z 平面速度。
+    v1.4.0 官方 eval 的 output_to_nusc_box 假定**新** converter 语义
+    （dims [2,0,1] 重排 + yaw 取负），与旧权重不匹配——本函数按 v0.15 版
+    （已下载源码逐行核对）实现：dims 直传、yaw 原样、q_local = q2 ⊗ q1
+    （q1 = 绕 z 转 yaw，q2 = 绕 x 转 π/2）、center = 几何中心，
+    然后 cam2ego（calib）→ ego2global（ego_pose）两级 rotate+translate。
+    纯函数：ego/calib 同 boxes_sensor_to_global 的 devkit 记录契约。
+    """
+    r_ego = rot_matrix(tuple(ego["rotation"]))
+    t_ego = np.asarray(ego["translation"], dtype=np.float64)
+    q_ego = tuple(ego["rotation"])
+    r_calib = rot_matrix(tuple(calib["rotation"]))
+    t_calib = np.asarray(calib["translation"], dtype=np.float64)
+    q_calib = tuple(calib["rotation"])
+    out: list[NusBox] = []
+    keep = _label_mask(labels, class_names)
+    for i in range(len(boxes)):
+        if not keep[i]:
+            continue
+        idx = int(labels[i])
+        x, y, z, w, l, h, yaw = (float(v) for v in boxes[i, :7])
+        center = r_ego @ (r_calib @ np.array([x, y, z]) + t_calib) + t_ego
+        # q_local = q2 ⊗ q1（Hamilton 积）：先绕相机 z 转 yaw，再绕 x 转 π/2
+        q_local = quat_mul(QX_HALF_PI, yaw_to_quat(yaw))
+        quat = quat_mul(q_ego, quat_mul(q_calib, q_local))
+        velocity: tuple[float, float] | None = None
+        if boxes.shape[1] >= 9:
+            # 相机 x-z 平面速度 3 向量 [vx, 0, vz] 随两级位姿旋转 → 全局 x-y
+            v_glob = r_ego @ (r_calib @ np.array([float(boxes[i, 7]), 0.0, float(boxes[i, 8])]))
             velocity = (float(v_glob[0]), float(v_glob[1]))
         out.append(
             NusBox(

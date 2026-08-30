@@ -22,6 +22,26 @@ from auto2dlabel.tools.registry import ToolRegistry
 logger = logging.getLogger(__name__)
 
 
+def _normalize_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """回传 LLM 的 tool_calls arguments 规整化（v0.6 Phase 4）。
+
+    LLM 原样写回 arguments 可能带冗余空白/转义——它是后续轮次消息大头，
+    规整化后减小请求体积且利于前缀缓存。json.loads + 紧凑 dumps 归一；
+    失败保持原样（执行处 json.loads 再报错，行为不变）。返回新列表，
+    不改动 response.tool_calls 原对象（执行循环仍用原值解析）。
+    """
+    normalized: list[dict[str, Any]] = []
+    for tc in tool_calls:
+        args = tc["function"]["arguments"]
+        try:
+            args = json.dumps(json.loads(args), separators=(",", ":"), ensure_ascii=False)
+        except (ValueError, TypeError):
+            pass  # 非 JSON 参数原样回传（执行处报错语义不变）
+        # 只改 arguments，其余字段（含未知扩展）完整保留
+        normalized.append({**tc, "function": {**tc["function"], "arguments": args}})
+    return normalized
+
+
 def _summarize_tool_result(tool_name: str, result: Any) -> dict[str, Any]:
     """精简 tool 返回结果，避免把完整 Bbox 对象发给 LLM 浪费 token。"""
     if tool_name == "detect_objects" and isinstance(result, list):
@@ -80,6 +100,7 @@ class AgentOrchestrator:
         detection_model: str | None = None,
         iou_threshold: float = 0.5,
         use_sahi: bool = False,
+        evaluate_mode: str | None = None,
     ):
         self.llm = llm_client
         self.registry = tool_registry or ToolRegistry.get_instance()
@@ -87,6 +108,14 @@ class AgentOrchestrator:
         self.detection_model = detection_model
         self.iou_threshold = iou_threshold
         self.use_sahi = use_sahi
+        # LLM Evaluate 模式（v0.6 Phase 4）："auto" 默认（LLM 在环处置，失败时
+        # 代码级规则兜底）；"code" 直走确定性规则（零 Evaluate token）。
+        # 解析链：构造参数 > env AUTOLABEL_EVALUATE_MODE > "auto"
+        mode = (evaluate_mode or os.environ.get("AUTOLABEL_EVALUATE_MODE") or "auto").lower()
+        if mode not in ("auto", "code"):
+            logger.warning("非法 evaluate_mode=%r → 回退 auto", mode)
+            mode = "auto"
+        self.evaluate_mode = mode
         self._detect_tool: Any | None = None  # 保留引用以读取重试状态
         # LLM Evaluate 节点状态（每次 run 重置，条件暴露）
         self._pending_evaluate: Any | None = None  # EvaluateTool 实例
@@ -197,7 +226,13 @@ class AgentOrchestrator:
                 tools.append(self._pending_evaluate.to_openai_tool())
 
             # Step 1: Call LLM
-            response = llm.chat(state.messages, tools=tools, temperature=0.1)
+            response = llm.chat(
+                state.messages,
+                tools=tools,
+                temperature=0.1,
+                max_tokens=2048,
+                call_site="agent.loop",
+            )
             logger.info("LLM response: content=%s, tool_calls=%s",
                          response.content[:100] if response.content else None,
                          response.wants_tool_call)
@@ -228,7 +263,11 @@ class AgentOrchestrator:
                         dup_ids.add(tc["id"])
                         logger.info("Skipping duplicate evaluate_quality call")
 
-                state.add_message("assistant", response.content or "", response.tool_calls)
+                state.add_message(
+                    "assistant",
+                    response.content or "",
+                    _normalize_tool_calls(response.tool_calls),
+                )
 
                 for tc in response.tool_calls:
                     tool_name = tc["function"]["name"]
@@ -271,16 +310,8 @@ class AgentOrchestrator:
                         state.add_tool_result(tc["id"], tool_name, summary)
 
                         if tool_name == "evaluate_quality":
-                            # 执行 LLM 选择的处置动作（代码执行，不追加迭代）
-                            if result.get("flagged"):
-                                state.metadata["llm_review_flagged"] = True
-                            if result.get("retried"):
-                                self._evaluate_retry_bboxes = list(result.get("detections", []))
-                            if result.get("retried_swap"):
-                                self._evaluate_retry_bboxes = list(result.get("detections", []))
-                                self._model_retried = True
-                                if self._pending_swap_model:
-                                    state.metadata["model_swapped"] = self._pending_swap_model
+                            # 执行处置动作（代码执行，不追加迭代）
+                            self._record_disposition_result(state, result)
                             state.add_message(
                                 "user",
                                 "处置完成。Summarize NOW. No tools. One line per class.",
@@ -315,21 +346,46 @@ class AgentOrchestrator:
                                     + (f" Quality: {note}" if note else ""),
                                 )
                             else:
-                                # 质量未通过：挂起 Evaluate 节点（下一轮条件暴露）
-                                self._prepare_evaluate(
-                                    image_path, arguments, quality, confidence_threshold
-                                )
-                                state.add_message(
-                                    "user",
-                                    f"质量评估未通过: {note}。请调用 evaluate_quality 工具"
-                                    "选择处置动作（仅一次）: accept / flag_for_review / "
-                                    "retry_lower_threshold。",
-                                )
+                                # 质量未通过：处置两档（v0.6 Phase 4）——
+                                # "code" 直走确定性规则（零 Evaluate token）；
+                                # "auto" 挂起 Evaluate 节点（下一轮条件暴露）
+                                if self.evaluate_mode == "code":
+                                    self._prepare_evaluate(
+                                        image_path, arguments, quality, confidence_threshold
+                                    )
+                                    self._record_disposition_result(
+                                        state, self._apply_code_disposition() or {}
+                                    )
+                                    state.add_message(
+                                        "user",
+                                        "处置完成。Summarize NOW. No tools. "
+                                        "One line per class.",
+                                    )
+                                else:
+                                    self._prepare_evaluate(
+                                        image_path, arguments, quality, confidence_threshold
+                                    )
+                                    state.add_message(
+                                        "user",
+                                        f"质量评估未通过: {note}。请调用 evaluate_quality 工具"
+                                        "选择处置动作（仅一次）: accept / flag_for_review / "
+                                        "retry_lower_threshold。",
+                                    )
                     except Exception as e:
                         logger.error("Tool call failed: %s", e)
-                        state.add_tool_result(
-                            tc["id"], tool_name, {"success": False, "error": str(e)}
-                        )
+                        if tool_name == "evaluate_quality":
+                            # v0.6 Phase 4：LLM Evaluate 失败 → 代码级确定性规则
+                            # 兜底（不中断整图流程；0 框重检一次，其余转 review）
+                            result = self._apply_code_disposition()
+                            fallback: dict[str, Any] = {"fallback": True, "error": str(e)}
+                            if result is not None:
+                                fallback.update(result)
+                                self._record_disposition_result(state, result)
+                            state.add_tool_result(tc["id"], tool_name, fallback)
+                        else:
+                            state.add_tool_result(
+                                tc["id"], tool_name, {"success": False, "error": str(e)}
+                            )
 
             elif response.content:
                 state.add_message("assistant", response.content)
@@ -377,6 +433,48 @@ class AgentOrchestrator:
             model_retried=self._model_retried,
             swap_fn=self._build_swap_fn(image_path, prompts, base_threshold),
         )
+
+    def _apply_code_disposition(self) -> dict[str, Any] | None:
+        """代码级确定性处置（v0.6 Phase 4）：复用挂起的 EvaluateTool 资产。
+
+        前置：_pending_evaluate 已挂起（code 模式 _prepare_evaluate 刚建，
+        或 auto 模式 LLM Evaluate 失败兜底复用）。规则单一事实源
+        deterministic_disposition（与 pick_alternate_model 同源），执行复用
+        apply_evaluate_action 纯函数。处置自身失败 → 降级 flag_for_review
+        （最安全终态，绝不中断整图流程）。返回 None = 无挂起资产（防御）。
+        """
+        if self._pending_evaluate is None:
+            return None
+        from auto2dlabel.agent.evaluate import deterministic_disposition
+
+        try:
+            result: dict[str, Any] = self._pending_evaluate.forward(
+                action=deterministic_disposition(self._pending_evaluate.report)
+            )
+        except Exception as e:
+            logger.error("代码级处置执行失败 → flag_for_review: %s", e)
+            result = {
+                "action": "flag_for_review",
+                "flagged": True,
+                "fallback_failed": str(e),
+            }
+        self._evaluate_called = True
+        return result
+
+    def _record_disposition_result(self, state: AgentState, result: dict[str, Any]) -> None:
+        """处置结果三通道（v0.6 Phase 4 抽出）：metadata + 重试框并入。
+
+        LLM 在环（auto）与代码级（code）两路径共用，处置语义单一事实源。
+        """
+        if result.get("flagged"):
+            state.metadata["llm_review_flagged"] = True
+        if result.get("retried"):
+            self._evaluate_retry_bboxes = list(result.get("detections", []))
+        if result.get("retried_swap"):
+            self._evaluate_retry_bboxes = list(result.get("detections", []))
+            self._model_retried = True
+            if self._pending_swap_model:
+                state.metadata["model_swapped"] = self._pending_swap_model
 
     def _build_swap_fn(
         self,

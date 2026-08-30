@@ -43,6 +43,7 @@ class _ScriptedLLM:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.1,
+    **kwargs: Any,
     ) -> LLMResponse:
         self.messages_seen.append(messages)
         assert self.responses, "LLM 脚本耗尽"

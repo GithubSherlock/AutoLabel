@@ -326,7 +326,7 @@ def main():
 
     json_path, md_path = save_results(result_data, "coco_seg", args.seg_model, ts)
     md_path.write_text("\n".join([
-        f"# COCO val 2017 Instance Segmentation Benchmark",
+        "# COCO val 2017 Instance Segmentation Benchmark",
         f"- **分割模型**: {args.seg_model} | **检测 backbone**: {DET_MODEL} | **mask mAP@0.5**: {mAP:.4f}",
         f"```\n{summary}\n```",
     ]))

@@ -6,7 +6,7 @@ torchvision 语义分割、torchvision 分类）已登记、列表长度、VOC �
 
 from __future__ import annotations
 
-from auto2dlabel.models.model_catalog import (
+from auto2dlabel.configs.model_catalog import (
     CLASSIFICATION_MODELS,
     SEGMENTATION_MODELS,
     TORCHVISION_CLS_MODELS,

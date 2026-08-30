@@ -26,7 +26,6 @@ from auto2dlabel.tools.convert_mmdet_cityscapes_maskrcnn import (
     convert_state_dict,
 )
 
-
 # ============================================================
 # 工厂分发
 # ============================================================

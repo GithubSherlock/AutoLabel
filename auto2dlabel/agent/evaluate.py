@@ -36,6 +36,20 @@ def pick_alternate_model(current: str) -> str:
     return DEFAULT_MODEL
 
 
+def deterministic_disposition(report: QualityReport) -> str:
+    """Evaluate 代码级确定性处置规则（v0.6 Phase 4，与 pick_alternate_model 同源）。
+
+    质量不达标（ok=False）且不依赖 LLM 决策时的处置动作（纯函数）：
+    - 0 框且未降阈值重试过 → retry_lower_threshold（一次降阈值重检机会）
+    - 其余（已重试仍 0 框 / 缺类 / 超框数）→ flag_for_review（宁缺勿假，人工复核）
+
+    用于：evaluate_mode="code" 开关直走规则；LLM Evaluate 失败时的兜底。
+    """
+    if report.total_boxes == 0 and not report.retried:
+        return "retry_lower_threshold"
+    return "flag_for_review"
+
+
 @dataclass
 class QualityReport:
     """单张图检测结果的代码级质量评估报告。"""

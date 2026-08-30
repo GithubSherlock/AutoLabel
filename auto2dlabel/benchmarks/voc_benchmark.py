@@ -11,11 +11,10 @@ from typing import Any
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from auto2dlabel.benchmarks import datetime, json, np, time  # noqa: E402
+from auto2dlabel.benchmarks import datetime, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (
     IOU_MATCH_THRESHOLD,
     OUTPUT_DIR,
-    compute_iou,
     detect_batch_or_fallback,
     evaluate_per_class,
     format_result_table,

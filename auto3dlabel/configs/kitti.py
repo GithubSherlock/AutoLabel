@@ -79,58 +79,14 @@ DEFAULT_IOU = 0.5
 DEFAULT_DET_MODEL = "IDEA-Research/grounding-dino-tiny"
 DEFAULT_SEG_MODEL = "sam2_l.pt"
 
-# ===== v0.2：LiDAR 3D 检测器（mmdet3d）路由 =====
+# ===== mmdet3d 3D 检测器路由 =====
 # configs 经 sparse-checkout 落 MMDET3D_CONFIG_DIR（不入库）；权重落 WEIGHTS_DIR/<weights_dir>/
 WEIGHTS_DIR = Path(os.environ.get("AUTO3DLABEL_WEIGHTS_DIR", "auto3dlabel/weights"))
 MMDET3D_CONFIG_DIR = Path(
     os.environ.get("MMDET3D_CONFIG_DIR", "auto3dlabel/weights/mmdet3d_configs")
 )
-
-# 模型名 → {config 相对路径（以 MMDET3D_CONFIG_DIR 为根）, checkpoint 文件名, weights_dir}
-# config/权重 URL 以 sparse-checkout 的 configs/*/metafile.yml 为准（M3 下载脚本提取核对）
-DETECTOR3D_NAMES = {
-    "pointpillars_kitti": {
-        "config": "configs/pointpillars/pointpillars_hv_secfpn_8xb6-160e_kitti-3d-3class.py",
-        "checkpoint": (
-            "hv_pointpillars_secfpn_6x8_160e_kitti-3d-3class_20220301_150306-37dc2420.pth"
-        ),
-        "weights_dir": "pointpillars_kitti",
-    },
-    "pointpillars_nus": {
-        "config": "configs/pointpillars/pointpillars_hv_secfpn_sbn-all_8xb4-2x_nus-3d.py",
-        "checkpoint": (
-            "hv_pointpillars_secfpn_sbn-all_4x8_2x_nus-3d_20210826_225857-f19d00a3.pth"
-        ),
-        "weights_dir": "pointpillars_nus",
-    },
-    "centerpoint_nus": {
-        "config": (
-            "configs/centerpoint/"
-            "centerpoint_pillar02_second_secfpn_head-circlenms_8xb4-cyclic-20e_nus-3d.py"
-        ),
-        "checkpoint": (
-            "centerpoint_02pillar_second_secfpn_circlenms_4x8_cyclic_20e_nus_"
-            "20220811_031844-191a3822.pth"
-        ),
-        "weights_dir": "centerpoint_nus",
-    },
-    # v0.3 P2：KITTI 精度升级（v1.4.0 无 KITTI centerpoint → 走 PV-RCNN；zoo car moderate 81.4）
-    "pvrcnn_kitti": {
-        "config": "configs/pv_rcnn/pv_rcnn_8xb2-80e_kitti-3d-3class.py",
-        "checkpoint": "pv_rcnn_8xb2-80e_kitti-3d-3class_20221117_234428-b384d22f.pth",
-        "weights_dir": "pvrcnn_kitti",
-    },
-}
-
-# v0.3 P3：KITTI 单目 3D 检测器（LiDAR 不可用时的降级方案，交叉验证基准）
-# 输出 = 相机系 7 值 [x,y,z,l,h,w,ry] 底面中心（与 label_2 同构，Det3DResult 直通）
-MONO3D_NAMES = {
-    "pgd_kitti": {
-        "config": "configs/pgd/pgd_r101-caffe_fpn_head-gn_4xb3-4x_kitti-mono3d.py",
-        "checkpoint": "pgd_r101_caffe_fpn_gn-head_3x4_4x_kitti-mono3d_20211022_102608-8a97533b.pth",
-        "weights_dir": "pgd_kitti",
-    },
-}
+# 模型名路由表（DETECTOR3D_NAMES / MONO3D_NAMES / BEVFUSION_NAMES / FCOS3D_NAMES）
+# 已收拢至 configs/model_catalog.py（单一事实源，v0.3 P6），勿在别处散副本
 
 # KITTI 图像统一尺寸（image_2 全数据集同尺寸；3D 直检 2D 投影框外接用）
 KITTI_IMG_W = 1242

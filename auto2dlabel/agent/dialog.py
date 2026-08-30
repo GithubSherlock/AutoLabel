@@ -39,6 +39,7 @@ def parse_with_dialog(
     ask_fn: Callable[[list[PlanQuestion]], str],
     instruction: str,
     max_rounds: int = 3,
+    call_site: str = "dialog",
 ) -> PlanT:
     """多轮对话收集缺参 → 返回已补全/缺参的 plan。
 
@@ -49,6 +50,7 @@ def parse_with_dialog(
         ask_fn: 渲染问题并收集回答 → 回答文本（""/空白 = 用户放弃对话）。
         instruction: 原始用户指令。
         max_rounds: LLM 解析轮次上限（默认 3）。
+        call_site: usage 台账调用点标注（v0.6 Phase 4；2D/3D 各注入区分）。
 
     Returns:
         plan：questions 空 / 用户放弃 / 轮次耗尽时返回；抛 ValueError
@@ -62,7 +64,14 @@ def parse_with_dialog(
     accumulated: list[str] = []
 
     for i in range(max_rounds):
-        response = llm.chat(messages, tools=None, temperature=0.0)
+        response = llm.chat(
+            messages,
+            tools=None,
+            temperature=0.0,
+            max_tokens=1024,
+            json_mode=True,
+            call_site=call_site,
+        )
         if not response.content:
             raise ValueError("LLM 返回空响应，无法解析任务")
         plan = parse_fn(response.content)

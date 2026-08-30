@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from auto2dlabel.agent.state import AgentState
 from auto2dlabel.cli_common import collect_images, console, display_results, triage_and_export
-from auto2dlabel.models.model_catalog import SEGMENTATION_MODELS, TORCHVISION_SEG_MODELS
+from auto2dlabel.configs.model_catalog import SEGMENTATION_MODELS, TORCHVISION_SEG_MODELS
 from auto2dlabel.schema.annotation import Annotation, Bbox
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL, TaskPlan, TaskStep
 from auto2dlabel.tools.constraints import ReferentialConstraint

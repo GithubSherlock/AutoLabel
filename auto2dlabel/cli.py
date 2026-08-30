@@ -13,6 +13,7 @@ import typer
 
 from auto2dlabel.cli_commands import (
     chat_command,
+    cost_report_command,
     dataset_add_command,
     dataset_list_command,
     dataset_remove_command,
@@ -141,6 +142,14 @@ def sample(
 def tools() -> None:
     """列出所有可用的标注 Tool。"""
     tools_command()
+
+
+@app.command()
+def cost_report(
+    path: str = typer.Option("", "--path", help="台账 JSONL 路径（默认 logs/llm_usage.jsonl）"),
+) -> None:
+    """按调用点聚合 LLM token 用量与费用（v0.6 Phase 4 usage 台账）。"""
+    cost_report_command(path=path or None)
 
 
 dataset_app = typer.Typer(help="管理用户自建数据集注册（供 LLM 路径引导）")

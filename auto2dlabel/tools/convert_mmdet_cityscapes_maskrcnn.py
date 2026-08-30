@@ -119,7 +119,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+    from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
 
     src = args.input or WEIGHTS_DIR / "maskrcnn_r50_cityscapes.mmdet.pth"
     dst = args.output or WEIGHTS_DIR / "maskrcnn_r50_cityscapes.pth"

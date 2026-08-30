@@ -122,14 +122,14 @@ def generate_summary(results: list[dict]) -> str:
     """生成汇总 Markdown 报告。"""
     ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     lines = [
-        f"# AutoLabel Benchmark Summary",
-        f"",
+        "# AutoLabel Benchmark Summary",
+        "",
         f"**时间**: {ts}",
-        f"",
-        f"## 概览",
-        f"",
-        f"| 数据集 | 模型 | 状态 |",
-        f"| --- | --- | --- |",
+        "",
+        "## 概览",
+        "",
+        "| 数据集 | 模型 | 状态 |",
+        "| --- | --- | --- |",
     ]
 
     success_count = 0
@@ -139,19 +139,19 @@ def generate_summary(results: list[dict]) -> str:
             success_count += 1
         lines.append(f"| {r['name']} | {r['model']} | {status} |")
 
-    lines.append(f"")
+    lines.append("")
     lines.append(f"**总计**: {success_count}/{len(results)} 通过")
-    lines.append(f"")
+    lines.append("")
 
     # 详细输出
-    lines.append(f"## 详细输出")
-    lines.append(f"")
+    lines.append("## 详细输出")
+    lines.append("")
     for r in results:
         lines.append(f"### {r['name']} ({r['model']})")
-        lines.append(f"```")
+        lines.append("```")
         lines.append(r["output"][:3000])
-        lines.append(f"```")
-        lines.append(f"")
+        lines.append("```")
+        lines.append("")
 
     summary = "\n".join(lines)
     md_path = OUTPUT_DIR / f"summary_{ts}.md"

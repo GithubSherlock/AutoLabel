@@ -54,7 +54,7 @@ class SAM2Model:
         except ImportError:
             raise ImportError("SAM 需要 ultralytics。请运行: pip install -U ultralytics")
 
-        from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+        from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
         settings.update({"weights_dir": str(WEIGHTS_DIR)})
         self._model = SAM(self._model_name)
         return self._model
@@ -122,7 +122,7 @@ class FastSAMModel:
         except ImportError:
             raise ImportError("ultralytics 未安装。请运行: pip install ultralytics")
 
-        from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+        from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
         settings.update({"weights_dir": str(WEIGHTS_DIR)})
 
         # 优先本地权重
@@ -210,7 +210,7 @@ CITYSCAPES_THING_NAMES = [
 ]
 
 
-def build_maskrcnn_cityscapes(device: "str | torch.device" = "cpu") -> "torch.nn.Module":
+def build_maskrcnn_cityscapes(device: str | torch.device = "cpu") -> torch.nn.Module:
     """构建与 mmdet Cityscapes 权重对齐的 torchvision Mask R-CNN（v1 结构）。
 
     - maskrcnn_resnet50_fpn(weights=None, num_classes=9, weights_backbone=None)：
@@ -219,7 +219,6 @@ def build_maskrcnn_cityscapes(device: "str | torch.device" = "cpu") -> "torch.nn
       且免下载 ImageNet 初始化——权重由转换产物整体覆盖）
     - 推理尺度对齐 mmdet cityscapes val 管线（原图 2048×1024 保持 1:1，pad 到 32 整除）
     """
-    import torch
     from torchvision.models.detection import maskrcnn_resnet50_fpn
     from torchvision.models.detection.transform import GeneralizedRCNNTransform
 
@@ -255,7 +254,7 @@ class MaskRCNNModel:
     def _load(self) -> torch.nn.Module:
         if self._model is not None:
             return self._model
-        from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+        from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
         os.environ.setdefault("TORCH_HOME", str(WEIGHTS_DIR))
 
         if self._model_name == "maskrcnn_r50_cityscapes":
@@ -302,7 +301,7 @@ class MaskRCNNModel:
         import torch
         from torchvision.transforms import functional as F
 
-        from auto2dlabel.models.model_catalog import COCO_CLASSES
+        from auto2dlabel.configs.model_catalog import COCO_CLASSES
 
         # cityscapes 域内权重输出 8 类（mmdet 下标权威顺序）；COCO 路径维持现状
         class_names = (
@@ -335,7 +334,7 @@ class MaskRCNNModel:
         import torch
         from torchvision.transforms import functional as F
 
-        from auto2dlabel.models.model_catalog import COCO_CLASSES
+        from auto2dlabel.configs.model_catalog import COCO_CLASSES
 
         class_names = (
             CITYSCAPES_THING_NAMES
@@ -354,7 +353,7 @@ class MaskRCNNModel:
 
     def _parse_output(
         self,
-        outputs: dict[str, "torch.Tensor"],
+        outputs: dict[str, torch.Tensor],
         class_names: list[str],
     ) -> list[Mask]:
         """torchvision maskrcnn 输出 dict → Mask 列表（单图/批量共用）。"""
@@ -366,9 +365,23 @@ class MaskRCNNModel:
             if conf < 0.5:
                 continue
 
-            cls_id = int(label_idx) - 1  # 1-based → 0-based
-            if cls_id < 0 or cls_id >= len(class_names):
-                continue
+            if class_names is CITYSCAPES_THING_NAMES:
+                # cityscapes 权重：1-based thing 类索引（全量 500 图 mAP 0.5149
+                # 实测口径，行为零变）
+                cls_id = int(label_idx) - 1
+                if cls_id < 0 or cls_id >= len(class_names):
+                    continue
+            else:
+                # torchvision COCO_V1 权重输出 detectron 91 类 1-based 索引
+                # （0=background，10 个占位类）——经映射转 80 类索引。曾直接
+                # label-1 索引：前 11 类一致掩盖错位（cat 预测标成 dog），
+                # 见 model_catalog.COCO_91_TO_80 注释
+                from auto2dlabel.configs.model_catalog import COCO_91_TO_80
+
+                mapped = COCO_91_TO_80.get(int(label_idx))
+                if mapped is None:
+                    continue
+                cls_id = mapped
             label = class_names[cls_id]
 
             x1, y1, x2, y2 = box.tolist()
@@ -414,7 +427,7 @@ class TorchVisionSegModel:
         """加载模型（幂等）。torchvision 构建函数 stub 返回 Any，类型按 Any 处理。"""
         if self._model is not None:
             return self._model
-        from auto2dlabel.models.model_catalog import TORCHVISION_SEG_MODELS, WEIGHTS_DIR
+        from auto2dlabel.configs.model_catalog import TORCHVISION_SEG_MODELS, WEIGHTS_DIR
         os.environ.setdefault("TORCH_HOME", str(WEIGHTS_DIR))
 
         try:
@@ -481,7 +494,7 @@ def _class_mask_to_masks(class_mask: np.ndarray[Any, Any], prompts: list[str]) -
     """
     import cv2
 
-    from auto2dlabel.models.model_catalog import VOC_CLASSES
+    from auto2dlabel.configs.model_catalog import VOC_CLASSES
 
     masks_out: list[Mask] = []
     for cls_idx in range(1, len(VOC_CLASSES)):
@@ -587,7 +600,7 @@ class SAM3Model:
                 "SAM3 需要 ultralytics>=8.3.237。请运行: pip install -U ultralytics"
             )
 
-        from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+        from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
         os.environ.setdefault("ULTRALYTICS_CACHE", str(WEIGHTS_DIR))
 
         # 查找权重文件
@@ -628,7 +641,7 @@ class SAM3Model:
                 return path
 
         raise FileNotFoundError(
-            f"SAM3 权重文件未找到。尝试过:\n"
+            "SAM3 权重文件未找到。尝试过:\n"
             + "\n".join(f"  - {c}" for c in candidates)
             + f"\n\n{self.DOWNLOAD_HELP}"
         )
@@ -695,7 +708,6 @@ class SAM3Model:
         """
         predictor = self._load()
 
-        from auto2dlabel.models.model_catalog import COCO_CLASSES
 
         # 从 bboxes 提取类别作为文本 prompt（空列表时只能全类检测）
         prompts = list(set(b.label for b in bboxes)) if bboxes else None
@@ -738,11 +750,12 @@ def create_segmentation_model(name: str = "sam2_l.pt", **kwargs):
             - "fastsam" / "FastSAM-s.pt" / "FastSAM-x.pt" → FastSAMModel
             - "sam2" / "sam_b.pt" / "sam2_t.pt" / ... → SAM2Model
             - "maskrcnn" / "maskrcnn_resnet50_fpn_v2" → MaskRCNNModel
+            - "mask2former" / "mask2former_r50_8xb2-lsj-50e_coco" → MMDetMask2FormerModel
             - "sam3" / "sam3.pt" → SAM3Model
             - "fcn_resnet50" / "deeplabv3_*" / "lraspp_*" → TorchVisionSegModel
         **kwargs: 透传参数（如 device, model_name）。
     """
-    from auto2dlabel.models.model_catalog import TORCHVISION_SEG_MODELS
+    from auto2dlabel.configs.model_catalog import TORCHVISION_SEG_MODELS
 
     name_lower = name.lower()
 
@@ -754,6 +767,16 @@ def create_segmentation_model(name: str = "sam2_l.pt", **kwargs):
     elif "maskrcnn" in name_lower:
         kwargs.setdefault("model_name", name)
         return MaskRCNNModel(**kwargs)
+    elif "mask2former" in name_lower:
+        # mmdet Mask2Former 实例分割质量档（v0.6 Phase 3a）：自带检测，
+        # generate 忽略 bboxes（与 MaskRCNNModel 同款）；零加载 + ImportError 守卫
+        from auto2dlabel.models.mmdet_engines import MMDetMask2FormerModel
+
+        kwargs.setdefault(
+            "model_name",
+            MMDetMask2FormerModel.DEFAULT_NAME if name_lower == "mask2former" else name,
+        )
+        return MMDetMask2FormerModel(**kwargs)
     elif "sam3" in name_lower:
         return SAM3Model(**kwargs)
     elif name_lower.startswith("sam2") or any(

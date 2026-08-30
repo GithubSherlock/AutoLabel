@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from typing import Any, Protocol, cast, get_args
 
+from auto2dlabel.configs.model_catalog import TORCHVISION_CLS_MODELS, WEIGHTS_DIR
 from auto2dlabel.models import Image, os
 from auto2dlabel.models.detection import _match_prompt
-from auto2dlabel.models.model_catalog import TORCHVISION_CLS_MODELS, WEIGHTS_DIR
 from auto2dlabel.schema.annotation import ImageLabel
 from auto2dlabel.tools.device import get_device
 
@@ -380,7 +380,7 @@ def create_classification_model(
         ("convnext_", "maxvit_", "swin_", "efficientnet_", "vit_", "resnet", "resnext")
     ):
         return TorchVisionClassifier(model_name=model_name)
-    from auto2dlabel.models.model_catalog import CLASSIFICATION_MODELS
+    from auto2dlabel.configs.model_catalog import CLASSIFICATION_MODELS
 
     all_models = CLASSIFICATION_MODELS + TORCHVISION_CLS_MODELS
     raise ValueError(

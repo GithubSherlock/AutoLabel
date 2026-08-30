@@ -12,8 +12,8 @@ from auto2dlabel.agent import json, logging
 from auto2dlabel.agent.dialog import parse_with_dialog
 from auto2dlabel.agent.llm import LLMClient
 from auto2dlabel.configs.datasets import format_datasets_summary
+from auto2dlabel.configs.model_catalog import format_catalog_summary
 from auto2dlabel.configs.task_params import format_task_params_summary
-from auto2dlabel.models.model_catalog import format_catalog_summary
 from auto2dlabel.schema.task_plan import (
     BENCHMARK_DATASETS,
     BENCHMARK_DEFAULT_CONF,
@@ -65,7 +65,7 @@ Rules:
 - prompts: English only. Map: 汽车/车辆→car, 行人/人→person, 自行车/单车→bicycle, 摩托车→motorcycle, 公共汽车/公交车→bus, 卡车→truck, 狗→dog, 猫→cat
 - confidence_threshold: default 0.1; extract if user says 置信度/conf/阈值X (e.g. 置信度0.5)
 - iou_threshold: default 0.3; extract if user says iou/IoU X (e.g. iou0.5)
-- model_name: map hints to names. Key mappings: faster rcnn→fasterrcnn_resnet50_fpn_v2, yolo→yolo26x.pt, yolo12→yolo12x.pt, rtdetr/rt-detr/detr→rtdetr-l.pt, grounding dino→IDEA-Research/grounding-dino-tiny, clip→openai/clip-vit-base-patch32, siglip→google/siglip-base-patch16-224, convnext→convnext_large, swin→swin_b, maxvit→maxvit_t, efficientnet→efficientnet_v2_l, vit→vit_b_16, resnet→resnet50, resnext→resnext101_32x8d, obb→yolo11n-obb.pt, pose→yolo11n-pose.pt, fcn→fcn_resnet50, deeplab→deeplabv3_resnet50, lraspp→lraspp_mobilenet_v3_large. cityscapes 街景分割→maskrcnn_r50_cityscapes. sam3/sam/maskrcnn/fastsam/fcn*/deeplabv3*/lraspp* are SEGMENTATION models — keep them as model_name (the system auto-routes them). ByteTrack/BoT-SORT are TRACKERS not models — ignore them for model_name. default: yolo26x.pt
+- model_name: map hints to names. Key mappings: faster rcnn→fasterrcnn_resnet50_fpn_v2, yolo→yolo26x.pt, yolo12→yolo12x.pt, rtdetr/rt-detr/detr→rtdetr-l.pt, grounding dino→IDEA-Research/grounding-dino-tiny, clip→openai/clip-vit-base-patch32, siglip→google/siglip-base-patch16-224, convnext→convnext_large, swin→swin_b, maxvit→maxvit_t, efficientnet→efficientnet_v2_l, vit→vit_b_16, resnet→resnet50, resnext→resnext101_32x8d, obb→yolo11n-obb.pt, pose→yolo11n-pose.pt, rtmpose→rtmpose_l, fcn→fcn_resnet50, deeplab→deeplabv3_resnet50, lraspp→lraspp_mobilenet_v3_large. cityscapes 街景分割→maskrcnn_r50_cityscapes. sam3/sam/maskrcnn/fastsam/fcn*/deeplabv3*/lraspp* are SEGMENTATION models — keep them as model_name (the system auto-routes them). ByteTrack/BoT-SORT are TRACKERS not models — ignore them for model_name. default: yolo26x.pt
 - export_format: "cls" if task_type=classification; "dota" if task_type=obb_detection;
   "mot" if task_type=tracking; otherwise "coco" (pose keypoints 内嵌 COCO JSON，无需单独格式)
 - sahi: true if user mentions SAHI/切片/切块/slicing/sahi/大图. default false.
@@ -214,7 +214,14 @@ class TaskPlanner:
             {"role": "user", "content": _gpu_context_line() + "\n\n" + instruction},
         ]
 
-        response = self.llm.chat(messages, tools=None, temperature=0.0)
+        response = self.llm.chat(
+            messages,
+            tools=None,
+            temperature=0.0,
+            max_tokens=1024,
+            json_mode=True,
+            call_site="planner.parse",
+        )
 
         if not response.content:
             raise ValueError("LLM 返回空响应，无法解析任务")
@@ -256,6 +263,7 @@ class TaskPlanner:
             ask_fn=ask_fn,
             instruction=instruction,
             max_rounds=max_rounds,
+            call_site="planner.dialog",
         )
         for fix in sanitize_task_plan(plan):  # LLM 输出守卫（对话路径同源）
             logger.info("参数守卫修正: %s", fix)
@@ -277,7 +285,14 @@ class TaskPlanner:
             {"role": "user", "content": instruction},
         ]
 
-        response = self.llm.chat(messages, tools=None, temperature=0.0)
+        response = self.llm.chat(
+            messages,
+            tools=None,
+            temperature=0.0,
+            max_tokens=1024,
+            json_mode=True,
+            call_site="planner.benchmark",
+        )
 
         if not response.content:
             raise ValueError("LLM 返回空响应，无法解析 benchmark 参数")

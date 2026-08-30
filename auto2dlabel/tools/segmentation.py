@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
-from ultralytics import SAM
-
 from auto2dlabel.models.segmentation import SegmentationModel
-from auto2dlabel.schema.annotation import Bbox, Mask
+from auto2dlabel.schema.annotation import Bbox
 from auto2dlabel.tools.base import Tool
 
 

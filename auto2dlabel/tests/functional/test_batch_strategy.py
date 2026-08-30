@@ -94,7 +94,7 @@ class _ScriptedLLM:
         self.calls: list[list[dict[str, Any]]] = []
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
-             temperature: float = 0.1) -> LLMResponse:
+             temperature: float = 0.1, **kwargs: Any) -> LLMResponse:
         self.calls.append(messages)
         return LLMResponse(content=self.content)
 

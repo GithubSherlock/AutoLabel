@@ -57,6 +57,7 @@ class _FakeLLM:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.1,
+    **kwargs: Any,
     ) -> LLMResponse:
         return LLMResponse(content=self.content, tool_calls=None)
 

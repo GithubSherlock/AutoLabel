@@ -30,6 +30,7 @@ class _ScriptedLLM(FakeLLM):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.1,
+    **kwargs: Any,
     ) -> LLMResponse:
         self.messages_seen.append(messages)
         return super().chat(messages, tools=tools, temperature=temperature)

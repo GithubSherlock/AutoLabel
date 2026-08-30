@@ -17,6 +17,7 @@ import 本模块、走工厂、单测均全绿。
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -25,12 +26,12 @@ import numpy as np
 
 from auto3dlabel.configs.kitti import (
     DEFAULT_CONF,
-    DETECTOR3D_NAMES,
     KITTI_IMG_H,
     KITTI_IMG_W,
     MMDET3D_CONFIG_DIR,
     WEIGHTS_DIR,
 )
+from auto3dlabel.configs.model_catalog import DETECTOR3D_NAMES
 from auto3dlabel.schema.box3d import Box3D, KittiFrame
 
 # mmdet3d KITTI 3-class config 默认类序（config 多源提取失败时的 fallback）
@@ -93,6 +94,20 @@ class Detector3D(Protocol):
     ) -> list[list[Det3DResult]]:
         """多帧点云一次 forward → 每帧检测列表（批处理：显存随帧数线性增长）。"""
         ...
+
+
+def _patch_pretrained_init(cfg: Any) -> None:
+    """删 backbone init_cfg Pretrained（阻断 open-mmlab:// 额外权重下载，v0.3 P6b）。
+
+    全量 checkpoint 已含 backbone 权重，init_cfg Pretrained 只会触发冗余下载
+    （网络受限环境 open-mmlab:// 可能不可达）——删段跳过预训练初始化。
+    FreeAnchor regnet-400mf 实测需要（BEVFusion img_backbone 同款 patch 先例）。
+    """
+    model = cfg.get("model", {})
+    for key in ("pts_backbone", "img_backbone", "backbone"):
+        init_cfg = (model.get(key) or {}).get("init_cfg")
+        if isinstance(init_cfg, dict) and init_cfg.get("type") == "Pretrained":
+            del model[key]["init_cfg"]
 
 
 def _init_model_trusted(config: Any, checkpoint_path: str, device: str) -> Any:
@@ -164,8 +179,13 @@ class Mmdet3dDetector:
         # 无法跨 shape 强绑 kernel）——远低于人工标注方差（±10cm），接受并记录。
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
-        model = _init_model_trusted(self._config_path, self._checkpoint_path, device)
-        self._class_names = _extract_class_names(Config.fromfile(self._config_path), model)
+        # 深拷贝 Config 一次：阻断 backbone init_cfg Pretrained 下载（P6b
+        # FreeAnchor regnet），再把对象传给 _init_model_trusted（官方签名
+        # 接受 str|Path|Config，BEVFusion 同款路径）与 _extract_class_names
+        cfg = copy.deepcopy(Config.fromfile(self._config_path))
+        _patch_pretrained_init(cfg)
+        model = _init_model_trusted(cfg, self._checkpoint_path, device)
+        self._class_names = _extract_class_names(cfg, model)
         self._model = model
         return self._model
 

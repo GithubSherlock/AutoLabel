@@ -23,9 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from auto2dlabel.export.coco import build_coco_dict
-from auto2dlabel.models.detection import create_detection_model
-from auto2dlabel.models.model_catalog import (
+from auto2dlabel.configs.model_catalog import (
     ALL_DETECTION_MODELS,
     CLASSIFICATION_MODELS,
     COCO_CLASSES,
@@ -37,6 +35,8 @@ from auto2dlabel.models.model_catalog import (
     ULTRALYTICS_MODELS,
     WEIGHTS_DIR,
 )
+from auto2dlabel.export.coco import build_coco_dict
+from auto2dlabel.models.detection import create_detection_model
 from auto2dlabel.schema.annotation import Annotation, Bbox, Mask
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL
 
@@ -167,7 +167,7 @@ async def list_segmentation_models():
 @app.get("/api/obb-models")
 async def list_obb_models() -> JSONResponse:
     """列出所有 YOLO-OBB 旋转框模型。"""
-    from auto2dlabel.models.model_catalog import ULTRALYTICS_OBB_MODELS
+    from auto2dlabel.configs.model_catalog import ULTRALYTICS_OBB_MODELS
 
     return JSONResponse({
         "models": [{"name": m, "type": "yolo_obb"} for m in ULTRALYTICS_OBB_MODELS],
@@ -178,7 +178,7 @@ async def list_obb_models() -> JSONResponse:
 @app.get("/api/pose-models")
 async def list_pose_models() -> JSONResponse:
     """列出所有 YOLO-pose 姿态估计模型。"""
-    from auto2dlabel.models.model_catalog import POSE_MODELS
+    from auto2dlabel.configs.model_catalog import POSE_MODELS
 
     return JSONResponse({
         "models": [{"name": m, "type": "yolo_pose"} for m in POSE_MODELS],

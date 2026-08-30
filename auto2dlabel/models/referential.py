@@ -22,7 +22,7 @@ import math
 import os
 from typing import Any, Protocol
 
-from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
 from auto2dlabel.schema.annotation import Bbox
 
 # Florence-2 指代任务词条（开放词汇检测：接受英文指代短语输入）

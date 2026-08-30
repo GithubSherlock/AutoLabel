@@ -129,6 +129,9 @@ def llm_tune_strategy(
             },
         ],
         temperature=0.0,
+        max_tokens=512,
+        json_mode=True,
+        call_site="batch.strategy",
     )
     content = (response.content or "").strip()
     # 剥离可能的 markdown 代码块（仿 cli_track._llm_plan_once）

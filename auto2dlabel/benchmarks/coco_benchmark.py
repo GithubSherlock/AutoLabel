@@ -18,7 +18,6 @@ from auto2dlabel.benchmarks import datetime, json, np, time  # noqa: E402
 from auto2dlabel.benchmarks.common import (
     IOU_MATCH_THRESHOLD,
     OUTPUT_DIR,
-    compute_iou,
     detect_batch_or_fallback,
     evaluate_per_class,
     format_result_table,
@@ -237,7 +236,7 @@ def main():
 
     json_path, md_path = save_results(result_data, "coco2017", CONFIG["model_name"], timestamp)
     md_path.write_text("\n".join([
-        f"# COCO val 2017 Benchmark",
+        "# COCO val 2017 Benchmark",
         f"- **模型**: {CONFIG['model_name']} | **conf**: {CONFIG['confidence_threshold']} | **mAP@0.5**: {mAP:.4f}",
         f"```\n{summary}\n```",
     ]))

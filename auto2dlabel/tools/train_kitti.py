@@ -178,7 +178,7 @@ def train(
 
     from ultralytics import YOLO, settings  # type: ignore
 
-    from auto2dlabel.models.model_catalog import WEIGHTS_DIR
+    from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
 
     settings.update({  # type: ignore[no-untyped-call]
         "weights_dir": str(WEIGHTS_DIR),

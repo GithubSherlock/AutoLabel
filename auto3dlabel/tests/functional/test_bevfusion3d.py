@@ -14,7 +14,8 @@ import pytest
 import torch
 
 from auto3dlabel.configs.kitti import MMDET3D_CONFIG_DIR, WEIGHTS_DIR
-from auto3dlabel.configs.nuscenes import BEVFUSION_NAMES, NUSCENES_CAMERAS
+from auto3dlabel.configs.model_catalog import BEVFUSION_NAMES
+from auto3dlabel.configs.nuscenes import NUSCENES_CAMERAS
 from auto3dlabel.models.bevfusion3d import (
     BevFusionDetector,
     _normalize_bevfusion_boxes,
