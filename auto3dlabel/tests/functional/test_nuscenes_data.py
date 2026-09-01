@@ -9,13 +9,19 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from auto3dlabel.configs.nuscenes import NUSCENES_CAMERAS
 from auto3dlabel.data.nuscenes import (
     QX_HALF_PI,
+    box3d_dict_to_nusbox,
     boxes_cam_to_global,
+    cameras_of_sample,
     dataroot_exists,
+    ego_translation_of_sample,
     gt_boxes_of_sample,
     lidar_sample_data,
+    load_lidar_points,
     load_nuscenes,
+    nusbox_to_box3d_dict,
     quat_mul,
     rot_matrix,
     samples_of_scene,
@@ -248,3 +254,145 @@ def test_boxes_cam_to_global_label_drop_and_no_velocity() -> None:
         IDENTITY_POSE, IDENTITY_POSE,
     )
     assert len(out2) == 1  # idx=42 越界丢弃（10 类表）
+
+
+# ── P2：点云加载 / ego 位姿 / 6 相机 / NusBox↔渲染 dict 往返 ────
+
+class _FakeP2Nusc:
+    """假 devkit 表（P2 函数用）：sample_data（LIDAR_TOP + 6 相机）+ ego_pose。"""
+
+    def __init__(self) -> None:
+        self._sd = {
+            "sd-lidar": {
+                "filename": "samples/LIDAR_TOP/n008-0.bin",
+                "calibrated_sensor_token": "cs1",
+                "ego_pose_token": "ep1",
+            },
+        }
+        for i, name in enumerate(NUSCENES_CAMERAS):
+            self._sd[f"sd-{name}"] = {
+                "token": f"t{i}",
+                "filename": f"samples/{name}/cam{i}.jpg",
+            }
+        self._ego = {
+            "ep1": {"translation": [10.0, 20.0, 0.5], "rotation": [1.0, 0.0, 0.0, 0.0]}
+        }
+
+    def get(self, table: str, token: str) -> dict:
+        if table == "sample_data":
+            return self._sd[token]
+        assert table == "ego_pose"
+        return self._ego[token]
+
+
+def test_load_lidar_points_reads_file_and_drops_nan(tmp_path: Path) -> None:
+    """(N,5) 直读 + NaN 行剔除（文件名经 sample_data 表映射）。"""
+    pts = np.array(
+        [[1.0, 2.0, 3.0, 0.5, 1.0], [np.nan, 0.0, 0.0, 0.0, 0.0],
+         [4.0, 5.0, 6.0, 0.8, 0.0]],
+        dtype=np.float32,
+    )
+    (tmp_path / "samples" / "LIDAR_TOP").mkdir(parents=True)
+    pts.tofile(tmp_path / "samples" / "LIDAR_TOP" / "n008-0.bin")
+    nusc = _FakeP2Nusc()
+    sample = {"data": {"LIDAR_TOP": "sd-lidar"}}
+    out = load_lidar_points(sample, nusc, tmp_path)
+    assert out.shape == (2, 5) and out.dtype == np.float32
+    np.testing.assert_allclose(out, pts[[0, 2]], atol=1e-6)
+
+
+def test_ego_translation_of_sample() -> None:
+    """LIDAR_TOP 记录的 ego_pose → 全局位置 (x,y,z)。"""
+    nusc = _FakeP2Nusc()
+    sample = {"data": {"LIDAR_TOP": "sd-lidar"}}
+    assert ego_translation_of_sample(sample, nusc) == (10.0, 20.0, 0.5)
+
+
+def test_cameras_of_sample_six_views() -> None:
+    """6 相机标准序（NUSCENES_CAMERAS）+ filename/token 透出。"""
+    nusc = _FakeP2Nusc()
+    sample = {
+        "data": {name: f"sd-{name}" for name in NUSCENES_CAMERAS}
+        | {"LIDAR_TOP": "sd-lidar"}
+    }
+    cams = cameras_of_sample(sample, nusc)
+    assert [c["name"] for c in cams] == list(NUSCENES_CAMERAS)
+    assert all(c["filename"].startswith(f"samples/{c['name']}/") for c in cams)
+    assert cams[0]["token"] == "t0"
+
+
+def test_nusbox_to_box3d_dict_identity_anchor() -> None:
+    """恒等姿态锚点：translation (1,2,0.5) size (2,4,1.5) → (−ty,−tz,tx)/(h,w,l)/ry=−π/2。"""
+    box = NusBox(
+        label="car", confidence=0.8, translation=(1.0, 2.0, 0.5),
+        size=(2.0, 4.0, 1.5), quaternion=(1.0, 0.0, 0.0, 0.0),
+        velocity=(3.0, -1.0), track_id="inst-9",
+    )
+    d = nusbox_to_box3d_dict(box, fit_points=12)
+    assert d["label"] == "car" and d["confidence"] == 0.8
+    assert (d["cx"], d["cy"], d["cz"]) == (-2.0, -0.5, 1.0)
+    assert (d["h"], d["w"], d["l"]) == (1.5, 2.0, 4.0)
+    assert abs(d["rotation_y"] + np.pi / 2) < 1e-9
+    assert d["fit_points"] == 12
+    assert d["velocity"] == [3.0, -1.0] and d["track_id"] == "inst-9"
+
+
+def test_nusbox_to_box3d_dict_yaw_anchor() -> None:
+    """yaw_g=0.3 → rotation_y = −0.3 − π/2（yaw_bev=−yaw_g 代入唯一转换点）。"""
+    box = NusBox(
+        label="car", translation=(0.0, 0.0, 0.0), size=(2.0, 4.0, 1.5),
+        quaternion=yaw_to_quat(0.3),
+    )
+    d = nusbox_to_box3d_dict(box)
+    assert abs(d["rotation_y"] - (-0.3 - np.pi / 2)) < 1e-9
+
+
+def test_nusbox_dict_roundtrip() -> None:
+    """渲染 dict → NusBox 逆变换全字段往返（yaw 经 quat_to_yaw 比较）。"""
+    box = NusBox(
+        label="truck", confidence=0.6, translation=(7.5, -2.0, 1.2),
+        size=(2.5, 8.0, 3.0), quaternion=yaw_to_quat(1.1),
+        velocity=(0.0, 4.0), track_id="t-1",
+    )
+    back = box3d_dict_to_nusbox(nusbox_to_box3d_dict(box))
+    assert back.label == box.label
+    assert back.confidence == pytest.approx(box.confidence)
+    assert back.translation == pytest.approx(box.translation)
+    assert back.size == pytest.approx(box.size)
+    assert abs(quat_to_yaw(back.quaternion) - quat_to_yaw(box.quaternion)) < 1e-9
+    assert back.velocity == pytest.approx(box.velocity)
+    assert back.track_id == "t-1"
+
+
+def test_nusbox_dict_roundtrip_optional_keys_and_edit() -> None:
+    """velocity/track_id 缺省 → 往返 None；前端编辑 rotation_y 后正确回写全局 yaw。"""
+    d = nusbox_to_box3d_dict(
+        NusBox(
+            label="pedestrian", translation=(1.0, 0.0, 0.0), size=(0.6, 0.7, 1.8),
+            quaternion=(1.0, 0.0, 0.0, 0.0),
+        )
+    )
+    assert "velocity" not in d and "track_id" not in d
+    d["rotation_y"] = 0.0  # 模拟前端编辑：ry=0 → 车头 cam +x = 全局 −y（yaw_g=−π/2）
+    back = box3d_dict_to_nusbox(d)
+    assert abs(quat_to_yaw(back.quaternion) + np.pi / 2) < 1e-9
+    assert back.velocity is None and back.track_id is None
+
+
+def test_nusbox_dict_roundtrip_with_ego_offset() -> None:
+    """ego 偏移：center = M@(t−t_ego) → 逆变换 t = Mᵀ@c + t_ego 全字段往返。"""
+    ego = (3.0, 1.0, 0.5)
+    box = NusBox(
+        label="bus", confidence=0.9, translation=(7.5, -2.0, 1.2),
+        size=(2.5, 10.0, 3.0), quaternion=yaw_to_quat(-0.8),
+        velocity=(5.0, 0.0), track_id="b-1",
+    )
+    d = nusbox_to_box3d_dict(box, ego_translation=ego)
+    # 锚点：t−ego = (4.5,−3,0.7) → M@ = (3,−0.7,4.5)
+    assert (d["cx"], d["cy"], d["cz"]) == (3.0, -0.7, 4.5)
+    back = box3d_dict_to_nusbox(d, ego_translation=ego)
+    assert back.translation == pytest.approx(box.translation)
+    assert back.size == pytest.approx(box.size)
+    assert abs(quat_to_yaw(back.quaternion) - quat_to_yaw(box.quaternion)) < 1e-9
+    assert back.velocity == pytest.approx(box.velocity)
+    assert back.track_id == "b-1"

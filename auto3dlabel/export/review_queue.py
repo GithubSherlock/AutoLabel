@@ -29,12 +29,19 @@ class Triage3D:
 
 
 def triage_3d(
-    boxes: list[Box3D], tau_high: float = 0.7, tau_low: float = 0.3
+    boxes: list[Box3D],
+    tau_high: float = 0.7,
+    tau_low: float = 0.3,
+    min_fit_points: int = MIN_FIT_POINTS,
 ) -> Triage3D:
-    """conf 三档 + 拟合质量强制 review（fit_points 低 / review_flag 置位）。"""
+    """conf 三档 + 拟合质量强制 review（fit_points 低 / review_flag 置位）。
+
+    min_fit_points 可注入：KITTI 20（默认）；nuScenes 32 线密度低 → 10
+    （configs/nuscenes.NUSCENES_MIN_FIT_POINTS，triage_nus 传入）。
+    """
     result = Triage3D()
     for b in boxes:
-        force_review = b.review_flag or b.fit_points < MIN_FIT_POINTS
+        force_review = b.review_flag or b.fit_points < min_fit_points
         if not force_review and b.confidence >= tau_high:
             result.accepted.append(b)
         elif not force_review and b.confidence >= tau_low:

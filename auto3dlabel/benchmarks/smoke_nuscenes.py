@@ -1,11 +1,15 @@
 """nuScenes Mini 冒烟（M7 执行器，真实权重）：pointpillars_nus → 简化评测出表 + 提交 JSON 自检。
 
 用法：
-    python3 -m auto3dlabel.benchmarks.smoke_nuscenes [model] [conf]
+    python3 -m auto3dlabel.benchmarks.smoke_nuscenes [model] [conf] [labels]
 
 管线：Mini val 2 场景 → 每 sample LIDAR_TOP 主点云 → detect_points（传感器系）→
 calib + ego_pose 两级补偿转全局（NusBox）→ run_nuscenes_benchmark 简化评测出表 →
 build_submission_json + validate + write 自检。
+
+回灌模式（P2 E2E 验收）：第三个位置参数给 labels 文件或目录（Web 复核导出的
+{sample_token}.json，load_dataset_labels 读回）→ **当 pred** 与官方 GT 出表——复核
+标签可解析 + 标注质量一站验收；此模式不加载检测器（零显存）。
 
 口径（如实记录，见 nuscenes_benchmark 模块 docstring）：Mini 2 场景 vs 官方 val 150 场景；
 预测只用主 LIDAR_TOP（不合并 sweeps）——官方评测用全量扫，recall 会偏低，数字仅对照参考。
@@ -18,7 +22,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from rich.console import Console
 from rich.table import Table
 
@@ -29,6 +32,7 @@ from auto3dlabel.data.nuscenes import (
     boxes_sensor_to_global,
     gt_boxes_of_sample,
     lidar_sample_data,
+    load_lidar_points,
     load_nuscenes,
     samples_of_scene,
     val_scene_names,
@@ -38,19 +42,9 @@ from auto3dlabel.export.nuscenes_json import (
     validate_submission,
     write_submission,
 )
+from auto3dlabel.export.nuscenes_labels import load_dataset_labels
 from auto3dlabel.models.detection3d import create_detector3d
 from auto3dlabel.schema.nuscenes_box import NusBox
-
-
-def _load_lidar(sample: dict, nusc: Any, dataroot: Path) -> np.ndarray:
-    """sample → LIDAR_TOP 主点云 (N,4)（简化口径：不合并 sweeps）。
-
-    文件名为 scene__sensor__timestamp 格式（v1.0 samples 命名）——经 devkit
-    sample_data 表映射（lidar_sample_data()['filename']）。
-    """
-    filename = lidar_sample_data(sample, nusc)["filename"]
-    raw = np.fromfile(dataroot / filename, dtype=np.float32)
-    return raw.reshape(-1, 5)  # (x,y,z,intensity,elongation)——nus pipeline 要 5 通道
 
 
 def _predict_sample(
@@ -65,7 +59,7 @@ def _predict_sample(
 
     补偿链为公共纯函数 boxes_sensor_to_global（data/nuscenes.py，smoke_bevfusion 复用）。
     """
-    pts = _load_lidar(sample, nusc, dataroot)
+    pts = load_lidar_points(sample, nusc, dataroot)
     boxes, scores, labels = det.detect_points(pts, conf)
     if len(boxes) == 0:
         return []
@@ -104,18 +98,28 @@ def main(argv: list[str] | None = None) -> None:
     argv = argv or sys.argv[1:]
     model = argv[0] if len(argv) > 0 else "pointpillars_nus"
     conf = float(argv[1]) if len(argv) > 1 else DEFAULT_CONF
+    labels_arg = argv[2] if len(argv) > 2 else ""  # 回灌模式：Web 复核 labels 当 pred
 
-    det = create_detector3d(model)
-    if det is None:
-        raise SystemExit(f"未知名 3D 模型：{model}")
+    console = Console()
     nusc = load_nuscenes()
     dataroot = Path(nusc.dataroot)
-    class_names = list(det.class_names)  # 触发懒加载——nus config 真实类序（10 类）
-    console = Console()
-    console.print(f"[bold]冒烟[/bold] model={model} conf={conf} dataroot={dataroot}")
+    pred_map: dict[str, list[NusBox]] = {}
+    if labels_arg:
+        # 回灌模式（P2 E2E 验收）：复核导出的 {token}.json 当 pred 与官方 GT 出表
+        det = None
+        class_names: list[str] = []
+        pred_map = load_dataset_labels(labels_arg)
+        console.print(f"[bold]回灌[/bold] labels={labels_arg}（{len(pred_map)} samples 当 pred）")
+        if not pred_map:
+            raise SystemExit(f"labels 目录无有效样本: {labels_arg}")
+    else:
+        det = create_detector3d(model)
+        if det is None:
+            raise SystemExit(f"未知名 3D 模型：{model}")
+        class_names = list(det.class_names)  # 触发懒加载——nus config 真实类序（10 类）
+        console.print(f"[bold]冒烟[/bold] model={model} conf={conf} dataroot={dataroot}")
 
     gt_map: dict[str, list[NusBox]] = {}
-    pred_map: dict[str, list[NusBox]] = {}
     egos: dict[str, tuple[float, float]] = {}  # 距离分桶相对自车（官方 distance 口径）
     t0 = time.perf_counter()
     n_scenes = 0
@@ -126,9 +130,10 @@ def main(argv: list[str] | None = None) -> None:
         for sample in samples:
             n_samples += 1
             gt_map[sample["token"]] = gt_boxes_of_sample(nusc, sample["token"])
-            pred_map[sample["token"]] = _predict_sample(
-                det, sample, nusc, dataroot, conf, class_names
-            )
+            if det is not None:
+                pred_map[sample["token"]] = _predict_sample(
+                    det, sample, nusc, dataroot, conf, class_names
+                )
             lidar_data = lidar_sample_data(sample, nusc)
             ego = nusc.get("ego_pose", lidar_data["ego_pose_token"])
             egos[sample["token"]] = (float(ego["translation"][0]), float(ego["translation"][1]))

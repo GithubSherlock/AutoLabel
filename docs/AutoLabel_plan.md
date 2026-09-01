@@ -17,7 +17,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 ```
 
 - **Auto2dLabel**：2D 六类任务逐版本推进（检测 → 分割 → 分类 → OBB → 3D 基石[Tracking/域内权重] → Pose），v0.1–v0.5 ✅，**v0.6 📋 对话式 Agent 统一入口**（2026-08-28 立项）；**为 Auto3dLabel 做基石**，优先交付支撑 3D 的内容（v0.4）
-- **Auto3dLabel**：3D 标注（调研完成，MVP 走「2D 基础模型 → 3D 提升」路线，**2026-08-19 战略调整：主推进**，**v0.1 ✅（2026-08-24）+ v0.2 ✅（2026-08-27）**，v0.3 📋 2026-08-28 立项，见 `auto3dlabel/milestone/`）
+- **Auto3dLabel**：3D 标注（调研完成，MVP 走「2D 基础模型 → 3D 提升」路线，**2026-08-19 战略调整：主推进**，**v0.1 ✅（2026-08-24）+ v0.2 ✅（2026-08-27）+ v0.3 ✅（2026-08-31）+ v0.4 ✅（2026-09-02）**——P1 cuboid 手柄编辑 + P2 nuScenes 端到端标注闭环 + P3 KITTI 微调闭环，见 `auto3dlabel/milestone/`）
 - **人工介入点**：低置信度自动入 review/hard 队列 + Web 审核界面 + 主动学习采样，Agent 不确定时主动求助
 
 ## Target User（目标用户）
@@ -60,7 +60,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 | **v0.4** | + 3D 基石（Tracking 视频时序 ID + KITTI 域 2D 质量 + Agentic 骨架收尾） | ✅ 完成 2026-08-23（见 `auto2dlabel/milestone/v0.4.md` 与 `auto2dlabel/tests/test-v0.4.md`） |
 | **v0.5** | + Pose Estimation + VLM 指代检测（Florence-2/Qwen2-VL）+ 自动车道 ROI 等非 3D 内容（3D 使命完成后殿后；定义见 `auto2dlabel/milestone/v0.5.md`） | ✅ 完成 2026-08-23 |
 | **v0.6** | + **对话式 Agent 统一入口**（chat 唯一入口 + LLM 多轮对话确定参数）+ mmdet/mmpose 双引擎 + LLM Harness Token 降本（定义见 `auto2dlabel/milestone/v0.6.md`） | ✅ 完成 2026-08-31（实测 `auto2dlabel/tests/test-v0.6.md`） |
-| **v1.0** | + **Agentic 交互化**（产品形态跃迁：`autolabel` 命令 → Textual 对话式终端界面 + 多模型 API 可配置 + 后台任务面板 + 会话管理；企划见 `docs/Agentic_UI_plan.md`，未立项） | ⏳ 企划（2026-09-01） |
+| **v1.0** | + **Agentic 交互化**（产品形态跃迁：`autolabel` 命令 → Textual 对话式终端界面 + 多模型 API 可配置 + 后台任务面板 + 会话管理；企划见 `docs/Agentic_UI_plan.md`，执行指南见下方 §Agentic 交互化） | ⏳ 企划完成、可开工（2026-09-02 3D v0.4 收尾，资源冲突解除） |
 
 > 编号注记：早期路线表曾把「分类+OBB」标为 v0.2，实现时后移为 v0.3（v0.2 编号已被分割里程碑文件占用，不重命名现有文件）。
 > 战略注记（2026-08-19）：Auto2dLabel 为 Auto3dLabel 做基石——优先交付能支撑 3D 的内容（原 v1.0 Tracking 提前至 v0.4），原 v0.4 Pose 平移至 v0.5；与 Auto3dLabel v0.1 双线并行。
@@ -84,7 +84,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 | **Auto2dLabel** | v0.1–v0.3 ✅：检测 + 分割 + 分类（CLIP/SigLIP + torchvision 14 款）+ OBB（YOLO-OBB）+ Web 闭环 + Agentic 闭环，**84 个模型**（含 cityscapes 域内 Mask R-CNN，全量 500 图 mAP 0.5149），**12 数据集 Benchmark**（含 DOTA OBB 旋转框；CPU 可行性 + GPU 复测均完成，见 `auto2dlabel/tests/test-v0.3.md`）；**v0.4 ✅ 2026-08-23**（Tracking Phase 1 ByteTrack + Phase 2 BoT-SORT/约束过滤/KITTI difficulty + **KITTI 域内微调 0.8867** + Phase 3 AgentState 续跑/模型级重试/Web 三件套，见 `tests/test-v0.4.md`）；**v0.5 ✅ 2026-08-23**（Pose YOLO-pose / 指代 L2 Florence-2 + **L3 Qwen2-VL-7B 4bit**（GPU 冒烟 33.2s，L2 失败自动升级阶梯）/ 自动车道 ROI UFLD / ILSVRC2012 val 分类扩展（全量 5 万图 top-1 0.6968 与官方一致）/ **Web 复核增强**（CVAT 借鉴：快捷键/undo/手柄/列表/过滤/右键/区域 issue + edited_by_human 数据回路 + 已复核重开，jsdom 冒烟 76/76），见 `tests/test-v0.5.md`；质量门 595/0/167/127）；**v0.6 ✅ 2026-08-31**（对话式 Planner 多轮收集 + mmdet 双引擎 **RTMDet/Mask2Former**（rtmdet_l 0.6179 ≈ fasterrcnn 0.6287 同档；mask2former mask mAP 0.6008 超两段式 SAM2 0.5778）+ mmpose **RTMPose 精度档**（0.5455 vs yolo11n-pose 0.4545）+ **LLM Harness**（usage 台账/前缀缓存命中率 97.7%/json mode/Evaluate 代码级降级）；实测修复 torch 2.6+ weights_only 拒载 + COCO 91→80 类别错位两 bug（均带回归），见 `auto2dlabel/tests/test-v0.6.md`） |
 | **质量门** | pyright 0 / mypy 169（auto2dlabel 基线不恶化）/ ruff 119（基线 127 不恶化）/ pytest 双环境 1046+1049 passed（每版本硬性门槛，命令与标准见 `Benchmark_plan.md` §10.6；auto3dlabel 侧归零：ruff 0 / mypy 0 / pyright 0） |
 | **代码托管** | GitHub `GithubSherlock/AutoLabel`（private），权重与 `.env` 不入库 |
-| **Auto3dLabel** | 调研 ✅，路线定案（2D → 3D 提升）；**2026-08-19 战略调整：主推进**；**v0.1 ✅ 2026-08-24**（单帧 KITTI 五步管线 + Agentic 闭环 + Web 复核 + 128 用例，质量门全绿；3D 层 AP 近零为反投影路线精度天花板实证，演进方向 CenterPoint/PointPillars）；**v0.2 ✅ 2026-08-27**（mmdet3d 硬装 PointPillars——KITTI 全 val 官方口径 Car 89.8/82.0/77.2 超 zoo + Tracker3D 多帧 + nuScenes Mini，实测 `auto3dlabel/tests/test-v0.2.md`）；**v0.3 ✅ 2026-08-31**（P1 对话式 Planner → P2 PV-RCNN/CenterPoint 精度档（pvrcnn_kitti 官方口径 / centerpoint_nus 23.4）→ P3 BEVFusion 融合（mAP 27.0）+ pgd KITTI 单目（33.7）→ P4 Web 真 3D 四视图复核（与 2D :8765 同端口共存）→ P5 LabelAny3D 8 步管线全链路验证（判据不达标 → 决策不接入，误差归因落盘）→ P6 模型矩阵扩展（FCOS3D 单目基准 mAP 0.8/car 8.0 + FreeAnchor 速度档 25.8 全 Mini 最快）+ 共享 Token 工程零实现受益，实测 `auto3dlabel/tests/test-v0.3.md`） |
+| **Auto3dLabel** | 调研 ✅，路线定案（2D → 3D 提升）；**2026-08-19 战略调整：主推进**；**v0.1 ✅ 2026-08-24**（单帧 KITTI 五步管线 + Agentic 闭环 + Web 复核 + 128 用例，质量门全绿；3D 层 AP 近零为反投影路线精度天花板实证，演进方向 CenterPoint/PointPillars）；**v0.2 ✅ 2026-08-27**（mmdet3d 硬装 PointPillars——KITTI 全 val 官方口径 Car 89.8/82.0/77.2 超 zoo + Tracker3D 多帧 + nuScenes Mini，实测 `auto3dlabel/tests/test-v0.2.md`）；**v0.3 ✅ 2026-08-31**（P1 对话式 Planner → P2 PV-RCNN/CenterPoint 精度档（pvrcnn_kitti 官方口径 / centerpoint_nus 23.4）→ P3 BEVFusion 融合（mAP 27.0）+ pgd KITTI 单目（33.7）→ P4 Web 真 3D 四视图复核（与 2D :8765 同端口共存）→ P5 LabelAny3D 8 步管线全链路验证（判据不达标 → 决策不接入，误差归因落盘）→ P6 模型矩阵扩展（FCOS3D 单目基准 mAP 0.8/car 8.0 + FreeAnchor 速度档 25.8 全 Mini 最快）+ 共享 Token 工程零实现受益，实测 `auto3dlabel/tests/test-v0.3.md`）；**v0.4 ✅ 2026-09-02**（P1 cuboid 手柄编辑（六面拖拽 + undo/redo，smoke 94 断言）→ P2 nuScenes 端到端标注闭环（bevfusion 队列 81 样本 → Web 复核点云 + 6 相机 → devkit 标签导出 → 回灌评测 mAP 24.6）→ P3 KITTI 微调闭环（pointpillars 300/40 帧冒烟训练 exit 0，40-point 主口径微调全面优于或持平官方，Car hard 76.4→80.5，实测 `auto3dlabel/tests/test-v0.4.md`） |
 
 ## 已知缺口 / 待办
 
@@ -102,7 +102,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 
 ## 下一步
 
-（2026-08-19 战略调整：Auto2dLabel 为 Auto3dLabel 做基石——两模块**双线并行**：3D 主推进 v0.1 单帧 MVP，2D 侧优先交付支撑 3D 的内容（原 v1.0 Tracking 提前至 v0.4）；3D 使命完成后才做 Pose 等非 3D 内容（v0.5）。2026-08-17 首调：Auto3dLabel v0.1 提前——2D 基础能力已就绪、单帧 3D 不依赖 Pose/Tracking。2026-08-28 二调：**对话式 Agent 架构迭代优先**——v0.6（2D）+ auto3dlabel v0.3 P1（3D）双线并行，其余 3D 目标顺延。**2026-08-31 双双收尾**：auto2dlabel v0.6 ✅（对话式 Planner + mmdet/mmpose 引擎 + LLM Harness）与 auto3dlabel v0.3 ✅（P1–P6 全完成，含 LabelAny3D 验证决策与模型矩阵扩展）；下一轮议题：v0.6 远期项（chat --agentic / 多 agent 研究模式）、3D 融合系 BEVFusion 融合增强、无 LiDAR 域标注候选（v2+）、Phase 2 类别推荐对话接线（可选 Phase 条款 2 未接线，如实记录））
+（2026-08-19 战略调整：Auto2dLabel 为 Auto3dLabel 做基石——两模块**双线并行**：3D 主推进 v0.1 单帧 MVP，2D 侧优先交付支撑 3D 的内容（原 v1.0 Tracking 提前至 v0.4）；3D 使命完成后才做 Pose 等非 3D 内容（v0.5）。2026-08-17 首调：Auto3dLabel v0.1 提前——2D 基础能力已就绪、单帧 3D 不依赖 Pose/Tracking。2026-08-28 二调：**对话式 Agent 架构迭代优先**——v0.6（2D）+ auto3dlabel v0.3 P1（3D）双线并行，其余 3D 目标顺延。**2026-08-31 双双收尾**：auto2dlabel v0.6 ✅ 与 auto3dlabel v0.3 ✅（P1–P6 全完成）。**2026-09-02 auto3dlabel v0.4 ✅**：HITL 编辑闭环（P1 手柄编辑）+ nuScenes 端到端标注闭环（P2，回灌出表）+ KITTI 微调闭环（P3，40-point 主口径全面优于或持平官方）——「AI 初稿 → 人工修正 → 数据反哺模型」完整回路在 3D 侧闭环。**2026-09-02 三调：Agentic 交互化立项**——3D 侧闭环后主线回到产品形态跃迁，v1.0 P1（TUI + 流式）可开工（执行指南见上方 §Agentic 交互化执行指南）；3D 侧下一轮议题：自标注增量微调（P3b/P4，nuScenes 域）、无 LiDAR 域标注候选（v2+））
 
 | 优先级 | 事项 | 内容 |
 | --- | --- | --- |
@@ -110,14 +110,67 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 | 1' | **Auto2dLabel v0.4 3D 基石版**（双线并行）✅ 2026-08-23 | Tracking（ByteTrack，视频时序 ID——3D v0.2 多帧的跟踪 ID + 运动属性依赖）+ KITTI 域 2D 检测质量（benchmark 接入 + 域内微调权重）+ AgentState from_dict 收尾（里程碑见 `auto2dlabel/milestone/v0.4.md`） |
 | 2 | **Auto3dLabel v0.2** ✅ 2026-08-27 | mmdet3d PointPillars（KITTI 全 val moderate 82.0 超 zoo）+ Tracker3D（ID + 速度）+ nuScenes Mini（实测 `auto3dlabel/tests/test-v0.2.md`） |
 | 3 | **对话式 Agent 统一入口**（主推进，2026-08-28 立项） | **auto2dlabel v0.6**：`parse_dialog` 多轮对话确定参数（LLM 返回 JSON + questions[] → 渲染 → 用户回答 → 回喂 ≤3 轮）+ 通用骨架 `agent/dialog.py` + 降级链（非法/无 key → 单轮 parse + 代码兜底）+ `--no-wait` 兼容；**auto3dlabel v0.3 P1**：3D 侧复用骨架（Plan3D + questions）。多 agent 编排框架不引入（论证见 `auto2dlabel/milestone/v0.6.md`） |
-| 4 | **Auto3dLabel v0.3 P2-P5**（P1 落地后） | PV-RCNN KITTI + CenterPoint nuScenes 精度 + 难类收尾 → BEVFusion 融合（nuScenes + KITTI 降级方案）→ Web 真 3D 复核（three.js 四视图）→ LabelAny3D 无 LiDAR 域验证（里程碑见 `auto3dlabel/milestone/v0.3.md`） |
+| 4 | **Auto3dLabel v0.3 P2-P5**（P1 落地后）✅ 2026-08-31 | PV-RCNN KITTI + CenterPoint nuScenes 精度 + 难类收尾 → BEVFusion 融合（nuScenes + KITTI 降级方案）→ Web 真 3D 复核（three.js 四视图）→ LabelAny3D 无 LiDAR 域验证（里程碑见 `auto3dlabel/milestone/v0.3.md`） |
+| 4' | **Auto3dLabel v0.4**（HITL 编辑闭环 + 训练微调闭环）✅ 2026-09-02 | P1 cuboid 手柄编辑（AI 初稿 → 人工修正几何完整化）→ P2 nuScenes 端到端标注闭环（队列 → Web 复核 → devkit 导出 → 回灌评测）→ P3 KITTI 微调闭环（mmdet3d 训练管线 + 同口径评测对比官方权重，40-point 主口径全面优于或持平）（里程碑见 `auto3dlabel/milestone/v0.4.md`） |
 | 5 | 已知缺口消化 | mot 域微调权重（cityscapes ✅ 已闭环 0.5149，时机与域内数据同步）、分类数据集扩展（ImageNet100 ✅ + ILSVRC2012 val ✅，cifar/CUB200 待排期）、Web bbox 拖拽/标签编辑、分类与 OBB 的 Web 展示（已随 v0.4 Phase 3 消化） |
 | 6 | **GPU 必需项**（2026-08-23 GPU 3080 Ti 到位，三项全部 ✅） | ① 指代 L3 Qwen2-VL-7B ✅（NF4 4bit ~4.5G，红车锁定冒烟 33.2s）；② KITTI 域内微调闭环 ✅（best.pt val mAP50 0.9430，官方口径 overall 0.8867 vs 基线全量同口径 0.2702；cityscapes 0.0082→0.5149 先例第二例）；③ 全量 ImageNet1k 5 万图基准 ✅（top-1 0.6968 / top-5 0.8899，440.8s） |
+| 7 | **Agentic 交互化 v1.0 P1**（2026-09-02 可开工，企划 `docs/Agentic_UI_plan.md` 立项前提全满足） | TUI 外壳 + 流式对话（具体步骤见下方 §Agentic 交互化执行指南） |
 
 ## 差异化定位
 
 - **不是**：又一个标注画布工具（CVAT/Label Studio 已经做得很好）。
 - **是**：一个 **Agentic 预标 + 多模型引擎 + 结构化日志 + 多格式导出**的自动标注层。用户说「检测汽车和行人」，系统自主选择 prompt、调模型、评估、导出——全程无需手动框选。
+
+---
+
+## Agentic 交互化执行指南（v1.0，2026-09-02 可开工）
+
+> 详细企划与评审记录见 `docs/Agentic_UI_plan.md`；本节 = 下次会话直接执行的浓缩版（定案 + 分期 + 第一步 + 坑清单）。
+> **状态**：立项前提三项全满足（3D v0.4 已收尾不抢资源 / Textual 版本评估通过 / 统一入口评审通过）。开工须用户显式确认。
+
+### 一、定案（勿再讨论）
+
+1. **形态**：Textual TUI 全屏对话（对标 Claude Code；Claude Code 本身即 Textual 实现）
+2. **版本归属**：Auto2dLabel **v1.0 主线**
+3. **HITL**：TUI 指挥台 + Web 复核（复核本体复用现有 Web，不重造）
+4. **入口**：`autolabel` 统一命令（无参 → TUI；`autolabel "指令"` → 一次性对话）；旧 `auto2dlabel/auto3dlabel` 命令**原样保留**（防既有脚本 break，P1 不透传子命令）
+
+### 二、分期（P1 → P5）
+
+| 期 | 内容 | 验收 |
+| --- | --- | --- |
+| **P1** | TUI 骨架（对话区/输入区/Footer）+ 斜杠命令（/model /cost /new /resume /help /quit）+ **LLM 流式改造**（`LLMClient.chat()` 加 `stream: bool` + 增量回调；usage 台账统一出口不动；json_mode 流式展示 + 全量解析兜底） | `autolabel` 进对话、流式输出、/cost 出台账、无 key 全流程可跑（显示「无凭据 → 代码直跑」降级提示） |
+| **P2** | `configs/providers.yaml` provider 注册表 + `/model` 列出/切换（Ollama/vLLM/本地 Qwen 兼容端点）；`estimate_cost_rmb` 按 provider 区分 | 切换任意已配置 provider 生效；无 key provider 启动即降级提示 |
+| **P3** | **后台任务面板（差异化核心）**：Tool 调用进 Textual Worker（进度 `progress_cb` / Ctrl+C 取消 `cancel_event` / 断点续跑复用 batch `--resume` + `AgentState`）；工具契约扩展过 `tools/registry.py` 可选注入，同步路径兼容 | 批量标注显示进度、可取消、取消后 `--resume` 续跑 |
+| **P4** | 会话 JSONL（消息历史 + 任务记录），/new 新会话、/resume 恢复上下文 | 中断后 /resume 恢复对话与任务状态 |
+| **P5** | HITL 指挥台：三档分流统计表 + 一键启动 Web 复核（spawn server + 端口检测 + 打印 URL） | 标注完 → 看分流 → 回车开 Web → 复核回流（走既有 `*_reviewed.json` 链路） |
+
+远期（不承诺）：MCP 接入 / TUI 内嵌轻量三档确认 / 插件体系 / 跨机器 GPU 编排。
+
+### 三、P1 第一步动作（下次启动照做）
+
+```bash
+pip install "textual>=8.2.8,<9"          # 锁上界（8.x 重构中）；rich 15 已装零升级
+# 新顶层包 autolabel/（薄壳，不入 agent/models 逻辑）：
+#   cli.py    — typer app：无参 → TUI；指令参数 → 一次性对话
+#   route.py  — route_domain() 单一事实源（见下）
+#   tui/app.py— Textual App 骨架（对话区/输入区/Footer/Worker）
+# pyproject：name = "autolabel"（发行名）+ scripts.autolabel + include 加 autolabel*；pip install -e . 重装
+```
+
+**路由判据（route.py，含边界修正）**：`det_model` ∈ `DETECTOR3D_NAMES` → 强制 3D；指令含 3D 强特征词（点云/lidar/velodyne/`3d( bbox|框|检测)` + 6 位帧号）→ 3D；含 `kitti` 但无 3D 特征、`-d` 为 2D 模型 → **2D**（「KITTI」不能当 3D 强特征词——`kitti_finetune` 是 2D 模型）；其余 → 2D 默认。一次性对话直接 import 现有函数（2D `cli_commands.chat_command` / 3D `auto3dlabel.cli.chat` 命令体），**两端零重构**。
+
+### 四、红线（继承 + 新增）
+
+- **继承**：纯本地（Textual 零服务端）；无 key 零影响；权重与 .env 不入库；质量门 pyright/mypy/ruff/pytest 全绿；复用不复制（Agent 循环/Web 复核/成本台账全复用）
+- **新增**：① 流式不破坏台账统一出口（`chat()` 签名向后兼容）；② TUI 可测（Textual `run_test` + Pilot 冒烟，零真实权重 Fake 注入沿用，对标 jsdom 冒烟铁律）；③ 长任务取消必须清理（显存/子进程，宁失败不悬挂）；④ 双入口并存期
+
+### 五、已知坑（写码必读）
+
+1. **Textual 8.x API 重构**（勿凭 0.x/6.x 旧版记忆）：Footer 无 `.content`、App 无 `.bindings`（内化 `_bindings`）、Label 无 `.renderable`——渲染断言统一走 `export_screenshot()`；**SVG 里空格被编码为 `&#160;`**，字符串断言用无空格片段
+2. 每个组件属性访问先 `dir()` 实测，把验证写进测试（8.x 频繁内化）
+3. 本项目与 Claude Code 的本质差异：**工具是秒~分钟级推理任务**——TUI 必须带后台任务面板（对话区可继续输入），这是 P3 最大工程增量，P1 骨架即预留 Worker 挂点
+4. 无 key 降级链在 TUI 内保持（`has_credentials` 判定 + 代码级兜底，v0.6 红线不回归）
 
 ---
 

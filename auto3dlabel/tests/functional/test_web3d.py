@@ -17,7 +17,10 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from auto3dlabel.data.nuscenes import nusbox_to_box3d_dict
+from auto3dlabel.schema.nuscenes_box import NusBox
 from auto3dlabel.tests.helpers.synth import ANCHOR_CAM, VELO_ANCHOR, write_calib, write_frame
+from auto3dlabel.tools.geometry import yaw_to_quat
 
 BOX = {
     "label": "Car", "confidence": 0.62, "cx": 8.0, "cy": 1.4, "cz": 18.0,
@@ -227,3 +230,96 @@ def test_reopen_reviewed_and_resave(web: Any, client: Any, tmp_path: Any) -> Non
     _, review_dir = web
     saved = json.loads((review_dir / "000000_reviewed.json").read_text())
     assert saved["annotations"][0]["label"] == "Car"  # 原位更新（源为 _reviewed 不再 rename）
+
+
+def _nus_queue_file() -> dict:
+    """nuScenes 队列（渲染 dict 经真实 nusbox_to_box3d_dict 产出，含 velocity/track_id）。"""
+    ego = (4.5, -3.0, 0.7)
+    car = nusbox_to_box3d_dict(
+        NusBox(label="car", confidence=0.9, translation=(10.0, 2.0, 0.5),
+               size=(2.0, 4.0, 1.5), quaternion=yaw_to_quat(0.3),
+               velocity=(1.0, 0.5), track_id="inst-7"),
+        ego_translation=ego, fit_points=100,
+    )
+    truck = nusbox_to_box3d_dict(
+        NusBox(label="truck", confidence=0.4, translation=(40.0, 5.0, 0.0),
+               size=(2.5, 8.0, 3.0), quaternion=(1.0, 0.0, 0.0, 0.0)),
+        ego_translation=ego, fit_points=0,
+    )
+    return {
+        "dataset": "nuscenes", "version": "v1.0-mini", "dataroot": "/tmp/data",
+        "scene_name": "scene-A", "sample_token": "tok1", "image": "tok1",
+        "pcd_path": "/tmp/pcd.bin", "ego_translation": [4.5, -3.0, 0.7],
+        "cameras": [{"name": "CAM_FRONT", "filename": "samples/CAM_FRONT/n008.jpg"}],
+        "annotations": [car, truck],
+    }
+
+
+def test_save_nuscenes_branch_exports_label(web: Any, client: Any) -> None:
+    """nus 分支：reviewed 保渲染 dict（velocity/track_id 存活）+ labels/{token}.json NusBox。"""
+    _write_queue(web, "tok1_review.json", _nus_queue_file())
+    res = client.post(
+        "/api/review-save",
+        json={"queue_file": "tok1_review.json", "deleted_indices": [1]},
+    ).json()
+    assert res["ok"] and res["kept"] == 1 and res["deleted"] == 1, res
+
+    server, review_dir = web
+    saved = json.loads((review_dir / "tok1_reviewed.json").read_text())
+    assert saved["dataset"] == "nuscenes"
+    assert saved["sample_token"] == "tok1"
+    assert saved["ego_translation"] == [4.5, -3.0, 0.7]
+    assert [c["name"] for c in saved["cameras"]] == ["CAM_FRONT"]
+    assert len(saved["annotations"]) == 1
+    ann = saved["annotations"][0]
+    assert ann["label"] == "car" and ann["velocity"] == [1.0, 0.5]  # 透传键存活
+    assert ann["track_id"] == "inst-7"
+    assert not (review_dir / "tok1_review.json").exists()  # 源文件标记 .reviewed
+
+    label = json.loads((server.LABELS_DIR / "tok1.json").read_text())
+    assert label["sample_token"] == "tok1"
+    box = label["boxes"][0]
+    assert box["detection_name"] == "car"
+    # cam_like 往返：translation 还原全局系 (10, 2, 0.5)；yaw 0.3 → quat
+    np.testing.assert_allclose(box["translation"], [10.0, 2.0, 0.5], atol=1e-9)
+    assert box["velocity"] == [1.0, 0.5]
+    np.testing.assert_allclose(
+        box["rotation"], [np.cos(0.15), 0.0, 0.0, np.sin(0.15)], atol=1e-9
+    )
+
+
+def test_save_nuscenes_delete_all_no_label(web: Any, client: Any) -> None:
+    """nus 全删 → reviewed 空 annotations + 不导出 label 文件。"""
+    _write_queue(web, "tok1_review.json", _nus_queue_file())
+    res = client.post(
+        "/api/review-save",
+        json={"queue_file": "tok1_review.json", "deleted_indices": [0, 1]},
+    ).json()
+    assert res["ok"] and res["kept"] == 0 and res["deleted"] == 2
+    server, review_dir = web
+    saved = json.loads((review_dir / "tok1_reviewed.json").read_text())
+    assert saved["annotations"] == []
+    assert not (server.LABELS_DIR / "tok1.json").exists()  # 全删不导出 label
+
+
+def test_frame_data_endpoint_nuscenes(web: Any, client: Any, tmp_path: Any) -> None:
+    """frame-data nus 分支：cam_like 点 + cameras 路径解析（dataroot 拼 filename）。"""
+    pcd = tmp_path / "samples" / "LIDAR_TOP" / "n008.bin"
+    pcd.parent.mkdir(parents=True)
+    np.asarray([[10.0, 2.0, 0.5, 1.0, 0.0]], dtype=np.float32).tofile(pcd)
+    data = _nus_queue_file()
+    data["pcd_path"] = str(pcd)
+    data["dataroot"] = str(tmp_path)
+    _write_queue(web, "tok1_review.json", data)
+
+    res = client.get("/api/frame-data", params={"name": "tok1_review.json"})
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["dataset"] == "nuscenes"
+    points = np.asarray(payload["points"])
+    assert points.shape == (1, 3)
+    # p − ego = (5.5, 5.0, −0.2) → cam_like (−5.0, 0.2, 5.5)
+    np.testing.assert_allclose(points[0], (-5.0, 0.2, 5.5), atol=1e-6)
+    assert payload["cameras"][0]["image_path"] == str(
+        tmp_path / "samples" / "CAM_FRONT" / "n008.jpg"
+    )

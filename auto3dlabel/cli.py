@@ -17,8 +17,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from auto3dlabel.configs.kitti import DEFAULT_KITTI_ROOT
+from auto3dlabel.configs.kitti import DEFAULT_CONF, DEFAULT_KITTI_ROOT
 from auto3dlabel.configs.model_catalog import DETECTOR3D_NAMES
+from auto3dlabel.configs.nuscenes import DEFAULT_NUSCENES_OUT
 from auto3dlabel.data.kitti import normalize_frame_id, resolve_frame
 
 app = typer.Typer(help="Agentic 3D 标注（KITTI 单帧 → 3D bbox 初稿 + HITL 三档）")
@@ -588,6 +589,51 @@ def chat(
         elapsed=round(elapsed, 3),
         llm_model=provider,
         annotation_type="kitti_3d",
+    )
+
+
+@app.command("nuscenes-queue")
+def nuscenes_queue(
+    det_model: Annotated[
+        str,
+        typer.Option(
+            "-d",
+            "--det-model",
+            help=(
+                "3D 检测引擎（LiDAR {'/'.join(DETECTOR3D_NAMES)} / "
+                "融合 bevfusion / 单目 fcos3d，三协议自动分派）"
+            ),
+        ),
+    ] = "pointpillars_nus",
+    conf: Annotated[float, typer.Option("-c", "--conf", help="置信度阈值")] = DEFAULT_CONF,
+    out_dir: Annotated[
+        Path, typer.Option("-o", "--out-dir", help="复核队列输出目录")
+    ] = DEFAULT_NUSCENES_OUT / "reviews",
+    dataroot: Annotated[
+        str | None, typer.Option("--dataroot", help="nuScenes dataroot（默认 configs 常量）")
+    ] = None,
+    version: Annotated[str, typer.Option("--version", help="devkit 版本表")] = "v1.0-mini",
+) -> None:
+    """nuScenes 端到端复核队列（v0.4 P2）：val 场景逐 sample 检测 → 三档分流。
+
+    产物 {sample_token}_review.json 后接 Web 复核：
+    REVIEW3D_DIR=<out_dir> python3 -m auto3dlabel.web.server
+    保存即导出 labels/{sample_token}.json（smoke_nuscenes 回灌评测验收）。
+    """
+    from auto3dlabel.models.detection3d import create_detector3d_any
+    from auto3dlabel.tools.nuscenes_pipeline import generate_review_queue
+
+    det = create_detector3d_any(det_model)
+    if det is None:
+        console.print(f"[red]未知名 3D 模型: {det_model}[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[bold]nuScenes 复核队列[/bold] 引擎={det_model} conf={conf} → {out_dir}")
+    written = generate_review_queue(
+        det, out_dir, conf=conf, dataroot=Path(dataroot) if dataroot else None,
+        version=version,
+    )
+    console.print(
+        f"[bold]汇总[/bold] 新生成 {len(written)} 个队列文件（resume：已存在跳过）"
     )
 
 

@@ -1,5 +1,6 @@
 """nuScenes 数据访问层（v0.2 P3）：dataroot 校验 + devkit 懒加载守卫 + val 枚举 + GT → NusBox
-+ 传感器系→全局系补偿链（v0.3 P3 从 smoke_nuscenes 抽公共，smoke_bevfusion 复用）。
++ 传感器系→全局系补偿链（v0.3 P3 从 smoke_nuscenes 抽公共，smoke_bevfusion 复用）
++ P2 Web 复核支撑（v0.4）：点云加载 / ego 位姿 / 6 相机 / NusBox↔渲染 dict 往返。
 
 数据源：/autodl-pub/data/nuScenes/Fulldatasetv1.0/Mini/v1.0-mini.tgz 解压后的
 标准 dataroot（见 configs/nuscenes.DEFAULT_NUSCENES_ROOT）。
@@ -14,9 +15,19 @@ from typing import Any
 
 import numpy as np
 
-from auto3dlabel.configs.nuscenes import DEFAULT_NUSCENES_ROOT, NUSCENES_CATEGORY_MAP
+from auto3dlabel.configs.nuscenes import (
+    DEFAULT_NUSCENES_ROOT,
+    NUSCENES_CAMERAS,
+    NUSCENES_CATEGORY_MAP,
+)
+from auto3dlabel.schema.box3d import Box3D
 from auto3dlabel.schema.nuscenes_box import NusBox
-from auto3dlabel.tools.geometry import yaw_to_quat
+from auto3dlabel.tools.geometry import (
+    cam_like_to_global,
+    global_to_cam_like,
+    quat_to_yaw,
+    yaw_to_quat,
+)
 
 
 def dataroot_exists(root: Path | None = None) -> bool:
@@ -120,6 +131,105 @@ def sensor_sample_data(
 def lidar_sample_data(sample: dict, nusc: Any) -> dict:
     """sample → LIDAR_TOP 的 sample_data 记录（sensor_sample_data 薄壳，向后兼容）。"""
     return sensor_sample_data(sample, nusc, "LIDAR_TOP")
+
+
+def load_lidar_file(path: Path) -> np.ndarray:
+    """nuScenes pcd 文件 → (N,5) float32（x,y,z,intensity,elongation），剔除 NaN/Inf。
+
+    v0.4 P2 从 smoke_nuscenes._load_lidar 抽公共：load_lidar_points（devkit 表映射）与
+    Web payloads（队列文件直存 pcd_path，无 devkit 实例）共用同一解析。
+    """
+    raw = np.fromfile(path, dtype=np.float32).reshape(-1, 5)
+    return np.asarray(raw[np.isfinite(raw).all(axis=1)])
+
+
+def load_lidar_points(sample: dict, nusc: Any, dataroot: Path) -> np.ndarray:
+    """sample → LIDAR_TOP 主点云 (N,5) float32（文件名经 devkit sample_data 表映射；
+    sweeps 不合并 = 简化口径）。"""
+    filename = lidar_sample_data(sample, nusc)["filename"]
+    return load_lidar_file(dataroot / filename)
+
+
+def ego_translation_of_sample(sample: dict, nusc: Any) -> tuple[float, float, float]:
+    """sample → ego 全局位置 (x,y,z)（LIDAR_TOP 记录的 ego_pose 平移分量）。
+
+    P2 cam_like 帧原点 t_ego（global_to_cam_like 消费）。
+    """
+    lidar_data = lidar_sample_data(sample, nusc)
+    ego = nusc.get("ego_pose", lidar_data["ego_pose_token"])
+    t = ego["translation"]
+    return (float(t[0]), float(t[1]), float(t[2]))
+
+
+def cameras_of_sample(sample: dict, nusc: Any) -> list[dict]:
+    """sample → 6 相机视图记录列表（标准序 NUSCENES_CAMERAS）。
+
+    每条 {name, token, filename}：filename 相对 dataroot（Web 复核 6 图渲染消费）。
+    """
+    cams: list[dict] = []
+    for name in NUSCENES_CAMERAS:
+        rec = sensor_sample_data(sample, nusc, name)
+        cams.append({"name": name, "token": rec["token"], "filename": rec["filename"]})
+    return cams
+
+
+def nusbox_to_box3d_dict(
+    box: NusBox,
+    ego_translation: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    fit_points: int = 0,
+) -> dict:
+    """NusBox（全局系）→ Box3D 渲染 dict（ego 局部相机式帧，P2 Web/前端零改动消费）。
+
+    转换（单测锚点锁定）：center = M @ (t − t_ego)（geometry.global_to_cam_like；
+    ego 默认原点，队列侧传 ego_pose 平移）；(h,w,l) = (size[2],size[0],size[1])；
+    yaw_bev = −yaw_g ⇒ rotation_y = −yaw_g − π/2（geometry 唯一转换点）。
+    宽轴镜像性：8 角点集合完全相同（Box3D 右向 = 全局左），仅角点序镜像，
+    边集/headLine/编辑数学不受影响——勿按「角点一一对应」直觉改转换。
+    velocity/track_id 以顶层键透传（buildSaveBody {...a} 全量拷贝自动存活）。
+    """
+    center = global_to_cam_like(np.asarray([box.translation]), ego_translation)[0]
+    w_, l_, h_ = box.size
+    d = Box3D(
+        label=box.label,
+        confidence=box.confidence,
+        cx=float(center[0]), cy=float(center[1]), cz=float(center[2]),
+        h=h_, w=w_, l=l_,
+        yaw_bev=-quat_to_yaw(box.quaternion),
+        fit_points=fit_points,
+    ).to_dict()
+    if box.velocity is not None:
+        d["velocity"] = list(box.velocity)
+    if box.track_id is not None:
+        d["track_id"] = box.track_id
+    return d
+
+
+def box3d_dict_to_nusbox(
+    d: dict, ego_translation: tuple[float, float, float] = (0.0, 0.0, 0.0)
+) -> NusBox:
+    """渲染 dict（相机式帧）→ NusBox（全局系）——nusbox_to_box3d_dict 逆变换（Web 保存回写）。
+
+    translation = Mᵀ @ center_camlike + t_ego（geometry.cam_like_to_global）；
+    size = (w,l,h) 直映射；四元数 = yaw_to_quat(−yaw_bev)（yaw_g = −yaw_bev）；
+    velocity/track_id 从顶层键读回（缺省 None）。ego_translation 必须与渲染侧一致
+    （队列 JSON 的 ego_translation 键为单一事实源）。
+    """
+    box = Box3D.from_dict(d)
+    center_glob = cam_like_to_global(
+        np.asarray([[box.cx, box.cy, box.cz]]), ego_translation
+    )[0]
+    velocity_raw = d.get("velocity")
+    return NusBox(
+        label=box.label,
+        confidence=box.confidence,
+        translation=(float(center_glob[0]), float(center_glob[1]), float(center_glob[2])),
+        size=(box.w, box.l, box.h),
+        quaternion=yaw_to_quat(-box.yaw_bev),
+        velocity=(
+            (float(velocity_raw[0]), float(velocity_raw[1])) if velocity_raw else None
+        ),
+        track_id=d.get("track_id"),
+    )
 
 
 def rot_matrix(q: tuple[float, float, float, float]) -> np.ndarray:

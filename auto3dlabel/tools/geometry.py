@@ -8,6 +8,8 @@ yaw 约定（红线）：
 - nuScenes 全局系 yaw（绕 z 轴，x 前 y 左）→ 四元数 (w,x,y,z)：
   车头向量 (cos yaw, sin yaw, 0) ⇒ quat = (cos(yaw/2), 0, 0, sin(yaw/2))
   ——唯一转换点 yaw_to_quat / quat_to_yaw（v0.2 P3）
+- nuScenes 全局系 → ego 局部「相机式」帧（P2 Web 渲染，x 右/y 下/z 前）：
+  GLOBAL_TO_CAM_LIKE 矩阵 + global_to_cam_like/cam_like_to_global（见下）
 """
 
 from __future__ import annotations
@@ -46,6 +48,53 @@ def yaw_to_rotation_y(yaw_bev: float) -> float:
 def rotation_y_to_yaw(rotation_y: float) -> float:
     """KITTI rotation_y → 内部 yaw_bev（反转换）。"""
     return wrap_pi(rotation_y + np.pi / 2)
+
+
+# ── nuScenes 全局系 ↔ ego 局部「相机式」帧（P2 Web 复核渲染，唯一转换点）────────
+#
+# 全局系（x 前 / y 左 / z 上）→ 相机式帧（x 右 / y 下 / z 前）的旋转矩阵 M：
+#   p_camlike = M @ (p_global − t_ego)
+# M = [[0,-1,0],[0,0,-1],[1,0,0]]（正交矩阵，M⁻¹ = Mᵀ，单测锚点锁定）。
+# 相机式帧 yaw_bev = −yaw_g（车头 (cos y_g, sin y_g) → (−sin y_g, cos y_g)，
+# 代入「车头相对 +z、向 +x 为正」定义即 atan2(−sin, cos) = −y_g）。
+
+GLOBAL_TO_CAM_LIKE = np.array(
+    [[0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]], dtype=np.float64
+)
+
+
+def global_to_cam_like(
+    points: np.ndarray, ego_translation: tuple[float, float, float] | list[float] | np.ndarray
+) -> np.ndarray:
+    """全局系点 (N,3) → ego 局部相机式帧 (x 右/y 下/z 前)（P2 Web 渲染）。
+
+    ego_translation = devkit ego_pose 全局位置 (x,y,z)（data/nuscenes.py 查表传入）。
+    """
+    t = np.asarray(ego_translation, dtype=np.float64)
+    pts = np.asarray(points, dtype=np.float64)[:, :3]
+    return (pts - t) @ GLOBAL_TO_CAM_LIKE.T
+
+
+def cam_like_to_global(
+    points: np.ndarray, ego_translation: tuple[float, float, float] | list[float] | np.ndarray
+) -> np.ndarray:
+    """相机式帧点 (N,3) → 全局系（global_to_cam_like 逆变换，M 正交 ⇒ 转置即逆）。"""
+    t = np.asarray(ego_translation, dtype=np.float64)
+    pts = np.asarray(points, dtype=np.float64)[:, :3]
+    return (pts @ GLOBAL_TO_CAM_LIKE) + t
+
+
+def nus_yaw_to_rotation_y(yaw_g: float) -> float:
+    """nuScenes 全局系 yaw → KITTI 相机式 rotation_y：ry = −yaw_g − π/2。
+
+    推导：相机式帧 yaw_bev = −yaw_g，代入唯一转换点 yaw_to_rotation_y。
+    """
+    return wrap_pi(-yaw_g - np.pi / 2)
+
+
+def rotation_y_to_nus_yaw(rotation_y: float) -> float:
+    """KITTI 相机式 rotation_y → nuScenes 全局系 yaw（反转换）。"""
+    return wrap_pi(-rotation_y - np.pi / 2)
 
 
 def _bev_polygon_from_corners(corners: np.ndarray) -> Polygon:

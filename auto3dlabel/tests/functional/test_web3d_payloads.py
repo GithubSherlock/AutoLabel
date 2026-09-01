@@ -118,3 +118,75 @@ def test_frame_payload_damaged_or_missing(tmp_path: Path) -> None:
     q2 = dict(q, calib_path=str(bad_calib))
     (tmp_path / "b_review.json").write_text(json.dumps(q2), encoding="utf-8")
     assert frame_payload("b_review.json", tmp_path) is None
+
+
+def _nus_queue(tmp_path: Path, pcd_path: Path) -> dict:
+    """nuScenes 队列 JSON（零 devkit）：pcd 绝对路径 + ego_translation + 6 相机。"""
+    box = Box3D(
+        label="car", cx=-5.0, cy=0.2, cz=5.5, h=1.5, w=2.0, l=4.0, yaw_bev=0.3
+    ).to_dict()
+    return {
+        "dataset": "nuscenes",
+        "version": "v1.0-mini",
+        "dataroot": str(tmp_path),
+        "scene_name": "scene-A",
+        "sample_token": "tok1",
+        "image": "tok1",
+        "pcd_path": str(pcd_path),
+        "ego_translation": [4.5, -3.0, 0.7],
+        "cameras": [
+            {"name": "CAM_FRONT", "filename": "samples/CAM_FRONT/n008.jpg"},
+            {"name": "CAM_FRONT_LEFT", "filename": "samples/CAM_FRONT_LEFT/n008.jpg"},
+            {"name": "CAM_FRONT_RIGHT", "filename": "samples/CAM_FRONT_RIGHT/n008.jpg"},
+            {"name": "CAM_BACK", "filename": "samples/CAM_BACK/n008.jpg"},
+            {"name": "CAM_BACK_LEFT", "filename": "samples/CAM_BACK_LEFT/n008.jpg"},
+            {"name": "CAM_BACK_RIGHT", "filename": "samples/CAM_BACK_RIGHT/n008.jpg"},
+            {"name": "CAM_BROKEN", "filename": ""},  # 缺 filename 跳过
+            "not-a-dict",
+        ],
+        "annotations": [box, "bad", 42],  # 坏框跳过（宁缺勿假）
+    }
+
+
+def test_frame_payload_nuscenes_cam_like_and_cameras(tmp_path: Path) -> None:
+    """nus 分支：cam_like 点（ego 锚点）+ NaN 剔除 + 6 相机路径 + 坏框跳过。"""
+    pcd = tmp_path / "samples" / "LIDAR_TOP" / "n008.bin"
+    pcd.parent.mkdir(parents=True)
+    np.asarray(
+        [[10.0, 2.0, 0.5, 1.0, 0.0], [0.0, 0.0, 0.0, 2.0, 0.0],
+         [np.nan, np.nan, np.nan, np.nan, np.nan]],  # NaN 行剔除
+        dtype=np.float32,
+    ).tofile(pcd)
+    queue = tmp_path / "tok1_review.json"
+    queue.write_text(json.dumps(_nus_queue(tmp_path, pcd)), encoding="utf-8")
+
+    payload = frame_payload("tok1_review.json", tmp_path)
+    assert payload is not None
+    assert payload["dataset"] == "nuscenes"
+    points = np.asarray(payload["points"])
+    assert points.shape == (2, 3)
+    # 锚点：p − ego = (5.5, 5.0, −0.2) → cam_like (−5.0, 0.2, 5.5)
+    np.testing.assert_allclose(points[0], (-5.0, 0.2, 5.5), atol=1e-6)
+    np.testing.assert_allclose(points[1], (-3.0, 0.7, -4.5), atol=1e-6)
+    assert [c["name"] for c in payload["cameras"]] == [
+        "CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT",
+        "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT",
+    ]
+    # image_path = dataroot 绝对路径（review-image 端点读）
+    assert payload["cameras"][0]["image_path"] == str(
+        tmp_path / "samples" / "CAM_FRONT" / "n008.jpg"
+    )
+    assert len(payload["objects"]) == 1  # 非 dict/42 跳过
+    assert payload["objects"][0]["index"] == 0
+    assert payload["objects"][0]["label"] == "car"
+    # nus 无 image_path/bev_path（相机图走 cameras 分支，前端渲染 6 图）
+    assert payload["image_path"] == "" and payload["bev_path"] == ""
+
+
+def test_frame_payload_nuscenes_damaged_pcd(tmp_path: Path) -> None:
+    """nus 分支 pcd 缺失 → None（端点 400）；dataset 键缺失走 KITTI 分支回归不变。"""
+    queue = tmp_path / "tok1_review.json"
+    queue.write_text(
+        json.dumps(_nus_queue(tmp_path, tmp_path / "nope.bin")), encoding="utf-8"
+    )
+    assert frame_payload("tok1_review.json", tmp_path) is None

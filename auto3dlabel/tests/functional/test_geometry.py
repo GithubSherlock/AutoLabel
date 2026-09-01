@@ -9,11 +9,16 @@ import pytest
 
 from auto3dlabel.schema.box3d import Box3D
 from auto3dlabel.tools.geometry import (
+    GLOBAL_TO_CAM_LIKE,
     bev_iou,
     bev_iou_quad,
+    cam_like_to_global,
+    global_to_cam_like,
     iou3d,
     iou3d_list,
+    nus_yaw_to_rotation_y,
     points_in_box,
+    rotation_y_to_nus_yaw,
     rotation_y_to_yaw,
     wrap_pi,
     yaw_to_rotation_y,
@@ -57,6 +62,45 @@ def test_wrap_pi() -> None:
 def test_box_rotation_y_property() -> None:
     b = _box(yaw=np.pi / 2)
     assert abs(b.rotation_y - 0.0) < 1e-9
+
+
+# ── 全局系 ↔ ego 局部「相机式」帧（P2 Web 渲染）────────────────
+
+def test_cam_like_axis_anchors() -> None:
+    """M 轴映射锚点：全局 x前/y左/z上 → 相机式 x右/y下/z前。"""
+    m = GLOBAL_TO_CAM_LIKE
+    assert np.allclose(m @ np.array([1.0, 0.0, 0.0]), [0.0, 0.0, 1.0])  # 前 → z
+    assert np.allclose(m @ np.array([0.0, 1.0, 0.0]), [-1.0, 0.0, 0.0])  # 左 → −x
+    assert np.allclose(m @ np.array([0.0, 0.0, 1.0]), [0.0, -1.0, 0.0])  # 上 → −y
+
+
+def test_global_to_cam_like_ego_offset() -> None:
+    """点 (5,2,1) 全局、ego (1,0,0.5) → rel (4,2,0.5) → 相机式 (−2,−0.5,4)。"""
+    out = global_to_cam_like(np.asarray([[5.0, 2.0, 1.0]]), (1.0, 0.0, 0.5))
+    assert np.allclose(out[0], [-2.0, -0.5, 4.0], atol=1e-12)
+
+
+def test_cam_like_roundtrip() -> None:
+    """随机点云往返：cam_like_to_global ∘ global_to_cam_like = 恒等。"""
+    rng = np.random.default_rng(1)
+    pts = rng.uniform(-50.0, 50.0, (100, 3))
+    ego = (12.3, -4.5, 0.7)
+    back = cam_like_to_global(global_to_cam_like(pts, ego), ego)
+    np.testing.assert_allclose(back, pts, atol=1e-9)
+
+
+def test_nus_yaw_to_rotation_y_anchors_and_roundtrip() -> None:
+    """ry = −yaw_g − π/2：yaw=0 → −π/2；yaw=π/2 → −π；往返锁定。"""
+    assert abs(nus_yaw_to_rotation_y(0.0) + np.pi / 2) < 1e-9
+    assert abs(nus_yaw_to_rotation_y(np.pi / 2) + np.pi) < 1e-9
+    for yaw_g in (0.0, 0.3, -0.7, 1.2, -2.9):
+        assert abs(rotation_y_to_nus_yaw(nus_yaw_to_rotation_y(yaw_g)) - yaw_g) < 1e-9
+
+
+def test_nus_yaw_consistency_with_yaw_bev() -> None:
+    """一致性：nus_yaw_to_rotation_y(yaw_g) == yaw_to_rotation_y(−yaw_g)（yaw_bev=−yaw_g）。"""
+    for yaw_g in (0.0, 0.3, -0.7, 1.2, -2.9):
+        assert abs(nus_yaw_to_rotation_y(yaw_g) - yaw_to_rotation_y(-yaw_g)) < 1e-9
 
 
 # ── corners / BEV IoU ─────────────────────────────────────────

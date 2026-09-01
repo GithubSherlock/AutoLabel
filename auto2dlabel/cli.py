@@ -194,7 +194,7 @@ def dataset_remove(
 def chat(
     instruction: str = typer.Argument(None, help="自然语言标注指令（省略则进入交互模式）"),
     det_model: str = typer.Option(None, "--det-model", "-d", help="覆盖检测模型（如 rtdetr-l.pt）"),
-    confirm_timeout: int = typer.Option(30, "--timeout", help="确认等待秒数（0 = 跳过确认）"),
+    confirm_timeout: int = typer.Option(0, "--timeout", help="确认等待秒数（0 = 跳过确认）"),
     no_wait: bool = typer.Option(False, "--no-wait", help="跳过所有确认，直接执行"),
     provider: str = typer.Option("deepseek", "--provider", "-p"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),

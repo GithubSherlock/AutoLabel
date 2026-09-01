@@ -21,6 +21,7 @@ from fastapi import Body, FastAPI
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from auto3dlabel.data.nuscenes import box3d_dict_to_nusbox
 from auto3dlabel.export.kitti_label import build_label_file
 from auto3dlabel.schema.box3d import Box3D
 from auto3dlabel.web.payloads import frame_payload, validate_queue_name
@@ -175,21 +176,49 @@ async def save_review(payload: dict[str, Any] = Body(...)) -> JSONResponse:
 
     REVIEW_DIR.mkdir(parents=True, exist_ok=True)
     out = REVIEW_DIR / f"{stem}_reviewed.json"
-    out_data = {
-        "image": stem,
-        "image_path": data.get("image_path", ""),
-        "image_size": data.get("image_size") or [1242, 375],
-        "pcd_path": data.get("pcd_path", ""),
-        "calib_path": data.get("calib_path", ""),
-        "description": "已人工复核（3D）— 修正后保留框",
-        "annotations": [b.to_dict() for b in boxes],
-        "kept": len(boxes),
-        "deleted": deleted_count,
-    }
+    is_nus = data.get("dataset") == "nuscenes"
+    if is_nus:
+        # nuScenes：reviewed 保渲染 dict（velocity/track_id 透传键存活）+ 队列元数据
+        # （重开复核走同一 frame_payload nus 分支，ego_translation 为单一事实源）
+        out_data = {
+            "dataset": "nuscenes",
+            "version": data.get("version", ""),
+            "dataroot": data.get("dataroot", ""),
+            "scene_name": data.get("scene_name", ""),
+            "sample_token": stem,
+            "image": stem,
+            "pcd_path": data.get("pcd_path", ""),
+            "ego_translation": data.get("ego_translation", [0.0, 0.0, 0.0]),
+            "cameras": data.get("cameras", []),
+            "description": "已人工复核（nuScenes 3D）— 修正后保留框",
+            "annotations": [b for b in kept if isinstance(b, dict)],
+            "kept": len(boxes),
+            "deleted": deleted_count,
+        }
+    else:
+        out_data = {
+            "image": stem,
+            "image_path": data.get("image_path", ""),
+            "image_size": data.get("image_size") or [1242, 375],
+            "pcd_path": data.get("pcd_path", ""),
+            "calib_path": data.get("calib_path", ""),
+            "description": "已人工复核（3D）— 修正后保留框",
+            "annotations": [b.to_dict() for b in boxes],
+            "kept": len(boxes),
+            "deleted": deleted_count,
+        }
     out.write_text(json.dumps(out_data, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    # KITTI label 同步导出（Web 复核结果直接可用）
-    if boxes:
+    # 训练标签同步导出（Web 复核结果直接可用）
+    if is_nus:
+        from auto3dlabel.export.nuscenes_labels import write_sample_label
+
+        ego_raw = data.get("ego_translation", (0.0, 0.0, 0.0))
+        ego = (float(ego_raw[0]), float(ego_raw[1]), float(ego_raw[2]))
+        nus_boxes = [box3d_dict_to_nusbox(b, ego) for b in kept if isinstance(b, dict)]
+        if nus_boxes:
+            write_sample_label(stem, nus_boxes, LABELS_DIR)
+    elif boxes:
         build_label_file(stem, boxes, LABELS_DIR)
 
     if not is_reviewed:

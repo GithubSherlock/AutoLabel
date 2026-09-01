@@ -18,7 +18,10 @@ class NusBox:
 
     size 顺序 (w, l, h)（nuScenes 官方语义，与 Box3D 的 (h,w,l) 不同——消费点在此登记：
     1. export/nuscenes_json.build_submission_dict
-    2. benchmarks/nuscenes_benchmark（size 直接喂评测 IoU，不做语义重排））
+    2. benchmarks/nuscenes_benchmark（size 直接喂评测 IoU，不做语义重排）
+    3. data/nuscenes.nusbox_to_box3d_dict（P2：全局系 → 相机式帧渲染 dict，
+       size 重排 (h,w,l) + 中心 (−ty,−tz,tx) + yaw 取负——宽轴镜像性单测锁定）
+    4. data/nuscenes.box3d_dict_to_nusbox（P2 逆变换，Web 保存回写））
     """
 
     label: str  # 官方检测类名（NUSCENES_CLASSES 之一）

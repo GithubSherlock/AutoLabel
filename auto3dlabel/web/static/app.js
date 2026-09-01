@@ -39,9 +39,12 @@
       ? `<figure><img src="api/review-image?path=${encodeURIComponent(d.image_path)}"><figcaption>相机图</figcaption></figure>` : "";
     const bev = d.bev_path
       ? `<figure><img src="api/review-image?path=${encodeURIComponent(d.bev_path)}"><figcaption>BEV 鸟瞰</figcaption></figure>` : "";
+    // nuScenes 6 相机（payloads _nuscenes_payload 的 cameras 键；.imgs 已 flex-wrap 零 CSS 改动）
+    const cams = (d.cameras || []).map((c) =>
+      `<figure><img src="api/review-image?path=${encodeURIComponent(c.image_path)}"><figcaption>${esc(c.name)}</figcaption></figure>`).join("");
     $("#detail").innerHTML = `
       <h3 style="margin-top:0">${esc(d.image || L3D.state.name)} <span style="color:var(--dim);font-weight:400">— ${anns.length} 框待复核</span></h3>
-      <div class="imgs">${cam}${bev}</div>
+      <div class="imgs">${cam}${bev}${cams}</div>
       <div id="table-wrap">${L3D.renderTableHtml()}</div>
       <div class="toolbar">
         <button id="save">保存复核结果</button>

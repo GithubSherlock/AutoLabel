@@ -69,6 +69,10 @@ NUSCENES_CATEGORY_MAP: dict[str, str | None] = {
 NUSCENES_IOU_THRESHOLD = 0.5
 DISTANCE_BINS = [(0, 25), (25, 50)]  # 简化分桶：近/中（官方 0-50m 四桶的降级）
 
+# P2 复核队列：fit_points 强制 review 门槛（nuScenes 32 线密度低于 KITTI 64 线，
+# KITTI 的 MIN_FIT_POINTS=20 太严；triage_nus 实测后 10 点以下的框强制人工）
+NUSCENES_MIN_FIT_POINTS = 10
+
 # nuScenes 6 相机通道（devkit 标准序，BEVFusion 多视角输入）
 NUSCENES_CAMERAS = (
     "CAM_FRONT",
@@ -81,3 +85,7 @@ NUSCENES_CAMERAS = (
 
 # BEVFUSION_NAMES / FCOS3D_NAMES（nuScenes 融合/单目路由表）已收拢至
 # configs/model_catalog.py（单一事实源，v0.3 P6），勿在别处散副本
+
+# P2 端到端默认输出根（cli nuscenes-queue 的 --out-dir 默认 = <root>/reviews；
+# Web save 的 labels 落兄弟目录 <root>/labels——与 KITTI reviews/labels 布局一致）
+DEFAULT_NUSCENES_OUT = Path("outputs/nuscenes")

@@ -361,3 +361,23 @@ def create_detector3d(model_name: str | None) -> Detector3D | None:
     config_path = MMDET3D_CONFIG_DIR / entry["config"]
     checkpoint_path = WEIGHTS_DIR / entry["weights_dir"] / entry["checkpoint"]
     return Mmdet3dDetector(config_path=config_path, checkpoint_path=checkpoint_path)
+
+
+def create_detector3d_any(model_name: str | None) -> Any | None:
+    """三引擎统一工厂（v0.4 P2）：LiDAR（detect_points）/ 融合（bevfusion）/
+    单目（fcos3d）——按名字逐工厂路由，未知名 → None。
+
+    配合 tools/nuscenes_pipeline.predict_sample_nus 的三协议分派；KITTI 侧调用方
+    继续用 create_detector3d（语义不变：非 None = LiDAR 引擎）。
+    """
+    det = create_detector3d(model_name)
+    if det is not None:
+        return det
+    from auto3dlabel.models.bevfusion3d import create_bevfusion_detector
+
+    fusion_det = create_bevfusion_detector(model_name)
+    if fusion_det is not None:
+        return fusion_det
+    from auto3dlabel.models.mono3d import create_fcos3d_detector
+
+    return create_fcos3d_detector(model_name)

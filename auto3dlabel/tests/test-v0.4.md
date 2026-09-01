@@ -1,7 +1,7 @@
 # auto3dlabel v0.4 实测记录
 
 > 本文件 = v0.4 实测数据（合成测试计数见各节；里程碑定义见 `milestone/v0.4.md`）。
-> **环境**：RTX 3080 Ti 12GB 多租户宿主（本版纯前端，无 GPU 项）。
+> **环境**：RTX 3080 Ti 12GB 多租户宿主（P1 纯前端无 GPU 项；P2/P3 有 GPU 项）。
 
 ## Phase 1：P4b cuboid 手柄编辑（Web 3D 复核补齐）
 
@@ -56,18 +56,76 @@
 
 容器无 headless WebGL / 无浏览器可自动化四视图拖拽交互——**手柄数学、状态机、undo 栈由 smoke 断言兜底**（组 12-22 全覆盖编辑数学与回写链路），浏览器手动验收待用户（`REVIEW3D_DIR=<队列目录> python3 -m auto3dlabel.web.server` 后 Top 拖角/边/yaw、Side 拖高度 → 保存 → `labels/<frame>.txt` 校验 15 字段）。
 
+## Phase 2：nuScenes 端到端标注闭环（P2）
+
+### E2E 实测（2026-09-02，bevfusion_nus 引擎）
+
+| 环节 | 实测数字 |
+| --- | --- |
+| 队列生成 | `nuscenes-queue` CLI（`create_detector3d_any` 三引擎路由，键名 **bevfusion_nus**）：**81 文件 / 2696 框**，cam_like 转换（点云 + 框）零偏差 |
+| Web 复核 | frame-data（点云 + 6 相机 + 四视图）200 OK；批量保存 **81 样本：2185 保留 / 464 删除（conf<0.4）**；reviewed json 保渲染 dict（velocity/track_id 存活） |
+| 标签导出 | `labels/` 81 文件 NusBox 格式（translation/rotation 四元数/velocity/track_id），`load_dataset_labels` 可聚合 |
+| 回灌评测 | labels 当 pred vs 官方 GT（**零检测器加载，0.1s 出表**）——**mAP 24.6**（2226 框 × 10 类，x-y 旋转 IoU 0.5 简化口径） |
+
+- 回灌 mAP 24.6 < 官方 BEVFusion 27.0：人工删除低 conf 框 + 简化口径差异，**如实记录不粉饰**——闭环验收点 = 「训练标签可解析回灌出表」，非 AP 提升
+- `smoke_nuscenes` 回灌参数（第三位置 labels 路径）→ 与官方 GT 同表 = P2 E2E 验收达成
+
+## Phase 3：KITTI 3D 微调闭环（P3）
+
+### 冒烟训练（2026-09-02，pointpillars_kitti，官方权重热启）
+
+| 项 | 实测 |
+| --- | --- |
+| 规模 | train 300 / val 40 帧（subsample 按 sample_idx 确定性截取，metainfo 保留） |
+| 训练 | epoch 4 × RepeatDataset 2 = **1200 iter**，**0.078s/iter**（全量 ≈ 100 秒）；batch 2 显存 **1.7GB**（12GB 余量大） |
+| **反传探针** | ✅ **loss 0.32→0.39、grad_norm 2.1→3.0、无 NaN**——mmcv sparse ops（pointpillars 免 spconv）反传正常 |
+| 产物 | `weights/kitti3d_finetune/epoch_4.pth`（58MB，不入库） |
+
+### 训练坑记录（5 个，均有回归断言）
+
+1. **`train.py` 在 `.mim/tools` 平级**（无 `tools/` 子目录）——`tools/train.py` 不存在；`create_data.py` 同病但被幂等跳过掩盖
+2. **config/work-dir 相对路径**在训练 cwd=.mim/tools 下必炸 → `build_train_cmd` 统一 `.resolve()`
+3. **`convert_to_iter_based` 只能配 epoch-based scheduler**（mmengine 断言）→ param_scheduler 纯 iter-based（LinearLR 预热 + ConstantLR 恒定，end 直接 iter 数）
+4. **Config 合并的引用不传播**：`dataset=dict(dataset=dict(pipeline=train_pipeline))` 与顶层是同一 list 两处引用、内嵌 `data_root` 是已求值字符串——单改顶层键无效，须显式双赋值（dump 文本级断言：零 db_sampler/ObjectSample/相对路径）
+5. **numba 0.67 × CUDA 13 环境级炸**：KittiMetric 的 rotate_iou.py **import 期**编译 CUDA kernel Signature mismatch（删显式 signature 同样失败）→ 内置 val 用 `val_begin=epochs+1` 越界关闭（mmengine 强制最终 epoch 跑 val，val_interval 大数无效）；**评测由 smoke_kitti 自写 40-point 口径（纯 numpy）承担**
+
+### 微调 vs 官方同口径（P3-5，2026-09-02 实测，19 帧 003712-003731，conf 0.3）
+
+`smoke_kitti` 新增 [config] [checkpoint] 可选参数（`Mmdet3dDetector` 直构，detect_points 协议复用）——官方权重与微调权重同 spec 同 conf 同函数出表。
+
+**40-point 主口径（项目主表，每类官方 IoU）——微调全面优于或持平官方**：
+
+| 难度 | Car 官方→微调 | Pedestrian 官方→微调 | Cyclist |
+| --- | --- | --- | --- |
+| easy | 27.1 → **27.5** | 17.3 → **19.5** | 0.0 → 0.0 |
+| moderate | 54.1 → **55.6** | 19.7 → **22.4** | 0.0 → 0.0 |
+| hard | 76.4 → **80.5** | 24.4 → **28.3** | 0.0 → 0.0 |
+
+**11-point 对照口径（IoU 0.5，v0.1 基线同口径）——Car 略降、Pedestrian 大涨**：
+
+| 难度 | Car | Pedestrian |
+| --- | --- | --- |
+| easy | 29.8 → 27.5（−2.3） | 39.4 → **48.6**（+9.2） |
+| moderate | 26.2 → 22.0（−4.2） | 11.1 → **25.0**（+13.9） |
+| hard | 17.4 → **20.8**（+3.4） | 6.8 → 7.7（+0.9） |
+
+- 微调输出框数 119 vs 官方 183（box coder 置信度分布变保守，conf 0.3 过滤后差距更大）；推理速度持平 0.50s/帧
+- 结论：**小样本冒烟（300 帧 / 4 epoch）已产生正向信号**——主口径全面提升；11-point Car 略降与 4 epoch 未收敛稳定一致。P3 闭环达成：训练 → 微调 → 同口径评测对比
+- 真实增益空间在自标注增量数据（P3b/P4）；KITTI 官方权重本就 KITTI 域内训成，增益有限符合预期（计划书风险项已列）
+
+
+
 ## 质量门
 
 | 检查 | 结果 | 基线对照 |
 | --- | --- | --- |
-| pytest（autolabel env 全量） | **1056 passed, 4 skipped** | ✅ 全绿（Python 零改动确认） |
-| pytest（base env 全量） | **1059 passed, 1 skipped** | ✅ 全绿 |
+| pytest（autolabel env 全量） | **1096 passed, 4 skipped** | 基线 1056+4skip，新增 40（P2 队列/payloads/server/labels/cli 路由 + P3 train3d），✅ 全绿 |
+| pytest（base env 全量） | **1096 passed, 4 skipped** | ✅ 双环境一致 |
 | ruff check auto3dlabel/ | **0** | ✅ 归零 |
-| ruff check auto2dlabel/ | **75**（89 → `--fix` 14 清理项 → 75） | 上轮记录 75，基线 119，不恶化 ✅ |
+| ruff check auto2dlabel/ | **75** | 基线 75，不恶化 ✅ |
 | mypy auto3dlabel/ --follow-imports=silent | **0** | ✅ 归零 |
 | mypy auto2dlabel/ --follow-imports=silent | **167 errors / 33 files** | 基线 169，不恶化 ✅ |
 | pyright auto3dlabel/ + auto2dlabel/ | **0 / 0** | ✅ |
+| smoke_web3d.js | **94 断言 OK** | 前端零改动回归（P2 仅 renderDetail 加 cameras 分支）✅ |
 
-- ruff --fix 14 项全为无行为清理（删未用 import `json/compute_iou/DATASETS_ROOT`、去冗余 f 前缀、PIL import 排序），pytest 全量复跑仍全绿
-- 新增断言计数：smoke_web3d.js 61 → **94**（编辑层 33）
-- 质量门在 --fix 后复跑 pytest 全量确认（改动无行为影响）
+- P2/P3 新增测试：test_nuscenes_labels 4 + test_cli_nuscenes 2 + test_train3d 5 + test_web3d_payloads/test_web3d/test_detection3d 扩展断言；smoke_kitti P3-5 参数无单测（M3 执行器，照 smoke_nuscenes 回灌先例）

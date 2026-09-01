@@ -23,6 +23,7 @@ from auto3dlabel.models.detection3d import (
     _init_model_trusted,
     _patch_pretrained_init,
     create_detector3d,
+    create_detector3d_any,
 )
 
 MMDET3D_INSTALLED = importlib.util.find_spec("mmdet3d") is not None
@@ -77,6 +78,27 @@ def test_create_detector3d_routing() -> None:
         WEIGHTS_DIR / entry_fa["weights_dir"] / entry_fa["checkpoint"]
     )
     assert det_fa._config_path == str(MMDET3D_CONFIG_DIR / entry_fa["config"])
+
+
+def test_create_detector3d_any_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """三引擎统一工厂（P2）：LiDAR 命中直返；否则依次问 bevfusion/fcos3d；全空 → None。"""
+    monkeypatch.setattr(
+        "auto3dlabel.models.detection3d.create_detector3d",
+        lambda name: "lidar" if name == "pointpillars_nus" else None,
+    )
+    monkeypatch.setattr(
+        "auto3dlabel.models.bevfusion3d.create_bevfusion_detector",
+        lambda name: "bevfusion" if name == "bevfusion" else None,
+    )
+    monkeypatch.setattr(
+        "auto3dlabel.models.mono3d.create_fcos3d_detector",
+        lambda name: "fcos3d" if name == "fcos3d" else None,
+    )
+    assert create_detector3d_any("pointpillars_nus") == "lidar"
+    assert create_detector3d_any("bevfusion") == "bevfusion"
+    assert create_detector3d_any("fcos3d") == "fcos3d"
+    assert create_detector3d_any("unknown") is None
+    assert create_detector3d_any(None) is None
 
 
 @pytest.mark.skipif(MMDET3D_INSTALLED, reason="mmdet3d 已装，守卫路径跳过")

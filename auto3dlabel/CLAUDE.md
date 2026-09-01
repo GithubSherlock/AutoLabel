@@ -1,6 +1,32 @@
 # auto3dlabel 开发指南
 
-> Auto3dLabel = 3D 标注（Agentic 预标注层的 3D 分支）。**当前 v0.1 ✅ 已完成（2026-08-24）**——本文件 = 实现落盘后的选型速查（✅=已按此实现 / 📋=演进方向）+ 设计红线。实测数据见 `tests/test-v0.1.md`；里程碑定义与验收见 `milestone/v0.1.md`；调研与路线论证见 `docs/AutoLabel_plan.md` Auto3dLabel 部分。
+> Auto3dLabel = 3D 标注（Agentic 预标注层的 3D 分支）。**v0.1 ✅（2026-08-24）→ v0.4 ✅（2026-09-02）**——v0.4 = P1 cuboid 手柄编辑 + P2 nuScenes 端到端闭环 + P3 KITTI 微调闭环。本文件 = 实现落盘后的选型速查（✅=已按此实现 / 📋=演进方向）+ 设计红线。实测数据见 `tests/test-v0.X.md`；里程碑定义与验收见 `milestone/v0.X.md`；调研与路线论证见 `docs/AutoLabel_plan.md` Auto3dLabel 部分。
+
+## v0.4 增量速查（2026-09-02 落盘）
+
+```
+auto3dlabel/
+├── tools/geometry.py            # + GLOBAL_TO_CAM_LIKE/cam_like↔global 转换（P2 唯一落点）
+├── data/nuscenes.py             # load_lidar_points/ego_translation/cameras_of_sample/nusbox_to_box3d_dict/box3d_dict_to_nusbox
+├── export/nuscenes_queue.py     # triage_nus + build_nuscenes_review_queue（scene/sample token 语义）
+├── export/nuscenes_labels.py    # devkit box 格式（全局四元数 + velocity + track_id）+ load_dataset_labels（单文件/目录）
+├── tools/nuscenes_pipeline.py   # predict_sample_nus 三协议分派 + generate_review_queue（resume 幂等）
+├── tools/train3d.py             # P3 五步微调管线（ImageSets→create_data→subsample→config 改造→训练，cwd=.mim/tools）
+├── models/detection3d.py        # + create_detector3d_any 三引擎统一工厂（LiDAR→bevfusion_nus→fcos3d_nus）
+├── web/payloads.py|server.py    # frame_payload/save_review nus 分支（ego cam_like 往返，velocity/track_id 透传）
+└── benchmarks/smoke_nuscenes.py|smoke_kitti.py  # 回灌参数（labels 当 pred 零检测器）/ [config] [checkpoint] 微调对比
+```
+
+**P2 关键约定**：cam_like = M @ (p_global − t_ego)，M = [[0,−1,0],[0,0,−1],[1,0,0]]；yaw_bev = −yaw_g；(h,w,l) = (size[2],size[0],size[1])；rotation_y = −yaw_g − π/2；队列键 dataset:"nuscenes" 分派。**P3 关键坑**（均有回归断言）：`train.py` 在 `.mim/tools` 平级；config/work-dir 必须 resolve（训练 cwd=.mim/tools）；`convert_to_iter_based` 只能配 epoch-based scheduler；Config 合并引用不传播（嵌套 pipeline/data_root 显式双赋值）；numba 0.67 × CUDA 13 下 KittiMetric import 期编译失败 → 内置 val 用 `val_begin=epochs+1` 关闭（mmengine 强制最终 epoch val），评测走 smoke_kitti 自写 40-point 口径。
+
+```bash
+auto3dlabel nuscenes-queue -d bevfusion_nus           # nuScenes 复核队列（三引擎路由，-d 默认 pointpillars_nus）
+python3 -m auto3dlabel.tools.train3d --dry-run        # P3 数据准备 + config 生成（CPU）
+python3 -m auto3dlabel.tools.train3d                  # + 微调训练（需 GPU；--n-train/--epochs/--batch/--lr/--resume）
+python3 -m auto3dlabel.benchmarks.smoke_kitti 003712-003731 pointpillars_kitti 0.3 [config] [checkpoint]  # 官方 vs 微调同口径
+```
+
+
 
 ## v0.1 实现速查（2026-08-24 落盘）
 
