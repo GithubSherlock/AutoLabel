@@ -8,6 +8,7 @@ state.annotations（2D _sync_annotations 残留）不消费——3D 结果只从
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -93,14 +94,20 @@ def run_3d_agent(
     seg_model_name: str | None = None,
     out_dir: str | Path | None = None,
     max_iterations: int = 3,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> tuple[list[Box3D], AgentState]:
-    """3D Agent Loop：复用 2D orchestrator 循环，返回 (Box3D 列表, state)。"""
+    """3D Agent Loop：复用 2D orchestrator 循环，返回 (Box3D 列表, state)。
+
+    progress_cb：每轮迭代回调 (iteration, max_iterations)——v1.0 P3 协议
+    （3D chat 传 print_al_progress，TUI 面板逐迭代推进；None 不推进）。
+    """
     registry = build_3d_registry(frame, det_model_name, seg_model_name, out_dir)
     orchestrator = AgentOrchestrator(
         llm_client=llm_client,
         tool_registry=registry,
         max_iterations=max_iterations,
         detection_model=det_model_name,
+        progress_cb=progress_cb,
     )
     # 质量评估挂点（2D 测试同款）：_ensure_tools_registered 仅在 registry 空时设置
     # _detect_tool，3D 预置非空 registry 需显式回填，否则 evaluate 的 retry 处置

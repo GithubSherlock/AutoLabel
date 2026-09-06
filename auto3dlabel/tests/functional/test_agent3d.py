@@ -328,6 +328,31 @@ def test_run_3d_agent_full(monkeypatch: Any) -> None:
     assert state.metadata["review_flags"] == 0
 
 
+def test_run_3d_agent_progress_cb_per_iteration(monkeypatch: Any) -> None:
+    """审查 #27：run_3d_agent(progress_cb=...) 每轮 agent loop 迭代推进一次
+    (iteration, max_iterations)——3D chat 传 print_al_progress 供 TUI 面板
+    逐迭代推进；两轮即收尾时进度停在 (2,3)，完成信号尾行 1/1 兜底。"""
+    import auto3dlabel.agent.orchestrator3d as orch3d
+
+    fake = _FakeDetect3DTool()
+    reg = ToolRegistry()
+    reg.register(fake)
+    monkeypatch.setattr(orch3d, "build_3d_registry", lambda *a, **k: reg)
+
+    frame = KittiFrame(frame_id="000000", root=Path("/tmp"))
+    calls: list[tuple[int, int]] = []
+    boxes, state = run_3d_agent(
+        frame, "检测汽车和行人",
+        llm_client=cast(LLMClient, _two_round_llm(["car"])),
+        out_dir="/tmp/out3d",
+        max_iterations=3,
+        progress_cb=lambda done, total: calls.append((done, total)),
+    )
+    assert calls == [(1, 3), (2, 3)]  # 两轮迭代各推进一次，总数 = max_iterations
+    assert state.iteration == 2
+    assert len(boxes) == 2
+
+
 # ── cli 纯函数 ─────────────────────────────────────────────────
 
 def test_cli_parse_frame_ids(tmp_path: Any) -> None:

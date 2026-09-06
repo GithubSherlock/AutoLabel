@@ -332,3 +332,97 @@ def test_slash_user_line_recorded(_session_log: Path) -> None:
 def test_sessions_module_path_is_logs_default() -> None:
     """会话日志默认落 logs/（已 gitignore，不入库）。"""
     assert str(SESSION_LOG_PATH) == "logs/chat_sessions.jsonl"
+
+
+# ---------- 审查修复回归（2026-09-07） ----------
+
+
+def test_safe_int_float_tolerance(tmp_path: Path) -> None:
+    """#14 类型容错：损坏行 seq/ts 为字符串或非数字——list_sessions /
+    session_messages / _cmd_resume 绝不崩，损坏 seq 排末尾。"""
+    path = tmp_path / "s.jsonl"
+    append_session_line(path, "s1", 1, "user", "正常行")
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + '{"session_id": "s1", "seq": "abc", "kind": "system", "text": "脏 seq"}\n'
+        + '{"session_id": "s1", "seq": 5, "ts": "not-a-float", "kind": "user", "text": "脏 ts"}\n',
+        encoding="utf-8",
+    )
+    entries = load_sessions(path)
+    rows = session_messages(entries, "s1")
+    assert len(rows) == 3
+    # 脏 seq 行 safe_int 归 0 排最前（不崩即可），其余升序
+    assert [r.get("seq") for r in rows] == ["abc", 1, 5]
+    summary = list_sessions(entries)
+    assert summary[0]["messages"] == 3  # 脏 ts 行不再崩 max()
+    assert summary[0]["last_ts"] > 1.0  # "not-a-float" 归 0，正常行真实 ts 保留
+
+
+def test_new_same_second_sid_suffix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#17 sid 撞车：同秒内多次 /new → 加 -N 后缀防覆盖。"""
+    monkeypatch.setattr(
+        "autolabel.tui.sessions.time.strftime", lambda fmt, t=None: "2026-09-07T10-00-00"
+    )
+
+    async def main() -> None:
+        app = ChatApp(runner=lambda ins, dom, prov, on_line, on_prog: None)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            app._slash_command("/new")
+            first = app._session_id
+            assert first == "2026-09-07T10-00-00"
+            app._slash_command("/new")
+            assert app._session_id == "2026-09-07T10-00-00-2"  # 撞车加后缀
+            app._slash_command("/new")
+            assert app._session_id == "2026-09-07T10-00-00-3"
+
+    asyncio.run(main())
+
+
+def test_new_warns_running_tasks(tmp_path: Path) -> None:
+    """#18 /new 提示：仍有运行中任务时黄字提示（终态落回原会话）。"""
+    gate = threading.Event()
+
+    def runner(
+        instruction: str,
+        domain: str,
+        provider: str,
+        on_line: Callable[[str], None],
+        on_progress: Callable[[int, int | None], None],
+    ) -> None:
+        gate.wait(10)
+
+    async def main() -> None:
+        app = ChatApp(runner=runner)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            app._submit_instruction("检测汽车")
+            await _wait_for(pilot, lambda: bool(app._tasks))
+            app._slash_command("/new")
+            await pilot.pause()
+            assert any("仍有 1 个运行中任务" in t for t in _chat_texts(app))
+            gate.set()
+            await _wait_for(pilot, lambda: not app._busy)
+
+    asyncio.run(main())
+
+
+def test_resume_strict_bool_markup(_session_log: Path) -> None:
+    """#14 markup 严格布尔：损坏行 markup="false" 不启用 markup（防历史文本注入）。"""
+    dirty = (
+        '{"session_id": "s1", "seq": 1, "kind": "user", '
+        '"text": "[red]注入[/red]", "markup": "false"}\n'
+    )
+    _session_log.write_text(dirty, encoding="utf-8")
+
+    async def main() -> None:
+        app = ChatApp(runner=lambda ins, dom, prov, on_line, on_prog: None)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            app._slash_command("/resume s1")
+            await pilot.pause()
+            # markup 未启用：text 含原始标记串（纯文本挂载），非渲染红字
+            texts = _chat_texts(app)
+            assert "[red]注入[/red]" in texts
+
+    asyncio.run(main())

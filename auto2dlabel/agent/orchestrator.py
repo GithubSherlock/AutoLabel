@@ -101,10 +101,14 @@ class AgentOrchestrator:
         iou_threshold: float = 0.5,
         use_sahi: bool = False,
         evaluate_mode: str | None = None,
+        progress_cb: Callable[[int, int], None] | None = None,
     ):
         self.llm = llm_client
         self.registry = tool_registry or ToolRegistry.get_instance()
         self.max_iterations = max_iterations
+        # 每轮 Agent Loop 迭代回调 (iteration, max_iterations)——v1.0 P3 协议
+        # 挂点（auto3dlabel chat 传入 print_al_progress；None = 不推进，默认）
+        self.progress_cb = progress_cb
         self.detection_model = detection_model
         self.iou_threshold = iou_threshold
         self.use_sahi = use_sahi
@@ -218,6 +222,8 @@ class AgentOrchestrator:
 
         while state.iteration < state.max_iterations and not state.done:
             state.iteration += 1
+            if self.progress_cb is not None:
+                self.progress_cb(state.iteration, self.max_iterations)
             logger.info("Iteration %d/%d", state.iteration, state.max_iterations)
 
             # 每轮重建 tools：质量未通过且尚未处置时，条件暴露 evaluate_quality
@@ -556,7 +562,9 @@ class AgentOrchestrator:
                         bbox = Bbox(
                             x=bx, y=by, width=bw, height=bh,
                             label=item.get("label", ""),
-                            confidence=item.get("confidence", item.get("conf", 1.0)),
+                            confidence=cast(
+                                float, item.get("confidence", item.get("conf", 1.0))
+                            ),
                         )
                         ann.add_bbox(bbox)
                         found_any = True

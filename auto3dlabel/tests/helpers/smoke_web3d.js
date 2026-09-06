@@ -412,5 +412,104 @@ const close = (a, b, tol, msg) => ok(Math.abs(a - b) < tol, `${msg}（${a} vs ${
   L3D.undo();
   ok(JSON.stringify(L3D.state.data.annotations[0]) === preMove, '相机图拖动可撤销');
 
+  // 14. 相机图叠加几何（v1.0 P2）：边缘裁剪 + 视野外指示 + 角点/边手柄拖动
+  // clipSegImage（Liang-Barsky，图像 1242×375）
+  const sIn = L3D.clipSegImage([100, 100], [200, 200], 1242, 375);
+  ok(sIn && sIn[0] === 100 && sIn[2] === 200, 'clip 全内段原样');
+  ok(L3D.clipSegImage([-100, 100], [-50, 200], 1242, 375) === null, 'clip 全出界（左）null');
+  const sL = L3D.clipSegImage([-100, 100], [300, 100], 1242, 375);
+  ok(sL && sL[0] === 0 && sL[1] === 100 && sL[2] === 300 && sL[3] === 100, 'clip 跨左边界裁剪 u=0');
+  const sT = L3D.clipSegImage([100, -50], [100, 100], 1242, 375);
+  ok(sT && sT[1] === 0 && sT[3] === 100, 'clip 跨上边界裁剪 v=0');
+  const sDiag = L3D.clipSegImage([-100, -100], [100, 100], 1242, 375);
+  ok(sDiag && sDiag[0] === 0 && sDiag[1] === 0 && sDiag[2] === 100 && sDiag[3] === 100,
+    'clip 斜线穿角裁剪到 (0,0)-(100,100)');
+
+  // camOverlayGeom 可见框（ann0：cx=8 cz=18 → u≈911 v≈234 全在图像内）
+  const ann14 = { cx: 8, cy: 1.4, cz: 18, h: 1.5, w: 1.6, l: 3.9, rotation_y: 0.05 };
+  const gVis = L3D.camOverlayGeom(P2, ann14, 1242, 375);
+  ok(gVis.segs.length === 12, `可见框 12 边全在图像内（实际 ${gVis.segs.length}）`);
+  ok(gVis.indicator === null, '可见框无指示标记');
+  ok(gVis.handles.length === 8, `可见框手柄 8 个（4 角+4 边，实际 ${gVis.handles.length}）`);
+  ok(gVis.handles.filter((hd) => hd.mode === 'corner').length === 4, '手柄含 4 角点');
+  ok(gVis.handles.filter((hd) => hd.mode === 'edge').length === 4, '手柄含 4 边中点');
+  const signs = gVis.handles.filter((hd) => hd.mode === 'corner').map((hd) => `${hd.sx},${hd.sy}`).sort();
+  ok(signs.join('|') === '-1,-1|-1,1|1,-1|1,1', `corner 手柄 sx/sy 四象限（${signs.join('|')}）`);
+  ok(gVis.handles.every((hd) => hd.u >= 0 && hd.u <= 1242 && hd.v >= 0 && hd.v <= 375),
+    '手柄均在图像内（视野外手柄不画）');
+  const segsIn = gVis.segs.every((s) => s[0] >= 0 && s[0] <= 1242 && s[1] >= 0 && s[1] <= 375
+    && s[2] >= 0 && s[2] <= 1242 && s[3] >= 0 && s[3] <= 375);
+  ok(segsIn, 'segs 全部裁剪到图像内');
+
+  // camOverlayGeom 视野外框（cx=-6 cz=4 cy=0 yaw=0：u 全负、v 在图像内）→ indicator 左缘
+  const annOut = { cx: -6, cy: 0, cz: 4, h: 1, w: 1, l: 2, rotation_y: -Math.PI / 2 };
+  const gOut = L3D.camOverlayGeom(P2, annOut, 1242, 375);
+  ok(gOut.segs.length === 0, '视野外框 segs 空（无可见边）');
+  ok(gOut.indicator !== null && gOut.indicator.dir === 'l' && gOut.indicator.u === 0,
+    `视野外框指示标记在左缘（${gOut.indicator && gOut.indicator.dir}/${gOut.indicator && gOut.indicator.u}）`);
+  ok(gOut.indicator.v > 0 && gOut.indicator.v < 375, '指示标记 v 在图像内');
+  ok(gOut.handles.length === 0, '视野外框无手柄（反投影无良定义）');
+
+  // camOverlayGeom 部分出界框（跨左边界）→ 裁剪后仍有 segs、无指示
+  const annPart = { cx: -5, cy: 0, cz: 10, h: 1, w: 2, l: 6.2, rotation_y: -Math.PI / 2 };
+  const gPart = L3D.camOverlayGeom(P2, annPart, 1242, 375);
+  ok(gPart.segs.length > 0, `部分出界框裁剪后仍有可见边（${gPart.segs.length}）`);
+  ok(gPart.indicator === null, '部分出界框无指示标记');
+  ok(gPart.segs.every((s) => s[0] >= 0 && s[2] >= 0), '裁剪段 u 非负');
+
+  // camHitHandle：角点半径命中 + 角优先于边 + 空白处 null
+  const cH = gVis.handles.find((hd) => hd.mode === 'corner');
+  const hitC = L3D.camHitHandle(gVis, cH.u + 3, cH.v - 3);
+  ok(hitC && hitC.mode === 'corner' && hitC.sx === cH.sx && hitC.sy === cH.sy, '手柄命中角点（±10px）');
+  ok(L3D.camHitHandle(gVis, 50, 50) === null, '远离手柄处命中 null');
+  ok(L3D.camHitHandle({ handles: [] }, cH.u, cH.v) === null, '无手柄 geom 命中 null');
+
+  // camHitIndicator：标记 12px 内命中框下标
+  const iH = L3D.camHitIndicator([gVis, gOut], 3, gOut.indicator.v);
+  ok(iH === 1, `指示标记命中视野外框下标 1（实际 ${iH}）`);
+  ok(L3D.camHitIndicator([gVis], 600, 180) === null, '无标记处命中 null');
+
+  // view=3 corner 拖动 = 地面 resize（对角固定 + 两轮不漂移，公式同 Top 视图）
+  const pre14 = JSON.stringify(L3D.state.data.annotations[0]);
+  const yaw14 = L3D.rotationYToYaw(0.05);
+  const opp = (b) => { // 左后底角（对角固定锚）：d=车头 p=右向
+    const dx = Math.sin(yaw14), dz = Math.cos(yaw14), px = Math.cos(yaw14), pz = -Math.sin(yaw14);
+    return [b.cx - dx * b.l / 2 - px * b.w / 2, b.cz - dz * b.l / 2 - pz * b.w / 2];
+  };
+  const oppPre = opp(L3D.state.data.annotations[0]);
+  L3D.beginEdit(0, 3, 'corner', { t0: -yaw14, cx0: 8, cz0: 18, w0: 1.6, l0: 3.9, sx: 1, sy: 1 });
+  ok(L3D.state.editing && L3D.state.editing.view === 3 && L3D.state.editing.mode === 'corner',
+    'beginEdit view=3 corner 进入编辑态');
+  L3D.editTo(3, 'corner', { x: 9, z: 18 });
+  const oppMid = opp(L3D.state.data.annotations[0]);
+  close(oppMid[0], oppPre[0], 1e-9, 'corner 拖动对角（左后）固定 x');
+  close(oppMid[1], oppPre[1], 1e-9, 'corner 拖动对角（左后）固定 z');
+  close(L3D.state.data.annotations[0].h, 1.5, 1e-9, 'corner 拖动 h 不变');
+  L3D.editTo(3, 'corner', { x: 10, z: 18 });
+  const opp2 = opp(L3D.state.data.annotations[0]);
+  close(opp2[0], oppPre[0], 1e-9, 'corner 两轮对角固定 x（快照式不漂移）');
+  close(opp2[1], oppPre[1], 1e-9, 'corner 两轮对角固定 z（快照式不漂移）');
+  L3D.endEdit();
+  ok(L3D.state.data.annotations[0].edited_by_human === true, 'corner 拖动置人工标记');
+  L3D.undo();
+  ok(JSON.stringify(L3D.state.data.annotations[0]) === pre14, 'corner 拖动可撤销');
+
+  // view=3 edge 拖动（右边 sx=1：单轴 w 变 l 不动，左边固定）
+  const pre14e = JSON.stringify(L3D.state.data.annotations[0]);
+  const leftEdge = (b) => { // 左边（x = cx - 右向·w/2）：对边固定锚
+    const px = Math.cos(yaw14), pz = -Math.sin(yaw14);
+    return [b.cx - px * b.w / 2, b.cz - pz * b.w / 2];
+  };
+  const lePre = leftEdge(L3D.state.data.annotations[0]);
+  L3D.beginEdit(0, 3, 'edge', { t0: -yaw14, cx0: 8, cz0: 18, w0: 1.6, l0: 3.9, sx: 1, sy: 0 });
+  L3D.editTo(3, 'edge', { x: 9, z: 18 });
+  close(L3D.state.data.annotations[0].l, 3.9, 1e-9, 'edge 单轴 l 不变');
+  const leMid = leftEdge(L3D.state.data.annotations[0]);
+  close(leMid[0], lePre[0], 1e-9, 'edge 对边（左）固定 x');
+  close(leMid[1], lePre[1], 1e-9, 'edge 对边（左）固定 z');
+  L3D.endEdit();
+  L3D.undo();
+  ok(JSON.stringify(L3D.state.data.annotations[0]) === pre14e, 'edge 拖动可撤销');
+
   console.log(`smoke_web3d: ${n} 断言，${process.exitCode ? 'FAIL' : 'OK'}`);
 })();

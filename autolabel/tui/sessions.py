@@ -23,6 +23,18 @@ from typing import Any
 
 SESSION_LOG_PATH = Path("logs/chat_sessions.jsonl")
 
+# 显式导出（mypy no_implicit_reexport：app.py 的 from-import 链下测试可直接引用）
+__all__ = [
+    "SESSION_LOG_PATH",
+    "append_session_line",
+    "list_sessions",
+    "load_sessions",
+    "make_session_id",
+    "safe_float",
+    "safe_int",
+    "session_messages",
+]
+
 
 def make_session_id(ts: float | None = None) -> str:
     """时间戳会话 id（YYYY-MM-DDTHH-MM-SS；同秒内 /new 连续两次会撞 id，

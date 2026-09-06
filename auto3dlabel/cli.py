@@ -555,6 +555,9 @@ def chat(
         seg_model_name=seg_model or plan.seg_model,
         out_dir=out_dir,
         max_iterations=max_iterations,
+        # 审查 #27：agent loop 每轮迭代推进一次协议行（总步数 = max_iterations；
+        # 提前收尾时进度不到满格，完成信号尾行 1/1 兜底）
+        progress_cb=lambda done, total: print_al_progress(done, total),
     )
     elapsed = time.perf_counter() - t0
     triage = triage_3d(boxes)
@@ -726,4 +729,10 @@ def nuscenes_queue(
 
 
 if __name__ == "__main__":
-    app()
+    # 审查 #24：SIGTERM（TUI /cancel）→ KeyboardInterrupt 在此收敛——不把整段
+    # traceback 刷进 TUI 对话区（stderr 合并 stdout），提示后按取消退出码 130
+    try:
+        app()
+    except KeyboardInterrupt:
+        console.print("[dim]已取消[/dim]")
+        raise typer.Exit(130)

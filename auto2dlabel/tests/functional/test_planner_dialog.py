@@ -550,8 +550,9 @@ def test_chat_command_no_key_full_chain(monkeypatch: Any) -> None:
     llm.has_credentials = False
     executed: list[TaskPlan] = []
 
-    def _fake_execute(plan: TaskPlan, **_kw: Any) -> None:
+    def _fake_execute(plan: TaskPlan, **_kw: Any) -> int:
         executed.append(plan)
+        return 0  # #8 新契约：execute_plan 返回 tracking 失败数
 
     monkeypatch.setattr(cli_commands, "create_client", lambda provider: llm)
     monkeypatch.setattr(cli_commands, "execute_plan", _fake_execute)
@@ -596,8 +597,9 @@ def test_chat_command_dialog_flow(monkeypatch: Any) -> None:
     ])
     executed: list[TaskPlan] = []
 
-    def _fake_execute(plan: TaskPlan, **_kw: Any) -> None:
+    def _fake_execute(plan: TaskPlan, **_kw: Any) -> int:
         executed.append(plan)
+        return 0  # #8 新契约：execute_plan 返回 tracking 失败数
 
     monkeypatch.setattr(cli_commands, "create_client", lambda provider: llm)
     monkeypatch.setattr(cli_commands, "execute_plan", _fake_execute)
@@ -644,8 +646,9 @@ def test_chat_command_complete_no_wait(monkeypatch: Any) -> None:
     ])
     executed: list[TaskPlan] = []
 
-    def _fake_execute(plan: TaskPlan, **_kw: Any) -> None:
+    def _fake_execute(plan: TaskPlan, **_kw: Any) -> int:
         executed.append(plan)
+        return 0  # #8 新契约：execute_plan 返回 tracking 失败数
 
     monkeypatch.setattr(cli_commands, "create_client", lambda provider: llm)
     monkeypatch.setattr(cli_commands, "execute_plan", _fake_execute)

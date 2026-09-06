@@ -279,6 +279,11 @@ class LLMClient:
         # provider 注册名（v1.0 P2 台账维度；默认 "" 向后兼容手构造客户端）
         self.provider_name = provider_name
 
+    @property
+    def client(self) -> Any:
+        """SDK 客户端实例（惰性构造；子类实现——OpenAIClient/AnthropicClient）。"""
+        raise NotImplementedError
+
     def chat(
         self,
         messages: list[dict[str, Any]],

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -179,8 +180,9 @@ async def smoke() -> None:
         await pilot.press(*"/new", "enter")
         await pilot.pause()
         sid = app._session_id
+        # 后缀容错：同秒内多次 /new 加 -N 防撞车（#17）
         sid_ok = app._seq == 0 and bool(
-            re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}", sid)
+            re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(-\d+)?", sid)
         )
         check("/new 新会话", sid_ok)
         await pilot.press(*"检测汽车", "enter")
@@ -210,7 +212,10 @@ async def smoke() -> None:
         orig_spawn = webctl_mod.spawn_web_server
         orig_wait = webctl_mod.wait_port
 
-        def _fake_scan(d2: Any = None, d3: Any = None) -> list[ReviewStats]:
+        def _fake_scan(
+            review_dir_2d: Path = Path("outputs"),
+            review_dir_3d: Path = Path("outputs/kitti3d/reviews"),
+        ) -> list[ReviewStats]:
             return [
                 ReviewStats("2d", "outputs", 8, 2, 0, 1, 2),
                 ReviewStats("3d", "outputs/kitti3d/reviews", 9, 1, 4, 1, 1),

@@ -21,7 +21,7 @@ from auto2dlabel.configs.model_catalog import SEGMENTATION_MODELS, TORCHVISION_S
 from auto2dlabel.schema.annotation import Annotation, Bbox
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL, TaskPlan, TaskStep
 from auto2dlabel.tools.constraints import ReferentialConstraint
-from auto2dlabel.tools.tracking import DEFAULT_REID_MODEL
+from auto2dlabel.tools.tracking import DEFAULT_REID_MODEL, TrackingCancelledError
 
 if TYPE_CHECKING:
     from auto2dlabel.agent.evaluate import QualityReport
@@ -66,7 +66,7 @@ def execute_plan(
     llm: Any | None = None,
     refer_l2: bool = False,
     refer_l3: bool = False,
-) -> None:
+) -> int:
     """顺序执行 TaskPlan 的每个步骤。
 
     explicit_batch_size/explicit_num_workers：CLI 显式指定的批量推理超参数
@@ -82,9 +82,15 @@ def execute_plan(
     chat 由关系词自动触发或 --refer-l2 显式启用）。
     refer_l3：tracking 步骤直用 v0.5 指代 L3（Qwen2-VL-7B，GPU）；refer_l2
     路径默认阶梯升级（L2 失败自动升级 L3）。
+
+    Returns:
+        tracking 步骤失败数（审查 #8：chat 层据此非零退出；取消
+        TrackingCancelledError 短路不计数，「未找到图像」/图级失败隔离
+        等既有 exit 0 语义也不进计数）。
     """
     _plan_t0 = _time.time()
     steps_results: list[dict[str, Any]] = []
+    tracking_failures = 0
 
     # 启动显存体检（2026-08-29）：上次运行未正常退出（Ctrl+Z 挂起/终端未关）
     # 残留进程占显存 → 开跑前黄字提醒（不阻断，单图 OOM 时另有跳过保护）
@@ -101,9 +107,10 @@ def execute_plan(
         source_path = Path(step.source)
 
         # 序列跟踪（视频/帧目录）：走 TrackingTool 管线（与 run --track 共用，
-        # 不进逐图 collect_images 循环）
+        # 不进逐图 collect_images 循环）；取消（TrackingCancelledError）短路
+        # 跳过剩余步骤，失败（ValueError）计数后仅跳过本步
         if step.task_type == "tracking":
-            _execute_tracking_step(
+            result = _execute_tracking_step(
                 step,
                 use_bot_sort=use_bot_sort,
                 reid_model_name=reid_model_name,
@@ -117,6 +124,11 @@ def execute_plan(
                 refer_l3=refer_l3,
                 raw_instruction=plan.raw_instruction,
             )
+            if result == "cancelled":
+                console.print("[dim]已取消，跳过剩余步骤[/dim]")
+                break
+            if result == "failed":
+                tracking_failures += 1
             continue
 
         # 收集图像
@@ -232,6 +244,7 @@ def execute_plan(
                 print_al_progress(oom_i + 1, len(images))
 
     _log_plan(plan, steps_results, _plan_t0)
+    return tracking_failures
 
 
 def _execute_tracking_step(
@@ -247,7 +260,7 @@ def _execute_tracking_step(
     refer_l2: bool = False,
     refer_l3: bool = False,
     raw_instruction: str = "",
-) -> None:
+) -> str | None:
     """tracking 步骤：委托 TrackingTool 序列管线（与 run --track 同一实现）。
 
     batch/workers 取「CLI 显式 > step 字段」（与其余任务一致的优先级）；
@@ -257,6 +270,11 @@ def _execute_tracking_step(
     由 run 路径注入）→ TrackingTool 过滤层。refer_l2/refer_l3 启用 v0.5
     指代 L2/L3（首帧解析锁定，替代属性/方位链、ROI 仍叠加）；refer_l3
     直用 L3（GPU），refer_l2 为阶梯升级（L2 失败自动升级 L3）。
+
+    Returns:
+        None = 本步正常完成；"cancelled" = 跟踪被取消（TrackingCancelledError，
+        不视为失败，execute_plan 短路剩余步骤）；"failed" = 本步失败
+        （红字已打印，计入失败计数，后续步骤照常）。
     """
     from auto2dlabel.tools.tracking import TrackingTool
 
@@ -304,9 +322,14 @@ def _execute_tracking_step(
             step.source, step.prompts, confidence_threshold=step.confidence_threshold,
             progress_cb=print_al_progress,
         )
+    except TrackingCancelledError:
+        # 审查 #7：取消不视为失败——return 取消标记短路剩余步骤
+        # （TrackingCancelledError 是 ValueError 子类，分支必须在 ValueError 前）
+        console.print("[dim]已取消跟踪[/dim]")
+        return "cancelled"
     except ValueError as e:
         console.print(f"[red]跟踪失败: {e}[/red]")
-        return
+        return "failed"
     steps_results.append(
         {
             "step_id": step.step_id,
@@ -320,6 +343,7 @@ def _execute_tracking_step(
             "video_path": summary.get("video_path"),
         }
     )
+    return None
 
 
 def _apply_batch_strategy(

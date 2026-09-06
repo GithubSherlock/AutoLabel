@@ -24,9 +24,14 @@ from autolabel.tui.app import ChatApp, _cancel_procs, _subprocess_run
 
 
 @pytest.fixture(autouse=True)
-def _session_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """P4 会话日志重定向 tmp_path（防测试写真实 logs/）。"""
-    monkeypatch.setattr(app_module, "SESSION_LOG_PATH", tmp_path / "chat_sessions.jsonl")
+def _session_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """P4 会话日志重定向 tmp_path（防测试写真实 logs/）——app 内绑定与
+    sessions 模块符号双 patch；返回 path 供用例直读（顶层 from-import 的
+    本地绑定是 patch 前快照，不可用）。"""
+    path = tmp_path / "chat_sessions.jsonl"
+    monkeypatch.setattr(app_module, "SESSION_LOG_PATH", path)
+    monkeypatch.setattr("autolabel.tui.sessions.SESSION_LOG_PATH", path)
+    return path
 
 
 def _chat_texts(app: ChatApp) -> list[str]:
@@ -537,7 +542,9 @@ def test_progress_monotonic_across_step_switch() -> None:
     asyncio.run(main())
 
 
-def test_task_result_lands_in_originating_session(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_task_result_lands_in_originating_session(
+    monkeypatch: pytest.MonkeyPatch, _session_log: Path,
+) -> None:
     """#18 会话归属：任务发起后 /new，其终态行必须落回发起时会话——
     不能跟随当前 self._session_id 串到新会话。"""
     gate = threading.Event()
@@ -549,6 +556,7 @@ def test_task_result_lands_in_originating_session(monkeypatch: pytest.MonkeyPatc
             app._submit_instruction("检测汽车")
             await _wait_for(pilot, lambda: bool(app._tasks))
             first_session = app._tasks[1].session_id
+            await asyncio.sleep(1.1)  # sid 秒级粒度：跨秒 /new 才产生新 id
             app._slash_command("/new")
             await pilot.pause()
             assert app._session_id != first_session
@@ -557,7 +565,7 @@ def test_task_result_lands_in_originating_session(monkeypatch: pytest.MonkeyPatc
         # 任务终态行在发起会话、不在新会话
         entries = [
             json.loads(line)
-            for line in app_module.SESSION_LOG_PATH.read_text(encoding="utf-8").splitlines()
+            for line in _session_log.read_text(encoding="utf-8").splitlines()
         ]
         results = [
             e for e in entries

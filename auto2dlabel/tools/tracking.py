@@ -353,7 +353,7 @@ class TrackingTool(Tool):
             progress_cb: 每帧完成回调 (done, total)——v1.0 P3 进度协议
                 （与 generate_review_queue 同挂点，TUI 任务面板消费）。
             cancel_event: 置位 → 抛 TrackingCancelledError（抽帧循环/帧循环
-                检查；finally 链保证 video_writer.release + .tmp 改名收尾；
+                检查；finally 链保证 video_writer.release + 隐藏临时名改名收尾；
                 取消时 MOT 不产出，成片仅含已写入帧（release 后可回读））。
 
         Returns:
@@ -481,10 +481,13 @@ class TrackingTool(Tool):
 
         # 标注成片视频输出（仅视频源；帧目录不产片——避免污染数据集目录）。
         # 位置：源视频同目录 output_<原名>.mp4；帧率取源视频（异常回退 30）。
-        # 审查 #3 防损坏：写盘用 output_<原名>.mp4.tmp 临时名——VideoWriter 在
-        # release 前文件头不完整，SIGKILL 打穿 finally 若直写正式名会留下
-        # 「已存在且不可回读」的损坏 .mp4（下游误当成功成片）；.tmp 命名先写、
-        # finally 内 release 后 os.replace 原子改名，硬杀只残留可辨识的 .tmp。
+        # 审查 #3 防损坏：写盘用同目录隐藏临时名 .output_<原名>.mp4——VideoWriter
+        # 在 release 前文件头不完整，SIGKILL 打穿 finally 若直写正式名会留下
+        # 「已存在且不可回读」的损坏 .mp4（下游误当成功成片）。临时名先写、
+        # finally 内 release 后 os.replace 原子改名，硬杀只残留可辨识的临时文件
+        # （正式名不产生）。注：临时名须以 .mp4 结尾——OpenCV 按文件扩展名选
+        # 容器 muxer，output_*.mp4.tmp 这类 .tmp 后缀会导致 VideoWriter 开不了
+        # （2026-09-07 实测 isOpened=False）。
         video_writer: Any | None = None
         video_path: Path | None = None
         source_path = Path(source)
@@ -503,7 +506,7 @@ class TrackingTool(Tool):
             first = cv2.imread(str(frames[0]))
             if first is not None:
                 h, w = first.shape[:2]
-                video_path = source_path.parent / f"output_{source_path.stem}.mp4.tmp"
+                video_path = source_path.parent / f".output_{source_path.stem}.mp4"
                 try:
                     video_writer = cv2.VideoWriter(
                         str(video_path),
@@ -661,14 +664,16 @@ class TrackingTool(Tool):
             if video_writer is not None:
                 video_writer.release()
             # 成片改名（审查 #3）：release 后文件才可回读；SIGKILL 打穿 finally
-            # 时 .tmp 残留、正式名不产生——下游不会误读损坏成片
-            if video_path is not None and video_path.suffix == ".tmp":
-                _final_video = video_path.with_suffix("")
+            # 时隐藏临时名残留、正式名不产生——下游不会误读损坏成片
+            # （临时名 = .output_*.mp4 点前缀同目录文件，去掉前导点即正式名；
+            #   不能选 *.mp4.tmp——OpenCV 按扩展名选 muxer，.tmp 后缀开不了）
+            if video_path is not None and video_path.name.startswith(".output_"):
+                _final_video = video_path.with_name(video_path.name[1:])
                 try:
                     os.replace(video_path, _final_video)
                     video_path = _final_video
                 except OSError as _e:
-                    console.print(f"[yellow]⚠ 成片改名失败（保留 .tmp）: {_e}[/yellow]")
+                    console.print(f"[yellow]⚠ 成片改名失败（保留隐藏临时名）: {_e}[/yellow]")
                     video_path = None
 
         # MOT 导出（全帧合并，frame 从 1 起）

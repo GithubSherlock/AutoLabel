@@ -20,6 +20,7 @@ from auto2dlabel.cli_commands import (
     sample_command,
     tools_command,
 )
+from auto2dlabel.cli_common import console
 from auto2dlabel.cli_run import run_command
 
 app = typer.Typer(
@@ -254,4 +255,10 @@ def chat(
 
 
 if __name__ == "__main__":
-    app()
+    # 审查 #24：SIGTERM（TUI /cancel）→ KeyboardInterrupt 在此收敛——不把整段
+    # traceback 刷进 TUI 对话区（stderr 合并 stdout），提示后按取消退出码 130
+    try:
+        app()
+    except KeyboardInterrupt:
+        console.print("[dim]已取消[/dim]")
+        raise typer.Exit(130)

@@ -288,7 +288,7 @@ def chat_command(
 
     # ---- Step 5: 执行 TaskPlan ----
     console.print(f"\n[bold]开始执行 {len(plan.steps)} 步任务...[/bold]\n")
-    execute_plan(
+    failures = execute_plan(
         plan,
         sahi=sahi,
         explicit_batch_size=batch_size,
@@ -301,6 +301,12 @@ def chat_command(
         refer_l2=use_l2,
         refer_l3=use_l3,
     )
+    # 审查 #8：tracking 步骤失败计数 → 非零退出（TUI 子进程据此 failed 终态
+    # 与红字一致；直连 CLI 用户拿到非零退出码）；图级失败隔离/「未找到图像」
+    # /单帧护栏跳过等既有 exit 0 语义不进计数
+    if failures > 0:
+        console.print(f"[red]⚠ {failures} 个跟踪步骤失败[/red]")
+        raise typer.Exit(code=1)
 
     console.print("\n[bold green]✓ 全部任务完成[/bold green]")
 

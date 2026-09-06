@@ -43,7 +43,7 @@
       ? `<figure>${hasCalib
           ? `<div class="cam-wrap"><img id="cam-img" src="api/review-image?path=${encodeURIComponent(d.image_path)}"><canvas id="cam-overlay"></canvas></div>`
           : `<img src="api/review-image?path=${encodeURIComponent(d.image_path)}">`
-        }<figcaption>相机图${hasCalib ? " · 点/拖投影框选中并平移" : ""}</figcaption></figure>` : "";
+        }<figcaption>相机图${hasCalib ? " · 点框选中/拖动平移 · 拖角点边缩放 · 边缘三角=视野外框" : ""}</figcaption></figure>` : "";
     const bev = d.bev_path
       ? `<figure><img src="api/review-image?path=${encodeURIComponent(d.bev_path)}"><figcaption>BEV 鸟瞰</figcaption></figure>` : "";
     // nuScenes 6 相机：image_path 只存在于 frame-data payload（_nuscenes_payload 计算
@@ -105,36 +105,60 @@
     if (!ov || !img || !p2) return;
     const ctx = ov.getContext("2d");
     if (!ctx) return; // jsdom 无 canvas 实现：绘制静默跳过（结构断言靠 DOM）
-    const sx = ov.width / (img.naturalWidth || 1); // 原生像素 → 画布像素
+    const W = img.naturalWidth || 1, H = img.naturalHeight || 1;
+    const sx = ov.width / W; // 原生像素 → 画布像素
     ctx.setTransform(sx, 0, 0, sx, 0, 0);
-    ctx.clearRect(0, 0, img.naturalWidth, img.naturalHeight);
+    ctx.clearRect(0, 0, W, H);
     (L3D.state.data.annotations || []).forEach((ann, i) => {
       if (ann.cx == null) return;
       const del = L3D.state.deleted.has(i);
       const sel = L3D.state.selected === i;
-      const c2 = L3D.boxCorners2d(p2, L3D.boxToCorners(ann));
+      const geom = L3D.camOverlayGeom(p2, ann, W, H);
       ctx.strokeStyle = del ? "rgba(229,83,75,.55)"
         : (sel ? "#ffd166" : "#" + L3D.colorFor(ann.label).toString(16).padStart(6, "0"));
       ctx.lineWidth = (del ? 1 : 2) / sx;
       ctx.setLineDash(del ? [6, 4] : []);
       ctx.beginPath();
-      for (const e of L3D.edgesOf(c2)) {
-        const [a, b] = e;
-        if (!a || !b) continue;
-        ctx.moveTo(a[0], a[1]);
-        ctx.lineTo(b[0], b[1]);
+      for (const s of geom.segs) { // 边已裁剪到图像内（视野外部分不画，避免出画布）
+        ctx.moveTo(s[0], s[1]);
+        ctx.lineTo(s[2], s[3]);
       }
       ctx.stroke();
       ctx.setLineDash([]);
-      if (!del && c2[0]) {
+      if (del) return;
+      ctx.font = `${12 / sx}px sans-serif`;
+      if (geom.segs.length) { // 可见框：标签放第一条可见边起点
         ctx.fillStyle = ctx.strokeStyle;
-        ctx.font = `${12 / sx}px sans-serif`;
-        ctx.fillText(ann.label, c2[0][0] + 3 / sx, c2[0][1] - 3 / sx);
+        ctx.fillText(ann.label, geom.segs[0][0] + 3 / sx, geom.segs[0][1] - 3 / sx);
+      }
+      if (geom.indicator) { // 完全在相机视野外：最近图像边缘画三角标记 + 标签（可点击选中）
+        const ind = geom.indicator;
+        ctx.fillStyle = sel ? "#ffd166"
+          : "#" + L3D.colorFor(ann.label).toString(16).padStart(6, "0");
+        const s6 = 6 / sx;
+        ctx.beginPath();
+        if (ind.dir === "l") { ctx.moveTo(0, ind.v); ctx.lineTo(s6, ind.v - s6); ctx.lineTo(s6, ind.v + s6); }
+        else if (ind.dir === "r") { ctx.moveTo(W, ind.v); ctx.lineTo(W - s6, ind.v - s6); ctx.lineTo(W - s6, ind.v + s6); }
+        else if (ind.dir === "t") { ctx.moveTo(ind.u, 0); ctx.lineTo(ind.u - s6, s6); ctx.lineTo(ind.u + s6, s6); }
+        else { ctx.moveTo(ind.u, H); ctx.lineTo(ind.u - s6, H - s6); ctx.lineTo(ind.u + s6, H - s6); }
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillText(ann.label,
+          Math.max(2 / sx, Math.min(W - 70 / sx, ind.u + 3 / sx)), ind.v - 3 / sx);
+      }
+      if (sel) { // 选中框手柄：底角 4 + 底边中点 4（黄色圆，拖动 = 地面 resize）
+        ctx.fillStyle = "#ffd166";
+        for (const hd of geom.handles) {
+          const r = (hd.mode === "corner" ? 4 : 3) / sx;
+          ctx.beginPath();
+          ctx.arc(hd.u, hd.v, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     });
   }
 
-  let camDrag = null; // {cy, x0, y0, moved}：相机图拖动会话（view=3 'move' 编辑）
+  let camDrag = null; // {mode, yPlane, x0, y0, moved}：相机图拖动会话（view=3 编辑）
   let camResizeHandler = null;
   function bindCamOverlay() {
     const ov = $("#cam-overlay"), img = $("#cam-img");
@@ -151,19 +175,60 @@
     window.addEventListener("resize", camResizeHandler);
     fit();
 
+    // 指示标记命中表：每框 geom（下标 = annotations 下标；删除框不建）
+    const indicatorGeoms = () => {
+      const p2 = L3D.state.payload && L3D.state.payload.p2;
+      if (!p2) return [];
+      return (L3D.state.data.annotations || []).map((a, i) => {
+        if (L3D.state.deleted.has(i) || a.cx == null) return null;
+        return L3D.camOverlayGeom(p2, a, img.naturalWidth || 1, img.naturalHeight || 1);
+      });
+    };
+
     ov.onmousedown = (e) => {
       const p = camNativePoint(e);
       if (!p) return;
+      const pl = L3D.state.payload;
+      if (!pl || !pl.p2) return;
+      const camCenter = pl.cam_center || [0, 0, 0]; // 旧 payload 兜底（零平移近似）
+      const W = img.naturalWidth || 1, H = img.naturalHeight || 1;
+
+      // 1) 选中框手柄命中（角点 > 边中点）→ beginEdit corner/edge（地面 resize）
+      const sel = L3D.state.selected;
+      if (sel != null) {
+        const ann = L3D.state.data.annotations[sel];
+        if (ann && ann.cx != null) {
+          const hd = L3D.camHitHandle(L3D.camOverlayGeom(pl.p2, ann, W, H), p.u, p.v);
+          if (hd) {
+            const yaw = L3D.rotationYToYaw(ann.rotation_y || 0);
+            const yPlane = ann.cy + ann.h / 2; // 底面（cam y 向下：cy+h/2 = 地面）
+            const g0 = L3D.p2ToGround(pl.k_inv, camCenter, yPlane, p.u, p.v);
+            if (!g0) return; // 点在地平线附近无地面解
+            L3D.beginEdit(sel, 3, hd.mode, {
+              t0: -yaw, cx0: ann.cx, cz0: ann.cz, w0: ann.w, l0: ann.l, sx: hd.sx, sy: hd.sy,
+            });
+            camDrag = { mode: hd.mode, yPlane, x0: e.clientX, y0: e.clientY, moved: false };
+            return;
+          }
+        }
+      }
+
+      // 2) 视野外指示标记命中 → 选中该框（几何编辑走 Top 视图手柄/拖进视野后再调）
+      const ii = L3D.camHitIndicator(indicatorGeoms(), p.u, p.v);
+      if (ii != null) {
+        L3D.selectObject(ii);
+        return;
+      }
+
+      // 3) 框边命中 → 选中 + 地面平移（move）
       const i = camHitTest(p.u, p.v);
       if (i == null) return;
       L3D.selectObject(i);
       const ann = L3D.state.data.annotations[i];
-      const pl = L3D.state.payload;
-      const camCenter = pl.cam_center || [0, 0, 0]; // 旧 payload 兜底（零平移近似）
       const g0 = L3D.p2ToGround(pl.k_inv, camCenter, ann.cy, p.u, p.v);
-      if (!g0) return; // 点在地平线附近无地面解
+      if (!g0) return;
       L3D.beginEdit(i, 3, "move", { cx0: ann.cx, cz0: ann.cz, x0: g0[0], z0: g0[1] });
-      camDrag = { cy: ann.cy, x0: e.clientX, y0: e.clientY, moved: false };
+      camDrag = { mode: "move", yPlane: ann.cy, x0: e.clientX, y0: e.clientY, moved: false };
     };
     ov.onmousemove = (e) => {
       if (!camDrag) return;
@@ -174,9 +239,9 @@
       }
       if (!camDrag.moved) return;
       const pl = L3D.state.payload;
-      const g = L3D.p2ToGround(pl.k_inv, pl.cam_center || [0, 0, 0], camDrag.cy, p.u, p.v);
+      const g = L3D.p2ToGround(pl.k_inv, pl.cam_center || [0, 0, 0], camDrag.yPlane, p.u, p.v);
       if (!g) return;
-      L3D.editTo(3, "move", { x: g[0], z: g[1] });
+      L3D.editTo(3, camDrag.mode, { x: g[0], z: g[1] });
     };
     const up = () => {
       if (camDrag) { L3D.endEdit(); camDrag = null; }

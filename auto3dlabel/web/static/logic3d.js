@@ -102,6 +102,102 @@
     c.cz = drag.cz0 + (ptr.z - drag.z0);
   }
 
+  // ── v1.0 P2 相机图叠加几何纯函数（app.js 绘制 + smoke 数值断言共用）──
+  // 图像范围 [0,w]×[0,h]；投影坐标可为 null（相机后方角）。
+  // 投影线两端的 null 处理：任一端 null → 该边不可画（穿越焦平面的边极少且无良定义）。
+
+  // Liang-Barsky 线段裁剪：a/b = [u,v] 投影点（非 null）→ 图像矩形内段 [x1,y1,x2,y2]；
+  // 完全在图像外 → null（app.js 跳过该边）。
+  function clipSegImage(a, b, w, h) {
+    let t0 = 0, t1 = 1;
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const p = [-dx, dx, -dy, dy];
+    const q = [a[0], w - a[0], a[1], h - a[1]];
+    for (let k = 0; k < 4; k++) {
+      if (Math.abs(p[k]) < 1e-9) {
+        if (q[k] < 0) return null; // 平行且在边界外
+      } else {
+        const r = q[k] / p[k];
+        if (p[k] < 0) { if (r > t1) return null; t0 = Math.max(t0, r); }
+        else { if (r < t0) return null; t1 = Math.min(t1, r); }
+      }
+    }
+    return [a[0] + t0 * dx, a[1] + t0 * dy, a[0] + t1 * dx, a[1] + t1 * dy];
+  }
+
+  // 相机图叠加几何：框 corners_cam 8x3 → {segs, handles, indicator}
+  // - segs: 12 边裁剪到图像后的段 [[x1,y1,x2,y2]...]（无 null 端点才裁剪）
+  // - handles: 底角 4（corner，sx/sy 同 Top 视图 CORNER_SIGN）+ 底边中点 4（edge，
+  //   EDGE_SIGN），仅当该手柄真实投影在图像内（视野外手柄拖动反投影无良定义 → 不画）
+  // - indicator: 框完全出界时最近图像边缘的指示标记 {u,v,dir}（dir: 'l'|'r'|'t'|'b'）；
+  //   部分可见 → null。v/u 用有效角投影均值 clamp 到边缘内。
+  function camOverlayGeom(p2, ann, w, h) {
+    const corners = boxToCorners(ann);
+    const c2 = boxCorners2d(p2, corners);
+    const segs = [];
+    for (const e of edgesOf(c2)) {
+      const [a, b] = e;
+      if (!a || !b) continue;
+      const s = clipSegImage(a, b, w, h);
+      if (s) segs.push(s);
+    }
+    // 手柄：底角 4（corners 4-7 = 底面）+ 底边中点 4（右/尾/左/头，同 viewer3d EDGE_PAIRS）
+    const CORNER_SIGN = [[1, 1], [1, -1], [-1, -1], [-1, 1]]; // 右前/右后/左后/左前
+    const EDGE_PAIRS = [[4, 5], [5, 6], [6, 7], [7, 4]];      // 右/尾/左/头（底面）
+    const EDGE_SIGN = [[1, 0], [0, -1], [-1, 0], [0, 1]];
+    const inImg = (p) => p && p[0] >= 0 && p[0] <= w && p[1] >= 0 && p[1] <= h;
+    const handles = [];
+    for (let i = 0; i < 4; i++) {
+      const p = c2[4 + i];
+      if (inImg(p)) handles.push({ u: p[0], v: p[1], mode: "corner", sx: CORNER_SIGN[i][0], sy: CORNER_SIGN[i][1] });
+    }
+    for (let i = 0; i < 4; i++) {
+      const [ai, bi] = EDGE_PAIRS[i];
+      const a = c2[ai], b = c2[bi];
+      if (!a || !b) continue;
+      const p = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+      if (inImg(p)) handles.push({ u: p[0], v: p[1], mode: "edge", sx: EDGE_SIGN[i][0], sy: EDGE_SIGN[i][1] });
+    }
+    // 指示标记：segs 为空但框有效投影存在（至少一角可投影）→ 最近边缘
+    let indicator = null;
+    if (segs.length === 0) {
+      const vis = c2.filter((p) => p !== null);
+      if (vis.length) {
+        const u = vis.reduce((s, p) => s + p[0], 0) / vis.length;
+        const v = vis.reduce((s, p) => s + p[1], 0) / vis.length;
+        const du = u < 0 ? -u : (u > w ? u - w : Infinity);
+        const dv = v < 0 ? -v : (v > h ? v - h : Infinity);
+        if (du <= dv) indicator = { u: u < 0 ? 0 : w, v: Math.max(0, Math.min(h, v)), dir: u < 0 ? "l" : "r" };
+        else indicator = { u: Math.max(0, Math.min(w, u)), v: v < 0 ? 0 : h, dir: v < 0 ? "t" : "b" };
+      }
+    }
+    return { segs, handles, indicator };
+  }
+
+  // 相机图手柄命中（仅选中框的手柄）：返回手柄对象或 null（角点 10px 优先于边中点 8px）
+  function camHitHandle(geom, u, v) {
+    let best = null, bestD = Infinity;
+    for (const hd of geom.handles) {
+      const d = Math.hypot(hd.u - u, hd.v - v);
+      const tol = hd.mode === "corner" ? 10 : 8;
+      if (d < tol && (d < bestD || (d < bestD + 1e-9 && hd.mode === "corner"))) {
+        bestD = d; best = hd;
+      }
+    }
+    return best;
+  }
+
+  // 相机图指示标记命中（视野外框选中入口）：{u,v} 12px 内
+  function camHitIndicator(geoms, u, v) {
+    let best = null, bestD = 12;
+    geoms.forEach((g, i) => {
+      if (!g.indicator) return;
+      const d = Math.hypot(g.indicator.u - u, g.indicator.v - v);
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    return best;
+  }
+
   // ── v0.4 P1 cuboid 编辑纯函数 ───────────────────────────────
   // 相机系与 Box3D 语义对齐（x 右 y 下 z 前）；Top 视图平面 = (x, z)，
   // Side 视图平面 = (z, y)。yaw↔rotation_y 照 tools/geometry.py 唯一转换公式
@@ -368,6 +464,8 @@
     } else if (view === 3) {
       if (mode === 'move') {
         moveGroundEdit(c, e.drag, ptr);
+      } else if (mode === 'corner' || mode === 'edge') {
+        resizeTopEdit(c, e.drag, ptr); // 相机图角/边拖动 = 地面平面 resize（公式同 Top 视图）
       }
     }
     c.yaw = wrapPi(c.yaw);
@@ -417,6 +515,7 @@
     wrapPi, rotationYToYaw, yawToRotationY, boxToCorners,
     resizeTopEdit, rotateYawEdit, resizeSideEdit, moveSideEdit, MIN_BOX3D,
     projectP2, p2ToGround, boxCorners2d, moveGroundEdit,
+    clipSegImage, camOverlayGeom, camHitHandle, camHitIndicator,
     COLOR_MAP, SEL_COLOR, colorFor,
     beginEdit, editTo, endEdit, pushUndo, undo, redo,
   };

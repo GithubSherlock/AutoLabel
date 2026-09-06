@@ -341,7 +341,7 @@ def test_web_retry_after_spawned_flag_cleared(monkeypatch: pytest.MonkeyPatch) -
     asyncio.run(main())
 
 
-def test_port_of_non_numeric_env_falls_back() -> None:
+def test_port_of_non_numeric_env_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     """#14 port_of 容错：env 非数字（误配）→ 回退默认端口，/web 不崩。"""
     from autolabel.tui import webctl
 
