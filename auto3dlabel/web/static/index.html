@@ -22,6 +22,9 @@
   .imgs { display:flex; gap:12px; flex-wrap:wrap; }
   .imgs figure { margin:0; }
   .imgs img { max-width:620px; max-height:300px; border:1px solid var(--border); border-radius:6px; background:#000; }
+  .cam-wrap { position:relative; display:inline-block; line-height:0; }
+  .cam-wrap img { display:block; }
+  #cam-overlay { position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; }
   .imgs figcaption { font-size:12px; color:var(--dim); margin-top:4px; }
   table { border-collapse:collapse; width:100%; margin-top:14px; }
   th,td { border:1px solid var(--border); padding:6px 10px; text-align:left; font-size:13px; }
@@ -60,9 +63,9 @@
     <div class="view-hint">四视图：透视（拖拽旋转 · 滚轮缩放 · 点击选中框）+ Top/Side/Front 正交（自动聚焦选中框）· 表格双击类别改标签 · <b>编辑（选中后）</b>：Top 拖角点/边改尺寸、拖黄色球旋转车头；Side 拖顶/底面改高度、拖前/后面移动——松开完成一次编辑（可撤销）</div>
   </div>
 </main>
-<script src="static/three.min.js"></script>
-<script src="static/logic3d.js"></script>
-<script src="static/viewer3d.js"></script>
-<script src="static/app.js"></script>
+<script src="static/three.min.js?v=3"></script>
+<script src="static/logic3d.js?v=3"></script>
+<script src="static/viewer3d.js?v=3"></script>
+<script src="static/app.js?v=3"></script>
 </body>
 </html>

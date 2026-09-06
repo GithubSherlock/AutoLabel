@@ -28,11 +28,13 @@ class _FakeTool:
         source: str,
         prompts: list[str],
         confidence_threshold: float = 0.1,
+        progress_cb: Any = None,
     ) -> dict[str, Any]:
         self.last = {
             "source": source,
             "prompts": prompts,
             "confidence_threshold": confidence_threshold,
+            "progress_cb": progress_cb,
         }
         return {
             "frames": 5,
@@ -91,11 +93,10 @@ def test_tracking_step_short_circuits_into_tool(
     assert tool.kwargs["use_bot_sort"] is True
     assert tool.kwargs["batch_size"] == 2  # CLI 显式优先
     assert tool.kwargs["export_format"] == "coco"  # mot → 逐帧 coco 映射
-    assert tool.last == {
-        "source": "/nonexistent/video.mp4",
-        "prompts": ["person", "car"],
-        "confidence_threshold": 0.1,
-    }
+    assert tool.last["source"] == "/nonexistent/video.mp4"
+    assert tool.last["prompts"] == ["person", "car"]
+    assert tool.last["confidence_threshold"] == 0.1
+    assert callable(tool.last["progress_cb"])  # v1.0 P3 协议行默认挂接
 
     # steps_results 汇总并入顶层 chat 日志
     assert len(logged) == 1
@@ -124,6 +125,7 @@ def test_tracking_value_error_skips_step_gracefully(
             source: str,
             prompts: list[str],
             confidence_threshold: float = 0.1,
+            progress_cb: Any = None,
         ) -> dict[str, Any]:
             raise ValueError("未找到可跟踪的帧/视频")
 

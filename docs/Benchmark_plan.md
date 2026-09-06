@@ -267,8 +267,8 @@ Benchmark 版本随主项目版本对齐，不单独立版本号。
 
 | 门 | 命令 | 标准 |
 | --- | --- | --- |
-| 静态检查 | `pyright` / `mypy --strict` / `ruff check` | 0 errors（`pyproject.toml` 已配） |
-| 单元测试 | `pytest auto2dlabel/tests/` | 全绿（`test_benchmark_metrics.py` 覆盖 IoU/AP 边界） |
+| 静态检查 | `pyright` / `mypy autolabel auto2dlabel auto3dlabel` / `ruff check` | 0 errors（`pyproject.toml` 已配；mypy 三包写全，漏 autolabel 会漏检） |
+| 单元测试 | `pytest auto2dlabel/tests auto3dlabel/tests` | 全绿（`test_benchmark_metrics.py` 覆盖 IoU/AP 边界） |
 | 冒烟 | `python auto2dlabel/benchmarks/xxx.py --max-images 2` | 跑通且 JSON 可 `json.loads`、MD 含摘要行 |
 | 产物检查 | `ls benchmarks_outputs/` | `{dataset}_{model}_{ts}.json/.md` 成对出现 |
 

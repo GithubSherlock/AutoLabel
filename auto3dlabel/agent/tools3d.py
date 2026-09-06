@@ -14,7 +14,7 @@ from auto2dlabel.tools.base import Tool
 from auto2dlabel.tools.registry import ToolRegistry
 from auto3dlabel.schema.box3d import KittiFrame
 from auto3dlabel.tools.pipeline import annotate_frame
-from auto3dlabel.tools.visualize import draw_bev
+from auto3dlabel.tools.visualize import draw_lidar_bev_predictions
 
 if TYPE_CHECKING:
     from auto2dlabel.models.detection import DetectionModel
@@ -133,6 +133,17 @@ class Detect3DTool(Tool):
         # name 键携带 COCO 名（见 attach_coco_names docstring）
         attach_coco_names(results)
         results.sort(key=lambda d: -float(d.get("confidence", 0)))
+        if det3d is not None and self.out_dir is not None:
+            # LiDAR 引擎：BEV 点云预测图落盘（点云散点 + 预测框 + GT 对照，
+            # 0 框也落图——与 cli run 的 _draw_lidar_bev 同一单一事实源）
+            from auto3dlabel.schema.box3d import Box3D
+
+            draw_lidar_bev_predictions(
+                self.frame,
+                Path(self.out_dir) / f"{self.frame.frame_id}_bev.png",
+                [Box3D.from_dict(d) for d in results],
+                gt_boxes=self.frame.load_gt3d(),
+            )
         return results
 
 
@@ -141,9 +152,10 @@ class Visualize3DTool(Tool):
 
     name = "visualize_bev"
     description = (
-        "Render a bird's-eye-view image of the KITTI frame with predicted 3D boxes "
-        "(green) and ground-truth boxes (blue). Returns the output image path. "
-        "Use this tool when the user asks to see or check the 3D annotation result."
+        "Render a bird's-eye-view image of the KITTI frame: LiDAR point cloud "
+        "scatter + predicted 3D boxes (class-colored with labels) + ground-truth "
+        "boxes (blue). Returns the output image path. Use this tool when the user "
+        "asks to see or check the 3D annotation result."
     )
 
     def __init__(self, frame: KittiFrame, out_dir: str | Path) -> None:
@@ -156,10 +168,10 @@ class Visualize3DTool(Tool):
 
     def forward(self, **kwargs: object) -> dict:
         out = Path(self.out_dir) / f"{self.frame.frame_id}_bev.png"
-        path = draw_bev(
+        path = draw_lidar_bev_predictions(
             self.frame,
             out,
-            boxes=_boxes_from_kwargs(kwargs),
+            _boxes_from_kwargs(kwargs),
             gt_boxes=self.frame.load_gt3d(),
         )
         return {"success": True, "path": str(path)}

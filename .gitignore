@@ -46,6 +46,7 @@ logs/
 
 # ===== 配置（含 API Key，严禁入库；提交 .env.example 作为模板）=====
 auto2dlabel/configs/.env
+auto3dlabel/configs/.env
 
 # ===== 本地数据集（benchmark 用，路径见 benchmarks/datasets.py）=====
 /datasets/

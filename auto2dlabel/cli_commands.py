@@ -12,7 +12,12 @@ from rich.table import Table
 from auto2dlabel.agent.dialog import ask_questions
 from auto2dlabel.agent.llm import create_client
 from auto2dlabel.agent.planner import TaskPlanner
-from auto2dlabel.cli_common import collect_images, console, setup_logging
+from auto2dlabel.cli_common import (
+    collect_images,
+    console,
+    install_sigterm_interrupt,
+    setup_logging,
+)
 from auto2dlabel.cli_execute import execute_plan
 from auto2dlabel.schema.task_plan import TaskPlan
 
@@ -174,13 +179,21 @@ def chat_command(
     sahi: bool,
     batch_size: int | None = None,
     num_workers: int | None = None,
-    viz: bool = True,
+    viz: bool = False,
     batch_strategy: bool = False,
     refer_l2: bool = False,
     refer_l3: bool = False,
 ) -> None:
-    """`chat` 命令实现：自然语言解析 → 缺失参数追问 → 确认 → 执行 TaskPlan。"""
+    """`chat` 命令实现：自然语言解析 → 缺失参数追问 → 确认 → 执行 TaskPlan。
+
+    viz 默认 False（2026-09-03 磁盘保护）：chat 跟踪不产逐帧 PNG 可视化
+    （成片/MOT/JSON/HITL 不受影响）；auto2dlabel chat 命令经 --no-viz 显式
+    传 viz=not no_viz，老用户行为不变。
+    """
     setup_logging(verbose)
+    # v1.0 P3：TUI /cancel 的 terminate(SIGTERM) → KeyboardInterrupt 打断
+    # 执行序列（execute_plan finally 链/日志照常收尾）
+    install_sigterm_interrupt()
 
     from auto2dlabel.tools.confirm import ask_with_timeout
 
@@ -451,12 +464,18 @@ def _parse_plan_dialog(planner: TaskPlanner, user_text: str, timeout: int) -> Ta
         logger.info("无 API key → 代码兜底构建默认计划（零 LLM 调用）")
         return _plan_without_llm(user_text)
     try:
-        return planner.parse_dialog(
+        # v1.0 P1：LLM 解析流式展示（json_mode 增量直出 + 全量解析兜底在 dialog 内）
+        console.print("[dim]LLM 解析中: [/dim]", end="")
+        plan = planner.parse_dialog(
             user_text,
             ask_fn=partial(ask_questions, timeout=timeout),
             confirm_timeout=timeout,
+            on_delta=lambda text: console.print(text, end=""),
         )
+        console.print("")
+        return plan
     except Exception as e:
+        console.print("")
         logger.warning("对话解析降级为单轮 parse: %s", e)
         return planner.parse(user_text, confirm_timeout=timeout)
 

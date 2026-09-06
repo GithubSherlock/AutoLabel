@@ -25,7 +25,12 @@ from auto3dlabel.agent.orchestrator3d import (
     extract_boxes3d,
     run_3d_agent,
 )
-from auto3dlabel.agent.planner3d import Plan3D, TaskPlanner3D, parse_plan3d_json
+from auto3dlabel.agent.planner3d import (
+    Plan3D,
+    TaskPlanner3D,
+    parse_plan3d_json,
+    sanitize_plan3d,
+)
 from auto3dlabel.agent.tools3d import (
     Detect3DTool,
     Visualize3DTool,
@@ -133,6 +138,39 @@ def test_task_planner_parse_via_fake_llm() -> None:
     assert plan.frame_id == "000123" and plan.prompts == ["car", "person"]
     assert abs(plan.confidence_threshold - 0.4) < 1e-9
     assert "frame=000123" in plan.summary
+
+
+# ── nuscenes 批量规划（v1.0 P1+） ───────────────────────────────
+
+def test_parse_plan_nuscenes_batch_fields() -> None:
+    """dataset=nuscenes + sample_limit → Plan3D 字段解析（chat 批量分派依据）。"""
+    plan = parse_plan3d_json(json.dumps({
+        "dataset": "nuscenes", "sample_limit": 100,
+        "det_model": "bevfusion_nus", "frame_id": "", "prompts": [],
+    }))
+    assert plan.dataset == "nuscenes"
+    assert plan.sample_limit == 100
+    assert plan.det_model == "bevfusion_nus"
+    assert plan.missing_params == [], "nuscenes 批量任务无必填参（frame_id/prompts 不要求）"
+    assert "nuscenes" in plan.summary and "limit=100" in plan.summary
+
+
+def test_parse_plan_nuscenes_defaults_and_coerce() -> None:
+    """sample_limit 缺省/垃圾值 → None（全量）；dataset 白名单外 → kitti（sanitize）。"""
+    plan = parse_plan3d_json('{"dataset": "nuscenes", "sample_limit": "abc"}')
+    assert plan.dataset == "nuscenes" and plan.sample_limit is None
+    bad = parse_plan3d_json('{"dataset": "coco"}')
+    for fix in sanitize_plan3d(bad):
+        pass
+    assert bad.dataset == "kitti", "白名单外 dataset 回 kitti（宁单帧勿误入批量）"
+
+
+def test_parse_plan_kitti_missing_unchanged() -> None:
+    """kitti 单帧语义回归：dataset 缺省 = kitti，缺参检查照旧。"""
+    plan = parse_plan3d_json('{"frame_id": ""}')
+    assert plan.dataset == "kitti"
+    assert plan.missing_params, "kitti 任务 frame_id/prompts 缺失仍须上报"
+    assert "frame=?" in plan.summary  # summary 形态不变
 
 
 # ── registry / tools3d ─────────────────────────────────────────

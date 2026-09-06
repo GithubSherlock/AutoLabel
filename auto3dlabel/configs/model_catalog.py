@@ -141,6 +141,25 @@ FCOS3D_NAMES = {
 }
 
 # ============================================================
+# 引擎名并集（单一事实源——autolabel/route.py 路由判据与 auto3dlabel/cli.py
+# chat 批量报错清单共用，勿在调用方再散副本）
+# ============================================================
+# 全部 3D 引擎（四名单；MONO3D 为 KITTI 单目协议，不进 nuScenes 批量三名单）
+ENGINE3D_NAMES: frozenset[str] = frozenset(
+    {*DETECTOR3D_NAMES, *MONO3D_NAMES, *BEVFUSION_NAMES, *FCOS3D_NAMES}
+)
+# nuScenes 批量可用引擎（create_detector3d_any 三工厂并集——LiDAR/融合/单目三协议）
+NUSCENES_ENGINE_NAMES: frozenset[str] = frozenset(
+    {*DETECTOR3D_NAMES, *BEVFUSION_NAMES, *FCOS3D_NAMES}
+)
+# 纯 CPU 不可跑引擎（spconv 稀疏卷积 / bev_pool 自定义 CUDA op；2026-09-02 实测
+# bevfusion_nus CPU 推理炸 CUDAGuardImpl）——cli 执行层无 CUDA 时降级
+# pointpillars_nus（pillar 架构无自定义 op，CPU 实测可跑）
+CUDA_ONLY_NUSCENES_ENGINES: frozenset[str] = frozenset(
+    {"centerpoint_nus", "bevfusion_nus", "bevfusion_lidar_nus"}
+)
+
+# ============================================================
 # 目录摘要（供 planner3d system prompt 注入，单一事实源）
 # ============================================================
 _CATALOG_SUMMARY_GROUPS: list[tuple[str, list[str], str]] = [

@@ -105,7 +105,8 @@ def frame_payload(name: str, review_dir: Path) -> dict[str, Any] | None:
     """队列文件名 → 四视图渲染 payload；损坏/缺 pcd/缺 calib → None（端点转 400）。
 
     KITTI 输出键：image/image_path/bev_path（透传）、points（相机系 (N,3) list）、
-    objects（label/confidence/fit_points/corners 8x3 list；坏框跳过）。
+    objects（label/confidence/fit_points/corners 8x3 list；坏框跳过）、
+    p2/k_inv/img_size（相机图投影叠加：前端 projectP2 投影 + p2ToGround 地面反投影拖动）。
     nuScenes（dataset=="nuscenes"）：cam_like 点云 + cameras 6 相机（见 _nuscenes_payload）。
     """
     src = review_dir / name
@@ -119,13 +120,23 @@ def frame_payload(name: str, review_dir: Path) -> dict[str, Any] | None:
     calib_path = str(data.get("calib_path") or "")
     try:
         pts_velo = load_points_bin(Path(pcd_path))
-        pts_cam = KittiCalib.from_file(Path(calib_path)).velo_to_cam(pts_velo)
+        calib = KittiCalib.from_file(Path(calib_path))
+        pts_cam = calib.velo_to_cam(pts_velo)
     except (OSError, ValueError):
         return None
+    p2 = calib.P2.astype(np.float64)
+    k_inv = np.linalg.inv(p2[:, :3])
+    cam_center = -k_inv @ p2[:, 3]  # 相机中心（rect cam0 系；P2 非零平移列的精确反投影锚点）
+    img_w, img_h = (data.get("image_size") or [1242, 375])[:2]
     return {
         "image": data.get("image", ""),
         "image_path": data.get("image_path", ""),
         "bev_path": data.get("bev_path", ""),
         "points": downsample_points(pts_cam).tolist(),
         "objects": _objects_from_annotations(data.get("annotations", [])),
+        # 相机图叠加投影（KITTI rect：P2 3x4；K⁻¹ + 相机中心供像素→地面平面 y=cy 反投影）
+        "p2": p2.tolist(),
+        "k_inv": k_inv.tolist(),
+        "cam_center": cam_center.tolist(),
+        "img_size": [int(img_w), int(img_h)],
     }

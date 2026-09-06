@@ -14,6 +14,8 @@ from auto2dlabel.cli_common import (
     collect_images,
     console,
     display_results,
+    install_sigterm_interrupt,
+    print_al_progress,
     setup_logging,
     triage_and_export,
     visualize_results,
@@ -48,6 +50,9 @@ def run_command(
 ) -> None:
     """`run` 命令实现：续跑/新建清单 → 逐图编排 → 导出/可视化/HITL 分流。"""
     setup_logging(verbose)
+    # v1.0 P3：TUI /cancel 的 terminate(SIGTERM) → KeyboardInterrupt 打断
+    # 主线程序列；manifest 逐图原子写（update_entry+save_manifest）保得住
+    install_sigterm_interrupt()
 
     # ---- 跟踪模式：帧序列检测 + ByteTrack ID 维持 + MOT 导出（--llm 仅一次性规划） ----
     if track:
@@ -176,7 +181,7 @@ def run_command(
     )
 
     failed_count = 0
-    for img_path in image_files:
+    for done, img_path in enumerate(image_files, 1):
         console.print(f"\n[bold]━━━ 标注: {img_path.name} ━━━[/bold]")
 
         import time as _time
@@ -217,6 +222,7 @@ def run_command(
             save_manifest(manifest, manifest_path)
             failed_count += 1
             console.print(f"[red]✗ 失败: {img_path.name} — {error_msg}[/red]")
+            print_al_progress(done, len(image_files))
             continue
 
         # 写日志
@@ -271,6 +277,7 @@ def run_command(
             bbox_count=bbox_count, state_file=state_file,
         )
         save_manifest(manifest, manifest_path)
+        print_al_progress(done, len(image_files))
 
     # 批次结束汇总（多图或续跑才打印）
     if len(image_files) > 1 or resume:

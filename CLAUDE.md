@@ -13,8 +13,15 @@ Agentic 数据标注工具：自然语言指令 → LLM Agent 规划 → 多模�
 
 - `auto2dlabel/` — 2D 自动标注主体（agent/ models/ tools/ export/ web/ benchmarks/ tests/）；子目录会话必读 `auto2dlabel/CLAUDE.md`（模型选型速查 + 设计红线）
 - `auto3dlabel/` — 3D 标注主体（agent/ models→tools/ export/ benchmarks/ web/ tests/，v0.1 已完成；子目录会话必读 `auto3dlabel/CLAUDE.md`）
+- `autolabel/` — v1.0 统一入口薄壳包（route_domain 路由 + CLI 分发 + Textual TUI；agent/models 逻辑不入本包）
 - `docs/` — 项目文档（分工见下）
 - `auto2dlabel/weights/` — 权重与 `.env` **不入库**（GitHub 私有仓库 `GithubSherlock/AutoLabel`）
+
+**包布局与依赖方向**（三个顶层包 = 标准 monorepo，根 pyproject 一个发行版全装）：
+
+- 依赖链单向：`autolabel → auto3dlabel → auto2dlabel`（复用骨架）。**禁止反向 import**（auto3dlabel 不得 import autolabel，会成环）
+- 跨包共享常量放**被依赖方**（先例：路由引擎名单 `ENGINE3D_NAMES` 在 `auto3dlabel/configs/model_catalog.py`，autolabel/route.py 只引用不复制）
+- 三个 `cli.py` 互不冲突（`autolabel.cli`/`auto2dlabel.cli`/`auto3dlabel.cli` 全限定名隔离）；入口定位：2D 聚合在 cli.py → `cli_commands.py`/`cli_run.py`/`cli_track.py`/`cli_execute.py`/`cli_common.py`，3D 单文件 cli.py，autolabel 薄壳 cli.py
 
 ## 文档分工
 
@@ -27,15 +34,17 @@ Agentic 数据标注工具：自然语言指令 → LLM Agent 规划 → 多模�
 ## 常用命令
 
 ```bash
-pytest auto2dlabel/tests/                     # 测试在包内（functional/ + helpers/），当前 212 passed
+python -m pytest auto2dlabel/tests auto3dlabel/tests -q  # 全项目测试（当前 1143 passed）
+mypy autolabel auto2dlabel auto3dlabel        # 全项目类型检查（当前 169，三个包都要写全——漏 autolabel 会漏检）
 auto2dlabel chat "检测 000860.png 中的汽车" --no-wait   # 自然语言标注
+autolabel                                     # v1.0 统一入口：无参 → TUI 对话；带指令 → 自动路由 2D/3D
 python3 -m auto2dlabel.web.server             # Web 审核界面 → http://localhost:8765
 bash auto2dlabel/benchmarks/run_benchmarks.sh # 一键 Benchmark（all/detection/segmentation/classification/obb）
 ```
 
 ## 红线
 
-- 质量门：pyright 0 / mypy / ruff / pytest 全绿（命令与标准见 `docs/Benchmark_plan.md` §10.6，数字基线以 `docs/AutoLabel_plan.md` 当前状态为准）
+- 质量门：pyright 0 / mypy / ruff / pytest 全绿（mypy 命令必须写全三包 `mypy autolabel auto2dlabel auto3dlabel`；命令与标准见 `docs/Benchmark_plan.md` §10.6，数字基线以 `docs/AutoLabel_plan.md` 当前状态为准）
 - 纯本地部署：所有模型可用开源权重；DeepSeek API 为唯一外部依赖（可换本地 Qwen，`configs/.env`）
 - 测试代码在 `auto2dlabel/tests/`，不进 cli.py；`auto2dlabel/benchmarks/` 只做整体软件性能测试
 - 提交：Conventional Commits；分支 feature/xxx、bugfix/xxx

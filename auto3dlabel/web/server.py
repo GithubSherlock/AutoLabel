@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -38,13 +38,25 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 app = FastAPI(title="Auto3dLabel Web", version="0.1.0")
 
 
+@app.middleware("http")
+async def no_cache_static(request: Request, call_next: Any) -> Any:
+    """静态资源禁缓存：开发期前端 JS 修复后浏览器仍会按启发式缓存跑旧脚本。"""
+    response = await call_next(request)
+    if request.url.path.startswith("/static"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # ── 静态文件 ──────────────────────────────────────────────────
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> str:
-    return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+async def index() -> HTMLResponse:
+    return HTMLResponse(
+        (STATIC_DIR / "index.html").read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 # ── 复核队列四端点（协议同 auto2dlabel server.py:522-680 安全模式）──

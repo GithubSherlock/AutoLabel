@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time as _time
 from collections.abc import Callable
 from datetime import datetime as _datetime
@@ -9,7 +10,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from auto2dlabel.agent.state import AgentState
-from auto2dlabel.cli_common import collect_images, console, display_results, triage_and_export
+from auto2dlabel.cli_common import (
+    collect_images,
+    console,
+    display_results,
+    print_al_progress,
+    triage_and_export,
+)
 from auto2dlabel.configs.model_catalog import SEGMENTATION_MODELS, TORCHVISION_SEG_MODELS
 from auto2dlabel.schema.annotation import Annotation, Bbox
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL, TaskPlan, TaskStep
@@ -22,6 +29,27 @@ if TYPE_CHECKING:
     from auto2dlabel.models.detection import DetectionModel
     from auto2dlabel.models.obb import OBBModel
     from auto2dlabel.models.pose import PoseModel
+
+# 单帧指代句式（F6 规模护栏，2026-09-06 实测）：
+# "标注 KITTI 帧 abc123 中的汽车" 曾被 LLM 解析成 image_2 整目录 7481 张
+# 批量爆跑 600s——单帧请求目录化漂移。批量修饰词紧邻帧句式前时（所有/
+# 全部/每个/每一/整）判定为批量语义不触发；"所有帧"（帧后无帧号）天然
+# 不匹配帧句式正则，自动放行。
+_SINGLE_FRAME_RE = re.compile(
+    r"(?:KITTI\s*帧|帧)\s*[:：]?\s*([0-9A-Za-z][0-9A-Za-z._\-]{0,31})"
+    # 帧号前置句式："KITTI 000015 帧" / "第 000055 号 KITTI 帧"
+    r"|([0-9A-Za-z]{3,32})[\s:：]*(?:号)?[\s:：]*(?:KITTI\s*)?帧"
+)
+_BATCH_FRAME_PREFIX = ("所有", "全部", "每个", "每一", "整个", "整段", "逐")
+
+
+def _is_single_frame_request(raw_instruction: str) -> bool:
+    """指令是否指代单个帧（帧号/帧名 + 帧句式，非批量修饰）。"""
+    for m in _SINGLE_FRAME_RE.finditer(raw_instruction):
+        if raw_instruction[max(0, m.start() - 2) : m.start()].endswith(_BATCH_FRAME_PREFIX):
+            continue  # "所有KITTI帧" 等批量修饰 → 放行
+        return True
+    return False
 
 
 def execute_plan(
@@ -97,6 +125,24 @@ def execute_plan(
             console.print(f"[red]未找到图像: {step.source}[/red]")
             continue
 
+        # F6 规模护栏：单帧指代指令被目录化（2026-09-06 实测 "标注 KITTI 帧
+        # abc123 中的汽车" → image_2 整目录 7481 张批量爆跑 600s）。指令指代
+        # 单帧但源展开为目录多图 → 解析漂移，红字跳过该步而非海跑（与
+        # 「未找到图像」同款收敛，exit 0 正常收尾）；明确批量语义
+        # （"所有帧" 等）不触发。
+        if (
+            source_path.is_dir()
+            and len(images) > 1
+            and plan.raw_instruction
+            and _is_single_frame_request(plan.raw_instruction)
+        ):
+            console.print(
+                f"[red]指令指代单个帧，但解析为目录批量任务（{len(images)} 张图，源"
+                f" {step.source}）——帧号/文件名可能不存在或指令有歧义，已跳过该步。"
+                "请核对帧号，或明确使用目录批量语义（如「整个目录」）[/red]"
+            )
+            continue
+
         # 路由检测/分割模型名（分割模型名不能用于检测——目录派生 + 前缀容错）
         det_name, seg_name = _route_model(step)
 
@@ -151,6 +197,8 @@ def execute_plan(
                     num_workers=num_workers,
                 )
                 idx = i + batch_size
+                # v1.0 P3 进度协议行（TUI 任务面板按块粒度推进）
+                print_al_progress(min(idx, len(images)), len(images))
         except RuntimeError as e:
             if "out of memory" not in str(e).lower():
                 raise
@@ -161,7 +209,7 @@ def execute_plan(
             # 单图仍 OOM（如大模型加载都装不下，2026-08-29 SAM3 实测）：不崩整批，
             # 跳图带指引继续（其余图像照常产出，失败可见不静默）
             oom_hint_shown = False
-            for img in images[idx:]:
+            for oom_i, img in enumerate(images[idx:], idx):
                 try:
                     _execute_chunk(
                         step, [img], det_name, seg_name, model, seg_model,
@@ -181,6 +229,7 @@ def execute_plan(
                         )
                         oom_hint_shown = True
                     console.print(f"[yellow]跳过: {img}（显存不足）[/yellow]")
+                print_al_progress(oom_i + 1, len(images))
 
     _log_plan(plan, steps_results, _plan_t0)
 
@@ -252,7 +301,8 @@ def _execute_tracking_step(
     )
     try:
         summary = tool.forward(
-            step.source, step.prompts, confidence_threshold=step.confidence_threshold
+            step.source, step.prompts, confidence_threshold=step.confidence_threshold,
+            progress_cb=print_al_progress,
         )
     except ValueError as e:
         console.print(f"[red]跟踪失败: {e}[/red]")

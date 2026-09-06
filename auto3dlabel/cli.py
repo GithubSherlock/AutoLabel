@@ -17,6 +17,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from auto3dlabel.agent.planner3d import Plan3D
 from auto3dlabel.configs.kitti import DEFAULT_CONF, DEFAULT_KITTI_ROOT
 from auto3dlabel.configs.model_catalog import DETECTOR3D_NAMES
 from auto3dlabel.configs.nuscenes import DEFAULT_NUSCENES_OUT
@@ -491,6 +492,11 @@ def chat(
 ) -> None:
     """LLM Agent 闭环：planner 解析 → 3D agent loop → 质量评估 → HITL 三档 → 导出。"""
     _require_auto2dlabel()
+    # v1.0 P3：TUI /cancel 的 terminate(SIGTERM) → KeyboardInterrupt 打断
+    # agent loop（orchestrator finally 链照常收尾）；行协议尾行 1/1 表示完成
+    from auto2dlabel.cli_common import install_sigterm_interrupt, print_al_progress
+
+    install_sigterm_interrupt()
     from auto2dlabel.agent.dialog import ask_questions
     from auto2dlabel.agent.llm import create_client
     from auto3dlabel.agent.orchestrator3d import run_3d_agent
@@ -508,8 +514,16 @@ def chat(
     # v0.3 P1 对话式解析：缺参多轮追问；异常降级单轮 parse（零行为回退）；
     # 单轮仍失败 → 红字 + 退出（对齐 2D chat Step 2）
     try:
-        plan = planner.parse_dialog(instruction, ask_fn=partial(ask_questions, timeout=wait))
+        # v1.0 P1：LLM 解析流式展示（json_mode 增量直出 + 全量解析兜底在 dialog 内）
+        console.print("[dim]LLM 解析中: [/dim]", end="")
+        plan = planner.parse_dialog(
+            instruction,
+            ask_fn=partial(ask_questions, timeout=wait),
+            on_delta=lambda text: console.print(text, end=""),
+        )
+        console.print("")
     except Exception as e:
+        console.print("")
         console.print(f"[red]对话解析失败，降级单轮解析: {e}[/red]")
         try:
             plan = planner.parse(instruction)
@@ -520,6 +534,11 @@ def chat(
     missing = plan.missing_params  # 规格表驱动（frame_id + prompts，缺参清单直显）
     if missing:
         raise typer.BadParameter(f"缺少参数: {', '.join(missing)}")
+    if plan.dataset == "nuscenes":
+        # v1.0 P1+ 批量队列分派：不走单帧 run_3d_agent，直调 nuScenes 队列管线
+        # （det_model 由 LLM 规划推荐——「不知道用什么模型」→ bevfusion_nus）
+        _run_nuscenes_batch(plan, out_dir)
+        return
     try:
         frame = resolve_frame(plan.frame_id)
     except (ValueError, FileNotFoundError) as e:
@@ -590,6 +609,64 @@ def chat(
         llm_model=provider,
         annotation_type="kitti_3d",
     )
+    print_al_progress(1, 1)  # 单帧任务完成信号（TUI 任务面板终态）
+
+
+def _cpu_safe_nuscenes_engine(det_model: str) -> str:
+    """纯 CPU 守卫（2026-09-02 实测）：spconv/bev_pool 自定义 CUDA op 引擎无 CUDA
+    必炸（bevfusion_nus CPU 推理 → CUDAGuardImpl）→ 降级 pointpillars_nus
+    （pillar 架构无自定义 op，CPU 实测可跑，同为 LiDAR 协议）。
+    """
+    import torch
+
+    from auto3dlabel.configs.model_catalog import CUDA_ONLY_NUSCENES_ENGINES
+
+    if torch.cuda.is_available() or det_model not in CUDA_ONLY_NUSCENES_ENGINES:
+        return det_model
+    console.print(
+        f"[yellow]引擎 {det_model} 依赖 CUDA 自定义 op（spconv/bev_pool），"
+        f"当前纯 CPU 环境 → 自动降级 pointpillars_nus[/yellow]"
+    )
+    return "pointpillars_nus"
+
+
+def _run_nuscenes_batch(plan: Plan3D, out_dir: Path) -> None:
+    """chat 批量分派（v1.0 P1+）：Plan3D(dataset=nuscenes) → 复核队列管线。
+
+    与 nuscenes-queue 子命令共用 generate_review_queue（复用不复制）；
+    引擎由 LLM 规划推荐（「不知道用什么模型」→ bevfusion_nus，prompt 规则）。
+    """
+    from auto3dlabel.configs.model_catalog import NUSCENES_ENGINE_NAMES
+    from auto3dlabel.models.detection3d import create_detector3d_any
+    from auto3dlabel.tools.nuscenes_pipeline import generate_review_queue
+
+    det_model = _cpu_safe_nuscenes_engine(plan.det_model)
+    det = create_detector3d_any(det_model)
+    if det is None:
+        console.print(
+            f"[red]未知名 3D 模型: {det_model}[/red]"
+            f"（可用引擎: {', '.join(sorted(NUSCENES_ENGINE_NAMES))}）"
+        )
+        raise typer.Exit(code=1)
+    reviews = out_dir / "reviews"
+    scope = f"抽样 {plan.sample_limit} 个" if plan.sample_limit else "全量"
+    console.print(
+        f"[bold]nuScenes 复核队列[/bold] 引擎={det_model} "
+        f"conf={plan.confidence_threshold} {scope} → {reviews}"
+    )
+    from auto2dlabel.cli_common import print_al_progress
+
+    written = generate_review_queue(
+        det, reviews, conf=plan.confidence_threshold, limit=plan.sample_limit,
+        # v1.0 P3 行协议：每 sample 一行 [AL_PROGRESS] done/total（TUI 面板推进）
+        progress_cb=print_al_progress,
+    )
+    console.print(
+        f"[bold]汇总[/bold] 新生成 {len(written)} 个队列文件（resume：已存在跳过）"
+    )
+    console.print(
+        f"[dim]后续: REVIEW3D_DIR={reviews} python3 -m auto3dlabel.web.server[/dim]"
+    )
 
 
 @app.command("nuscenes-queue")
@@ -613,6 +690,10 @@ def nuscenes_queue(
         str | None, typer.Option("--dataroot", help="nuScenes dataroot（默认 configs 常量）")
     ] = None,
     version: Annotated[str, typer.Option("--version", help="devkit 版本表")] = "v1.0-mini",
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", help="随机抽样 N 个 sample（seed 固定确定性；默认全量）"),
+    ] = None,
 ) -> None:
     """nuScenes 端到端复核队列（v0.4 P2）：val 场景逐 sample 检测 → 三档分流。
 
@@ -623,14 +704,21 @@ def nuscenes_queue(
     from auto3dlabel.models.detection3d import create_detector3d_any
     from auto3dlabel.tools.nuscenes_pipeline import generate_review_queue
 
+    det_model = _cpu_safe_nuscenes_engine(det_model)
     det = create_detector3d_any(det_model)
     if det is None:
         console.print(f"[red]未知名 3D 模型: {det_model}[/red]")
         raise typer.Exit(code=1)
-    console.print(f"[bold]nuScenes 复核队列[/bold] 引擎={det_model} conf={conf} → {out_dir}")
+    scope = f"抽样 {limit} 个" if limit else "全量"
+    console.print(
+        f"[bold]nuScenes 复核队列[/bold] 引擎={det_model} conf={conf} {scope} → {out_dir}"
+    )
     written = generate_review_queue(
         det, out_dir, conf=conf, dataroot=Path(dataroot) if dataroot else None,
-        version=version,
+        version=version, limit=limit,
+        progress_cb=lambda done, total: console.print(
+            f"[dim]进度 {done}/{total}[/dim]"
+        ) if done % 10 == 0 or done == total else None,
     )
     console.print(
         f"[bold]汇总[/bold] 新生成 {len(written)} 个队列文件（resume：已存在跳过）"

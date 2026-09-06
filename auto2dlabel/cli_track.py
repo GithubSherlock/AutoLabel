@@ -8,11 +8,12 @@ extract_prompts 处理不了的复杂指令如「跟踪穿红衣服的人」，�
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
 
-from auto2dlabel.cli_common import console
+from auto2dlabel.cli_common import console, install_sigterm_interrupt, print_al_progress
 from auto2dlabel.tools.constraints import (
     ReferentialConstraint,
     has_relation,
@@ -185,6 +186,7 @@ def run_tracking(
     roi: str | None = None,
     refer_l2: bool = False,
     refer_l3: bool = False,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> None:
     """`run --track` 实现：指令解析 → TrackingTool 执行（帧序列 → 检测 → 跟踪 → MOT）。
 
@@ -200,10 +202,14 @@ def run_tracking(
     refer_l3 显式直用 L3（Qwen2-VL-7B，GPU）；默认指代路径为阶梯升级
     （L2 失败自动升级 L3，L3 权重未就位/无 GPU 时黄字降级宁多勿漏）。
     与 chat 共用同一管线（tools/tracking.TrackingTool），错误在此收敛为 Exit。
+    progress_cb 缺省 = 协议行打印（v1.0 P3：TUI 子进程 stdout 进度通道）。
     """
     from auto2dlabel.cli_common import setup_logging
 
     setup_logging(verbose)
+    # v1.0 P3：TUI /cancel 的 terminate(SIGTERM) → KeyboardInterrupt 打断
+    # 帧循环；TrackingTool finally 链（video_writer.release）保证清理
+    install_sigterm_interrupt()
 
     try:
         constraint = resolve_plan(
@@ -264,6 +270,7 @@ def run_tracking(
         tool.forward(
             source, constraint.prompts,
             confidence_threshold=constraint.threshold or threshold,
+            progress_cb=progress_cb or print_al_progress,
         )
     except ValueError as e:
         console.print(f"[red]错误: {e}[/red]")

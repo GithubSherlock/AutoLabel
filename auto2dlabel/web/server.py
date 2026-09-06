@@ -694,7 +694,15 @@ if __name__ == "__main__":
     # v0.3 P4 同端口共存：3D 复核挂 /3d/（仅 __main__ 段，模块级 app 零改动 →
     # 2D 测试零影响）。auto3dlabel 缺包/依赖不齐 → ImportError 静默降级（2D 独立服务）。
     try:
+        from fastapi.responses import RedirectResponse
+
         from auto3dlabel.web import server as server3d
+
+        # /3d 无斜杠时相对路径 static/、api/ 解析到 2D 根（资产 404）→ 重定向 /3d/
+        # （路由注册在 mount 前，精确匹配优先于前缀挂载）
+        @app.get("/3d", include_in_schema=False)
+        async def _redirect_3d_slash() -> RedirectResponse:
+            return RedirectResponse("/3d/")
 
         app.mount("/3d", server3d.app)
         print(f"  3D 复核: http://localhost:{port}/3d/")

@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from auto3dlabel.data.nuscenes import nusbox_to_box3d_dict
+from auto3dlabel.schema.calib import KittiCalib
 from auto3dlabel.schema.nuscenes_box import NusBox
 from auto3dlabel.tests.helpers.synth import ANCHOR_CAM, VELO_ANCHOR, write_calib, write_frame
 from auto3dlabel.tools.geometry import yaw_to_quat
@@ -206,6 +207,25 @@ def test_frame_data_endpoint(web: Any, client: Any, tmp_path: Any) -> None:
     np.testing.assert_allclose(points[0], ANCHOR_CAM, atol=1e-5)
     corners = np.asarray(payload["objects"][0]["corners"])
     assert corners.shape == (8, 3)
+
+    # v1.0 相机图叠加：P2/K⁻¹/相机中心（前端 projectP2/p2ToGround 的数学契约）
+    p2 = np.asarray(payload["p2"])
+    assert p2.shape == (3, 4)
+    k_inv = np.asarray(payload["k_inv"])
+    assert k_inv.shape == (3, 3)
+    np.testing.assert_allclose(k_inv @ p2[:, :3], np.eye(3), atol=1e-9)
+    cam_center = np.asarray(payload["cam_center"])
+    np.testing.assert_allclose(cam_center, -k_inv @ p2[:, 3], atol=1e-9)
+    assert payload["img_size"] == [1242, 375]
+    # 投影数值与 calib.project_cam_to_image 一致（ANCHOR_CAM 锚点；int32 为截断非舍入）
+    calib_obj = KittiCalib.from_file(calib)
+    u_ref, v_ref, valid_ref = calib_obj.project_cam_to_image(
+        np.asarray([ANCHOR_CAM], dtype=np.float64), 1242, 375
+    )
+    assert valid_ref[0]
+    hom = np.append(np.asarray(ANCHOR_CAM, dtype=np.float64), 1.0)
+    np.testing.assert_allclose(np.trunc(p2[0] @ hom / (p2[2] @ hom)), u_ref[0], atol=1e-9)
+    np.testing.assert_allclose(np.trunc(p2[1] @ hom / (p2[2] @ hom)), v_ref[0], atol=1e-9)
 
     # 安全态：非法名 400 / 不存在 404 / pcd 缺失 400
     assert client.get("/api/frame-data", params={"name": "../x"}).status_code == 400

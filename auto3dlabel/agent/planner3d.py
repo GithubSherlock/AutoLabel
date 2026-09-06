@@ -9,10 +9,13 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 from auto2dlabel.agent import json, logging
 from auto2dlabel.agent.dialog import parse_with_dialog
 from auto2dlabel.agent.llm import LLMClient
+from auto2dlabel.agent.prompt_loader import PROFILES, load_prompt, render
 from auto2dlabel.configs.task_params import coerce_float, coerce_str
 from auto2dlabel.schema.task_plan import PlanQuestion
 from auto3dlabel.configs.datasets import format_datasets_summary
@@ -22,58 +25,15 @@ from auto3dlabel.configs.task_params import PARAM_SPECS_3D
 
 logger = logging.getLogger(__name__)
 
-_PLANNER3D_SYSTEM_PROMPT = """You are a task planner for a KITTI 3D object annotation tool. \
-Parse user's NL into JSON.
-
-Output ONLY valid JSON:
-{
-  "frame_id": "000123",
-  "prompts": ["car", "person"],
-  "confidence_threshold": 0.3,
-  "det_model": "IDEA-Research/grounding-dino-tiny",
-  "seg_model": "sam2_l.pt"
-}
-
-Rules:
-- frame_id: KITTI frame number, 6-digit zero-padded (e.g. 123 → "000123"). "" if not specified.
-- prompts: English COCO names only. Map: 汽车/车辆→car, 行人/人→person, \
-自行车/单车/骑行者→bicycle, 摩托车→motorcycle, 卡车→truck, 公交车/公共汽车→bus, 火车→train
-- confidence_threshold: default 0.3; extract ONLY from explicit 置信度/conf/阈值X
-  phrasing. Digits inside the frame number/paths are NEVER hyperparameters —
-  do NOT extract them as confidence_threshold.
-- det_model: 2D detector or LiDAR 3D detector for the pipeline.
-  Default "IDEA-Research/grounding-dino-tiny".
-  Map: yolo→yolo11s.pt, yolo26→yolo26x.pt, grounding dino/gdino→
-  IDEA-Research/grounding-dino-tiny, kitti微调/kitti权重/kitti_yolo→kitti_finetune
-  (a KITTI-finetuned YOLO).
-  LiDAR 3D engines (keyword map; full catalog with exact names below):
-  pointpillars/点柱→pointpillars_kitti, pvrcnn/pv-rcnn/PV-RCNN→pvrcnn_kitti,
-  centerpoint→centerpoint_nus, free anchor→free_anchor_nus,
-  bevfusion→bevfusion_nus, 单目/mono/pgd→pgd_kitti, fcos3d→fcos3d_nus
-  (3D detectors, no SAM needed).
-  If user names a model ending with .pt or containing /, use it directly.
-- seg_model: SAM mask model. Default "sam2_l.pt". Map: sam/sam2→sam2_l.pt, \
-fastsam→FastSAM-s.pt, sam3→sam3.pt
-- questions: ONLY when key fields are missing (frame_id / prompts), e.g.
-  "questions": [{"id": "frame_id", "question": "要标注哪个 KITTI 帧？(如 000123)"}].
-  id = bare field name. questions MUST accompany the full JSON (missing fields left
-  empty/default). No questions when nothing is missing.
-- Dialog: next round user's answers are fed back as
-  "补充信息（用户在以下问题的回答，请据此更新 JSON）：" + "- [frame_id] <question>"
-  + "用户回答：<answers>". Then fill the previously-missing fields from the
-  answers and output empty/omit questions.
-- Only JSON. No other text."""
-
-# 追加数据集摘要 + 3D 引擎目录摘要（字符串拼接：原文含 JSON 花括号，不可改 f-string；
-# 与 2D planner 同模式——引擎清单注入自 model_catalog（单一事实源，新增模型零改 prompt）
-_PLANNER3D_SYSTEM_PROMPT = _PLANNER3D_SYSTEM_PROMPT + f"""
-
-{format_datasets_summary()}
-Dataset rules:
-- 3D 帧根目录由 CLI 决定，LLM 不解析路径——「KITTI 数据集/对 KITTI」→ 照常输出 6 位 frame_id
-- 指令含自建数据集名 → 该数据集可用，帧标注方式同 KITTI（frame_id 照填）
-
-{format_catalog_summary3d()}"""
+# v1.0 P1+：prompt 正文外置 agent/prompts/planner3d.md（与 2D planner 同模式：
+# 数据集/引擎目录摘要仍为运行时注入值，测试直接 import 常量断言子串的语义不变；
+# 加载器在 2D 包（依赖方向 3D → 2D），prompts_dir 传本包目录）
+_PLANNER3D_SPEC = load_prompt("planner3d.md", prompts_dir=Path(__file__).parent / "prompts")
+_PLANNER3D_SYSTEM_PROMPT = render(
+    _PLANNER3D_SPEC,
+    datasets_summary=format_datasets_summary(),
+    catalog_summary=format_catalog_summary3d(),
+)
 
 
 @dataclass
@@ -86,9 +46,18 @@ class Plan3D:
     det_model: str = DEFAULT_DET_MODEL
     seg_model: str = DEFAULT_SEG_MODEL
     questions: list[PlanQuestion] = field(default_factory=list)  # v0.3 P1 对话问题
+    # v1.0 P1+ 批量形态：dataset="nuscenes" → 队列管线（chat 命令体分派），
+    # 无需 frame_id/prompts（类别固定 10 类）；sample_limit 随机抽样（None=全量）
+    dataset: str = "kitti"
+    sample_limit: int | None = None
 
     @property
     def summary(self) -> str:
+        if self.dataset == "nuscenes":
+            return (
+                f"dataset=nuscenes limit={self.sample_limit or '全量'} "
+                f"conf={self.confidence_threshold} det={self.det_model}"
+            )
         return (
             f"frame={self.frame_id or '?'} prompts={self.prompts or []} "
             f"conf={self.confidence_threshold} det={self.det_model} seg={self.seg_model}"
@@ -100,12 +69,26 @@ class Plan3D:
 
         v0.3.1：原 cli 只查 frame_id——prompts 缺失会漏到下游；改为规格表
         全量检查（label 直接进缺参清单文案）。
+        v1.0 P1+：nuscenes 批量任务无必填参（样本集全量/抽样、类别固定）。
         """
+        if self.dataset == "nuscenes":
+            return []
         return [
             spec.label
             for spec in PARAM_SPECS_3D.values()
             if spec.required and not getattr(self, spec.key)
         ]
+
+
+def _coerce_limit(value: Any) -> int | None:
+    """sample_limit 容错解析：正整数 → int；0/空/垃圾 → None（全量）。"""
+    if value is None or value == "" or value == 0:
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
 
 
 def _dict_to_plan3d(data: dict) -> Plan3D:
@@ -122,6 +105,8 @@ def _dict_to_plan3d(data: dict) -> Plan3D:
         seg_model=coerce_str(data.get("seg_model"), DEFAULT_SEG_MODEL) or DEFAULT_SEG_MODEL,
         # v0.3 P1 对话问题（致命点：LLM JSON → plan 走本函数）
         questions=PlanQuestion.from_list(data.get("questions")),
+        dataset=coerce_str(data.get("dataset"), "kitti") or "kitti",
+        sample_limit=_coerce_limit(data.get("sample_limit")),
     )
 
 
@@ -153,6 +138,10 @@ def sanitize_plan3d(plan: Plan3D) -> list[str]:
     )
     _fix("det_model", coerce_str(plan.det_model, DEFAULT_DET_MODEL) or DEFAULT_DET_MODEL)
     _fix("seg_model", coerce_str(plan.seg_model, DEFAULT_SEG_MODEL) or DEFAULT_SEG_MODEL)
+    # v1.0 P1+：dataset 白名单外回 kitti（宁单帧勿误入批量）；sample_limit 垃圾回 None
+    ds = coerce_str(plan.dataset, "kitti") or "kitti"
+    _fix("dataset", ds if ds in ("kitti", "nuscenes") else "kitti")
+    _fix("sample_limit", _coerce_limit(plan.sample_limit))
     return fixes
 
 
@@ -191,9 +180,7 @@ class TaskPlanner3D:
         response = self.llm.chat(
             messages,
             tools=None,
-            temperature=0.0,
-            max_tokens=1024,
-            json_mode=True,
+            **PROFILES[_PLANNER3D_SPEC.profile],  # planning 档（声明式，与 2D 同档）
             call_site="planner3d.parse",
         )
         if not response.content:
@@ -208,12 +195,14 @@ class TaskPlanner3D:
         instruction: str,
         ask_fn: Callable[[list[PlanQuestion]], str],
         max_rounds: int = 3,
+        on_delta: Callable[[str], None] | None = None,
     ) -> Plan3D:
         """多轮对话解析（v0.3 P1）：缺参（frame_id/prompts）→ questions → 收集 → 回喂。
 
         复用 auto2dlabel/agent/dialog.py 通用骨架（2D v0.6 同源，复用不复制）；
         轮次耗尽 / 用户放弃 → 返回缺参 plan（3D cli 保持 BadParameter 兜底）；
         LLM 响应非法 / 空响应 → ValueError 传播（调用方降级链处理）。
+        on_delta: LLM 流式增量回调（v1.0 P1；None = 非流式）。
         """
         plan = parse_with_dialog(
             llm=self.llm,
@@ -223,6 +212,7 @@ class TaskPlanner3D:
             instruction=instruction,
             max_rounds=max_rounds,
             call_site="planner3d.dialog",
+            on_delta=on_delta,
         )
         for fix in sanitize_plan3d(plan):  # LLM 输出守卫（对话路径同源）
             logger.info("3D 参数守卫修正: %s", fix)

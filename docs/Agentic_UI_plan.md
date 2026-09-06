@@ -1,6 +1,6 @@
 # AutoLabel Agentic 交互化企划（v1.0 方向）
 
-> **状态：企划文档（未来方向，未立项）**——2026-09-01 用户讨论定案：从「Python 包 + CLI 命令」进化为「以智能体驱动的自动标注软件」，形态对标 Hermes / Claude Code：输入 `autolabel` 即进入对话式终端界面，可连接多种大模型 API。
+> **状态：✅ 全五期已交付（2026-09-06）**——P1 2026-09-02（TUI 骨架 + LLM 流式）+ P1+ 2026-09-02（批量 nuScenes 扩展）+ **P2–P5 2026-09-06 连续交付**：P2 provider 注册表（`configs/providers.yaml` + `/model` 三态 + per-provider 台账）、P3 后台任务面板（`[AL_PROGRESS]` 行协议 + `/cancel` 两级终止 + `--resume` 续跑引导）、P4 会话管理（`logs/chat_sessions.jsonl` + `/new` `/resume` 真实现）、P5 HITL 指挥台（`/review` 三档统计 + `/web` 一键 Web 复核）。质量门 pyright 0 / mypy 168 ≤169 / ruff 86 存量不恶化 / pytest 1267 / smoke_tui 31/31，实测与红线修复（3D `.env` 退出 git 跟踪）见 `auto2dlabel/tests/test-v1.0.md` 与 `docs/AutoLabel_plan.md` §Agentic 交互化执行指南。以下为 2026-09-01 立项时定案原文（形态对标 Hermes / Claude Code：输入 `autolabel` 即进入对话式终端界面，可连接多种大模型 API）。
 >
 > 四项定案决策（2026-09-01 AskUserQuestion）：
 > 1. **交互形态**：Textual TUI（全屏终端对话界面）

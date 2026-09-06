@@ -2,7 +2,8 @@
 // 运行：cd auto3dlabel/tests/helpers && npm i jsdom && node smoke_web3d.js
 // 覆盖 logic3d.js 全部导出：camToThree/EDGES/edgesOf/headLine/orthoFocus 纯数学、
 // renderFilesHtml/renderTableHtml、状态机（loadFiles/loadFrame/selectObject/changeLabel/
-// toggleDelete/buildSaveBody）、esc 转义、**fetch 相对路径红线**（api/ 开头，挂载 /3d/ 兼容）。
+// toggleDelete/buildSaveBody）、esc 转义、**fetch 相对路径红线**（api/ 开头，挂载 /3d/ 兼容）；
+// 末尾第 12 节加载 viewer3d.js/app.js 真实代码（THREE mock）做渲染装配回归。
 const { JSDOM } = require('jsdom');
 const fs = require('fs');
 const path = require('path');
@@ -37,12 +38,16 @@ const QUEUE_DATA = {
       x1: 0, y1: 0, x2: 0, y2: 0, review_flag: true },
   ],
 };
+// KITTI 相机图投影 fixtures（fx=700 主点 (600,180) 零平移 → 手算往返锚点）
+const P2 = [[700, 0, 600, 0], [0, 700, 180, 0], [0, 0, 1, 0]];
+const K_INV = [[1 / 700, 0, -600 / 700], [0, 1 / 700, -180 / 700], [0, 0, 1]];
 const PAYLOAD = {
   points: [[1, 2, 3], [4, 5, 6]],
   objects: [
     { index: 0, label: 'Car', confidence: 0.62, fit_points: 31, corners: CORNERS },
     { index: 1, label: 'Pedestrian', confidence: 0.4, fit_points: 9, corners: CORNERS },
   ],
+  p2: P2, k_inv: K_INV, cam_center: [0, 0, 0], img_size: [1242, 375],
 };
 
 // ── fetch mock（记录 URL 供相对路径红线断言）──
@@ -280,6 +285,132 @@ const close = (a, b, tol, msg) => ok(Math.abs(a - b) < tol, `${msg}（${a} vs ${
   replies['api/review-file?name=000999_review.json'] = { error: 'bad' };
   const bad = await L3D.loadFrame('000999_review.json');
   ok(bad.error === 'bad' && L3D.state.payload === null, 'frame-data error → payload null');
+
+  // 12. 渲染装配回归：加载 viewer3d.js + app.js 真实代码（THREE mock）。
+  // 修复项三连：a) renderDetail 必须从 payload 读 cameras（队列文件 cameras 仅
+  // {name,token,filename}，曾 path=undefined 全 404）；b) rebuildObjects null payload
+  // 不崩（frame-data 失败曾 TypeError 中断打开流程）；c) hline 块作用域（曾
+  // ReferenceError 致 emit 链崩溃、详情区永不渲染 = 无法打开）。
+  const V3 = function (x, y, z) { this.x = x || 0; this.y = y || 0; this.z = z || 0; };
+  V3.prototype = {
+    copy(v) { this.x = v.x; this.y = v.y; this.z = v.z; return this; },
+    set(x, y, z) { this.x = x; this.y = y; this.z = z; return this; },
+    add(v) { return new V3(this.x + v.x, this.y + v.y, this.z + v.z); },
+    multiplyScalar(k) { return new V3(this.x * k, this.y * k, this.z * k); },
+    dot(v) { return this.x * v.x + this.y * v.y + this.z * v.z; },
+    project() { return this; },
+  };
+  function Obj3() { this.position = new V3(); }
+  Obj3.prototype.add = function () {};
+  Obj3.prototype.remove = function () {};
+  class GeoObj extends Obj3 { constructor(geo, mat) { super(); this.geometry = geo; this.material = mat; } }
+  class Cam extends Obj3 { constructor() { super(); this.aspect = 1; this.zoom = 1; this.left = -20; this.right = 20; this.top = 20; this.bottom = -20; }
+    lookAt() {} updateProjectionMatrix() {} updateMatrixWorld() {} }
+  window.THREE = {
+    Vector3: V3, Group: Obj3, Scene: Obj3, GridHelper: Obj3, Points: GeoObj, LineSegments: GeoObj, Line: GeoObj,
+    Mesh: GeoObj, PerspectiveCamera: Cam, OrthographicCamera: Cam,
+    WebGLRenderer: class { constructor() {} setClearColor() {} setSize() {} setViewport() {} setScissor() {}
+      setScissorTest() {} render() {} },
+    BufferGeometry: class { constructor() { this.attributes = {}; } setAttribute(n, a) { this[n] = a; this.attributes[n] = a; } computeBoundingSphere() {} },
+    BufferAttribute: class {},
+    PointsMaterial: class { constructor(o) { Object.assign(this, o); } },
+    LineBasicMaterial: class { constructor() { this.color = { setHex() {} }; } },
+    MeshBasicMaterial: class { constructor(o) { Object.assign(this, o); } },
+    SphereGeometry: class {},
+    Raycaster: class { constructor() { this.ray = {}; } },
+    Plane: class {},
+    Sphere: class { constructor(c, r) { this.center = c; this.radius = r; } },
+  };
+  window.requestAnimationFrame = () => 0;
+
+  const NUS_QUEUE = {
+    dataset: 'nuscenes', image: 'tok123', pcd_path: '/tmp/p.bin', ego_translation: [0, 0, 0],
+    cameras: [
+      { name: 'CAM_FRONT', token: 't1', filename: 'samples/CAM_FRONT/x.jpg' },
+      { name: 'CAM_BACK', token: 't2', filename: 'samples/CAM_BACK/x.jpg' },
+    ],
+    annotations: [{ label: 'Car', confidence: 0.9, cx: 1, cy: 1.4, cz: 18, h: 1.5, w: 1.6, l: 3.9, rotation_y: 0, fit_points: 10 }],
+  };
+  const NUS_PAYLOAD = {
+    points: [[1, 2, 3]],
+    objects: [{ index: 0, label: 'Car', confidence: 0.9, fit_points: 10, corners: CORNERS }],
+    cameras: [
+      { name: 'CAM_FRONT', image_path: '/root/datasets/nuscenes_mini/samples/CAM_FRONT/x.jpg' },
+      { name: 'CAM_BACK', image_path: '/root/datasets/nuscenes_mini/samples/CAM_BACK/x.jpg' },
+    ],
+  };
+  replies['api/review-files'].files.push({ name: 'nus123_review.json', image_stem: 'nus123', count: 1 });
+  replies['api/review-file?name=nus123_review.json'] = NUS_QUEUE;
+  replies['api/frame-data?name=nus123_review.json'] = NUS_PAYLOAD;
+
+  let evalErr = null;
+  try {
+    window.eval(fs.readFileSync(ROOT + '/viewer3d.js', 'utf8'));
+    window.eval(fs.readFileSync(ROOT + '/app.js', 'utf8'));
+  } catch (e) { evalErr = e; }
+  ok(evalErr === null, `viewer3d/app.js eval 无异常（${evalErr && evalErr.message}）`);
+  await new Promise((r) => setTimeout(r, 10)); // 等 app.js loadFiles 渲染列表
+  const nusItem = [...document.querySelectorAll('#files .file-item')]
+    .find((el) => el.dataset.name === 'nus123_review.json');
+  ok(!!nusItem, 'nuScenes 队列条目已渲染');
+  let clickErr = null;
+  if (nusItem) { try { await nusItem.onclick(); } catch (e) { clickErr = e; } }
+  ok(clickErr === null, `点击打开 nuScenes 无异常（${clickErr && clickErr.message}）`);
+  const wrap = document.querySelector('#view3d-wrap');
+  ok(wrap && wrap.style.display === 'block', '打开成功后 3D 四视图容器显示（曾恒 display:none）');
+  const imgs = [...document.querySelectorAll('#detail .imgs img')];
+  ok(imgs.length === 2, `相机图渲染 2 张（${imgs.length}）`);
+  ok(imgs.length > 0 && !imgs.some((im) => /undefined/.test(im.src)),
+    '相机图 src 无 undefined（读 payload.cameras.image_path）');
+  ok(imgs.length > 0 && imgs[0].src.startsWith('http://localhost:8766/api/review-image?path=%2Froot%2F'),
+    '相机图 src 为 review-image 绝对路径');
+  ok(L3D.state.payload && L3D.state.payload.cameras.length === 2, 'payload.cameras 2 相机');
+
+  // frame-data 失败（payload null）→ rebuildObjects(null) 经 viewer3d 监听不抛异常
+  let badErr = null;
+  try {
+    const bad2 = await L3D.loadFrame('000999_review.json');
+    ok(bad2.error === 'bad' && L3D.state.payload === null, 'payload null 下 viewer3d 监听不崩');
+  } catch (e) { badErr = e; }
+  ok(badErr === null, `payload null 不抛异常（${badErr && badErr.message}）`);
+
+  // 13. 相机图叠加（v1.0）：投影纯函数 + 叠加 canvas 挂载 + view=3 拖动编辑
+  const pp = L3D.projectP2(P2, [3.5, 1.75, 7]);
+  close(pp[0], 3.5 * 700 / 7 + 600, 1e-9, 'projectP2 u（fx·x/z + cu）');
+  close(pp[1], 1.75 * 700 / 7 + 180, 1e-9, 'projectP2 v（fy·y/z + cv）');
+  ok(L3D.projectP2(P2, [0, 0, -1]) === null, '相机后方点投影 null');
+  const g13 = L3D.p2ToGround(K_INV, [0, 0, 0], 1.75, pp[0], pp[1]);
+  close(g13[0], 3.5, 1e-9, 'p2ToGround 投影→反投影往返 x');
+  close(g13[1], 7, 1e-9, 'p2ToGround 投影→反投影往返 z');
+  ok(L3D.p2ToGround(K_INV, [0, 0, 0], 1.75, 600, 180) === null, '地平线像素无地面解 null');
+  const c2 = L3D.boxCorners2d(P2, CORNERS);
+  ok(c2.length === 8 && c2.every((p) => p !== null), 'boxCorners2d 8 角全有效');
+
+  const kittiItem = [...document.querySelectorAll('#files .file-item')]
+    .find((el) => el.dataset.name === '000123_review.json');
+  let kittiClickErr = null;
+  if (kittiItem) { try { await kittiItem.onclick(); } catch (e) { kittiClickErr = e; } }
+  ok(kittiClickErr === null, `打开 KITTI 帧无异常（${kittiClickErr && kittiClickErr.message}）`);
+  ok(!!document.querySelector('#cam-overlay'), 'KITTI 帧相机图挂载投影叠加 canvas');
+  const kittiOv = document.querySelector('#cam-overlay');
+  ok(kittiOv && kittiOv.width > 0 && kittiOv.height > 0, '叠加 canvas 已适配尺寸');
+  const nusItem2 = [...document.querySelectorAll('#files .file-item')]
+    .find((el) => el.dataset.name === 'nus123_review.json');
+  if (nusItem2) { await nusItem2.onclick(); }
+  ok(!document.querySelector('#cam-overlay'), 'nuScenes 无标定 → 无叠加层（纯图）');
+
+  // view=3 'move' 拖动编辑：走 beginEdit/editTo/endEdit + undo（相机图拖动语义）
+  await L3D.loadFrame('000123_review.json');
+  L3D.selectObject(0);
+  const preMove = JSON.stringify(L3D.state.data.annotations[0]);
+  L3D.beginEdit(0, 3, 'move', { cx0: 8, cz0: 18, x0: 0, z0: 0 });
+  L3D.editTo(3, 'move', { x: 1.5, z: -0.5 });
+  close(L3D.state.data.annotations[0].cx, 9.5, 1e-9, '相机图拖动平移 cx+1.5');
+  close(L3D.state.data.annotations[0].cz, 17.5, 1e-9, '相机图拖动平移 cz-0.5');
+  L3D.endEdit();
+  ok(L3D.state.data.annotations[0].edited_by_human === true, '相机图拖动置人工标记');
+  L3D.undo();
+  ok(JSON.stringify(L3D.state.data.annotations[0]) === preMove, '相机图拖动可撤销');
 
   console.log(`smoke_web3d: ${n} 断言，${process.exitCode ? 'FAIL' : 'OK'}`);
 })();

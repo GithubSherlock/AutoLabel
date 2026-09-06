@@ -188,3 +188,64 @@ def test_generate_review_queue_resume_idempotent(
     assert set(written) == {"s0", "s1"}
     assert (out / "s0_review.json").is_file() and (out / "s1_review.json").is_file()
     assert generate_review_queue(det, out, conf=0.3) == {}  # 二跑全跳过
+
+
+def _make_many_samples(n: int) -> list[dict]:
+    sample_data = {"LIDAR_TOP": "sd-lidar",
+                   **{c: f"sd-{c}" for c in NUSCENES_CAMERAS}}
+    return [{"token": f"s{i}", "data": sample_data} for i in range(n)]
+
+
+def test_generate_review_queue_limit_sampling_deterministic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """limit 抽样：seed 固定 → 两次同子集；limit=0/None → 全量（v1.0 P1+）。"""
+    fake = _FakeNusc()
+    _write_lidar_bin(tmp_path, fake)
+    fake.dataroot = str(tmp_path)
+    samples = _make_many_samples(10)
+    det = _FakeLidarDet(boxes=np.zeros((0, 9)))
+    monkeypatch.setattr(nsp, "load_nuscenes", lambda root=None, version="v1.0-mini": fake)
+    monkeypatch.setattr(nsp, "val_scene_names", lambda version="v1.0-mini": ["scene-A"])
+    monkeypatch.setattr(nsp, "samples_of_scene", lambda nusc, scene: samples)
+
+    w1 = generate_review_queue(det, tmp_path / "r1", limit=3)
+    w2 = generate_review_queue(det, tmp_path / "r2", limit=3)
+    assert len(w1) == 3 and set(w1) == set(w2), "同 seed 抽样必须确定性"
+    w_all = generate_review_queue(det, tmp_path / "r3", limit=None)
+    assert len(w_all) == 10
+    w_zero = generate_review_queue(det, tmp_path / "r4", limit=0)
+    assert len(w_zero) == 10, "limit=0 语义 = 全量"
+
+
+def test_generate_review_queue_limit_caps_at_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """limit > 样本数 → 全量（不越界不报错）。"""
+    fake = _FakeNusc()
+    _write_lidar_bin(tmp_path, fake)
+    fake.dataroot = str(tmp_path)
+    det = _FakeLidarDet(boxes=np.zeros((0, 9)))
+    monkeypatch.setattr(nsp, "load_nuscenes", lambda root=None, version="v1.0-mini": fake)
+    monkeypatch.setattr(nsp, "val_scene_names", lambda version="v1.0-mini": ["scene-A"])
+    monkeypatch.setattr(nsp, "samples_of_scene", lambda nusc, scene: _make_many_samples(4))
+
+    written = generate_review_queue(det, tmp_path / "r", limit=100)
+    assert len(written) == 4
+
+
+def test_generate_review_queue_progress_cb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """progress_cb(done, total) 逐样本回调（含 resume 跳过样本；P3 面板同挂点）。"""
+    fake = _FakeNusc()
+    _write_lidar_bin(tmp_path, fake)
+    fake.dataroot = str(tmp_path)
+    det = _FakeLidarDet(boxes=np.zeros((0, 9)))
+    monkeypatch.setattr(nsp, "load_nuscenes", lambda root=None, version="v1.0-mini": fake)
+    monkeypatch.setattr(nsp, "val_scene_names", lambda version="v1.0-mini": ["scene-A"])
+    monkeypatch.setattr(nsp, "samples_of_scene", lambda nusc, scene: _make_many_samples(3))
+
+    seen: list[tuple[int, int]] = []
+    generate_review_queue(det, tmp_path / "r", progress_cb=lambda d, t: seen.append((d, t)))
+    assert seen == [(1, 3), (2, 3), (3, 3)]

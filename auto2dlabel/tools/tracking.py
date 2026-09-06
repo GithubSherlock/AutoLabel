@@ -17,7 +17,10 @@ typer.Exit 收敛在 CLI 层。
 from __future__ import annotations
 
 import os
+import shutil
+import threading
 import time as _time
+from collections.abc import Callable
 from datetime import datetime as _datetime
 from pathlib import Path
 from typing import Any
@@ -45,6 +48,66 @@ from auto2dlabel.tools.constraints import (
     filter_by_attributes,
     filter_by_spatial,
 )
+
+# 磁盘余量保护（2026-09-03 实测：视频跟踪逐帧 PNG 写爆数据盘 → 级联 Errno 122）
+MIN_FREE_DISK_GB = 1.0
+
+
+class TrackingCancelledError(ValueError):
+    """跟踪被取消（cancel_event 置位，v1.0 P3）。
+
+    ValueError 子类——既有调用点 except ValueError 收敛路径零改动；
+    上抛必经 finally 链（video_writer.release 等清理保证执行）。
+    """
+
+
+def _raise_if_cancelled(cancel_event: threading.Event | None) -> None:
+    """cancel_event 置位 → 抛 TrackingCancelledError（检测/帧循环每轮检查）。"""
+    if cancel_event is not None and cancel_event.is_set():
+        raise TrackingCancelledError("跟踪已取消")
+
+
+def disk_free_gb(path: Path) -> float:
+    """path 所在文件系统剩余空间（GB；path 不存在时按最近已存在祖先解析）。
+
+    shutil.disk_usage 对不存在路径直接 FileNotFoundError——output_dir 尚未
+    创建时（首次运行）必须向上解析到已存在祖先。
+    """
+    p = Path(path)
+    while not p.exists():
+        if p.parent == p:
+            break
+        p = p.parent
+    return shutil.disk_usage(p).free / (1024**3)
+
+
+def estimate_tracking_output_gb_parts(
+    frame_count: int, viz: bool, video_mb: float = 0.0,
+) -> tuple[float, float]:
+    """跟踪任务输出估算拆分（GB）→ (non_viz_gb, png_gb)——按产物实际落盘盘分别预检。
+
+    - non_viz = 抽帧 JPG + 逐帧 JSON + 成片视频（写 output_dir / 源视频同目录）
+    - png_gb = 逐帧 viz PNG（写 CWD 相对 vis_outputs/，仅 viz=True 时非零）
+
+    单量基线同 estimate_tracking_output_gb（2026-09-02/03 实测）：
+    - 抽帧 JPG + 逐帧 JSON：~0.22MB/帧（track_frames JPG ~200KB + frame_*.json
+      与 *_review.json 实测均值 ~6KB，保守 ×3）
+    - viz PNG：3MB/帧（实测 2.7MB/帧，2min 视频 2280 帧写 6.2G）
+    - 成片视频：源视频 ×1.5（mp4v 重编码，仅视频源；帧目录不产片）
+    """
+    frame_gb = frame_count * 0.22 / 1024
+    png_gb = frame_count * 3.0 / 1024 if viz else 0.0
+    video_gb = video_mb * 1.5 / 1024
+    return frame_gb + video_gb, png_gb
+
+
+def estimate_tracking_output_gb(frame_count: int, viz: bool, video_mb: float = 0.0) -> float:
+    """跟踪任务输出总量估算（GB，2026-09-02/03 实测基线）——parts 的兼容入口。
+
+    预检改按盘分别检查后仅测试/外部展示用；数值 = non_viz + viz PNG。
+    """
+    non_viz_gb, png_gb = estimate_tracking_output_gb_parts(frame_count, viz, video_mb)
+    return non_viz_gb + png_gb
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv"}
 DEFAULT_REID_MODEL = "openai/clip-vit-base-patch32"
@@ -90,10 +153,15 @@ def match_dets_to_locked(
     return out
 
 
-def collect_frames(source: Path, output: Path) -> list[Path]:
+def collect_frames(
+    source: Path, output: Path, cancel_event: threading.Event | None = None,
+) -> list[Path]:
     """帧序列收集：视频 → cv2 抽帧到 {output}/track_frames/<stem>/；目录 → 排序图像。
 
     已抽取的帧不重复抽取（幂等，中断可重跑）。
+    cancel_event：视频抽帧循环每帧检查，置位抛 TrackingCancelledError
+    （v1.0 P3 审查 #6：抽帧是视频源最长耗时段，原取消首查点在抽帧完的
+    _detect_frames/帧循环才触发，提前量不足）；帧目录源收集无长耗时，不检查。
     """
     if source.is_file() and source.suffix.lower() in VIDEO_EXTS:
         import cv2
@@ -107,6 +175,7 @@ def collect_frames(source: Path, output: Path) -> list[Path]:
         console.print(f"[dim]视频 {source.name} → 抽帧 {frame_dir}/[/dim]")
         idx = 0
         while True:
+            _raise_if_cancelled(cancel_event)
             ok, img = cap.read()
             if not ok:
                 break
@@ -272,6 +341,8 @@ class TrackingTool(Tool):
         source: str,
         prompts: list[str],
         confidence_threshold: float = DEFAULT_CONFIDENCE,
+        progress_cb: Callable[[int, int], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         """执行序列跟踪 → 逐帧检测 JSON + 可视化 + HITL + MOT 合并导出。
 
@@ -279,6 +350,11 @@ class TrackingTool(Tool):
             source: 视频文件或帧图像目录路径。
             prompts: 固定类别列表（英文 COCO 类名）。
             confidence_threshold: 检测置信度阈值。
+            progress_cb: 每帧完成回调 (done, total)——v1.0 P3 进度协议
+                （与 generate_review_queue 同挂点，TUI 任务面板消费）。
+            cancel_event: 置位 → 抛 TrackingCancelledError（抽帧循环/帧循环
+                检查；finally 链保证 video_writer.release + .tmp 改名收尾；
+                取消时 MOT 不产出，成片仅含已写入帧（release 后可回读））。
 
         Returns:
             {"frames", "bboxes", "track_ids", "mot_path", "video_path"} 汇总；
@@ -288,9 +364,55 @@ class TrackingTool(Tool):
 
         Raises:
             ValueError: 未找到可跟踪的帧/视频。
+            TrackingCancelledError: cancel_event 置位（ValueError 子类）。
         """
         threshold = confidence_threshold
-        frames = collect_frames(Path(source), Path(self._output_dir))
+        # 任务级输出预算预检（2026-09-03 实测 F5：XFS 配额盘上长视频中途耗尽，
+        # 逐帧 JSON 写入 EDQUOT 裸 traceback——viz 余量检查只护 PNG 一条路径且
+        # 只查一次；长任务需入口总预算提前失败，避免跑十几分钟再崩）。
+        # 安全系数 2：多进程共享盘配额竞争（并行下载/其他任务）会中途吃掉余量。
+        # 帧目录源帧数不可预知（est=0 恒通过，不拦）。
+        # 2026-09-07 审查 #5：viz PNG 写 CWD 相对 vis_outputs/（output_dir 盘之外），
+        # 原按 output_dir 单盘总检查盘口错位——拆 parts 后按产物实际落盘盘分别查；
+        # #25（长视频 --no-viz 误拒）随之消解（viz=False 时 png 项为零不再参与检查）。
+        _src = Path(source)
+        _video_mb = 0.0
+        _frame_count = 0
+        if _src.is_file() and _src.suffix.lower() in VIDEO_EXTS:
+            try:
+                _video_mb = _src.stat().st_size / 1e6
+                import cv2 as _cv2
+
+                _cap = _cv2.VideoCapture(str(_src))
+                if _cap.isOpened():
+                    _frame_count = int(_cap.get(_cv2.CAP_PROP_FRAME_COUNT))
+                    _cap.release()
+            except Exception:
+                pass
+        _non_viz_gb, _png_gb = estimate_tracking_output_gb_parts(
+            _frame_count, self.viz, _video_mb
+        )
+        # non_viz（抽帧 JPG/逐帧 JSON/成片视频）落 output_dir 所在盘
+        _free_gb = disk_free_gb(Path(self._output_dir))
+        if _non_viz_gb * 2 > _free_gb - MIN_FREE_DISK_GB:
+            raise ValueError(
+                f"磁盘余量不足：本任务预计输出 ~{_non_viz_gb:.1f}GB（抽帧+JSON+成片，"
+                f"不含 PNG），当前余量 {_free_gb:.1f}GB"
+                f"（安全边际 {MIN_FREE_DISK_GB}GB）。建议清理 {self._output_dir} "
+                "所在盘旧结果，或释放磁盘空间后重试"
+            )
+        # viz PNG 单独按实际写入盘（CWD 相对 vis_outputs/）检查（盘口错位修复）
+        if self.viz and _png_gb > 0:
+            _vis_dir = Path("vis_outputs")
+            _free_vis_gb = disk_free_gb(_vis_dir)
+            if _png_gb * 2 > _free_vis_gb - MIN_FREE_DISK_GB:
+                raise ValueError(
+                    f"磁盘余量不足：逐帧 PNG 预计输出 ~{_png_gb:.1f}GB（写在 {_vis_dir} "
+                    f"所在盘），当前余量 {_free_vis_gb:.1f}GB"
+                    f"（安全边际 {MIN_FREE_DISK_GB}GB）。建议 --no-viz 跳过逐帧 PNG，"
+                    "或清理 vis_outputs/ 所在盘旧结果后重试"
+                )
+        frames = collect_frames(Path(source), Path(self._output_dir), cancel_event=cancel_event)
         if not frames:
             raise ValueError(f"未找到可跟踪的帧/视频: {source}")
 
@@ -309,6 +431,11 @@ class TrackingTool(Tool):
             console.print(f"[dim]跟踪器: BoT-SORT  ReID 特征: {self._reid_model_name}[/dim]")
         else:
             tracker = ByteTracker()
+
+        # 取消早查（审查 #6）：抽帧（视频源）已在 collect_frames 内逐帧检查；
+        # 模型加载后、resolve_batch_params 动态实测（真实推理探针）前再查一次
+        # ——长耗时前置段不留取消空窗
+        _raise_if_cancelled(cancel_event)
 
         # 批量推理超参（同 v0.3 四档：resolve_batch_params 内 disable_tf32 + 动态实测；
         # 无 CUDA/无批量能力回退逐图；显式 batch_size/num_workers 恒优先）
@@ -329,13 +456,21 @@ class TrackingTool(Tool):
         _ts = _datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
         dets_per_frame = _detect_frames(
-            det, frames, prompts, threshold, batch_size, num_workers, self.use_sahi
+            det, frames, prompts, threshold, batch_size, num_workers, self.use_sahi,
+            cancel_event,
         )
 
         annotations: list[Annotation] = []
         vis_dir = Path("vis_outputs")
         if self.viz:
-            vis_dir.mkdir(exist_ok=True)
+            if disk_free_gb(vis_dir) < MIN_FREE_DISK_GB:
+                console.print(
+                    f"[yellow]磁盘余量不足 {MIN_FREE_DISK_GB}GB，跳过逐帧 PNG 可视化"
+                    "（MOT/JSON/HITL/成片视频不受影响）[/yellow]"
+                )
+                self.viz = False  # 余量保护（2026-09-03 实测：逐帧 PNG 写爆盘级联 Errno 122）
+            else:
+                vis_dir.mkdir(exist_ok=True)
 
         from auto2dlabel.agent.state import AgentState
         from auto2dlabel.tools.export import ExportTool
@@ -346,6 +481,10 @@ class TrackingTool(Tool):
 
         # 标注成片视频输出（仅视频源；帧目录不产片——避免污染数据集目录）。
         # 位置：源视频同目录 output_<原名>.mp4；帧率取源视频（异常回退 30）。
+        # 审查 #3 防损坏：写盘用 output_<原名>.mp4.tmp 临时名——VideoWriter 在
+        # release 前文件头不完整，SIGKILL 打穿 finally 若直写正式名会留下
+        # 「已存在且不可回读」的损坏 .mp4（下游误当成功成片）；.tmp 命名先写、
+        # finally 内 release 后 os.replace 原子改名，硬杀只残留可辨识的 .tmp。
         video_writer: Any | None = None
         video_path: Path | None = None
         source_path = Path(source)
@@ -364,7 +503,7 @@ class TrackingTool(Tool):
             first = cv2.imread(str(frames[0]))
             if first is not None:
                 h, w = first.shape[:2]
-                video_path = source_path.parent / f"output_{source_path.stem}.mp4"
+                video_path = source_path.parent / f"output_{source_path.stem}.mp4.tmp"
                 try:
                     video_writer = cv2.VideoWriter(
                         str(video_path),
@@ -387,7 +526,8 @@ class TrackingTool(Tool):
         locked_positions: dict[int, tuple[float, float]] = {}
 
         try:
-            for frame_path, dets in zip(frames, dets_per_frame):
+            for frame_idx, (frame_path, dets) in enumerate(zip(frames, dets_per_frame)):
+                _raise_if_cancelled(cancel_event)
                 bboxes = [
                     Bbox(
                         x=r.x,
@@ -514,9 +654,22 @@ class TrackingTool(Tool):
                     annotation_type="object_detection_tracking",
                     timestamp=_ts,
                 )
+                # v1.0 P3 进度协议：每帧完成回调（TUI 任务面板消费）
+                if progress_cb is not None:
+                    progress_cb(frame_idx + 1, len(frames))
         finally:
             if video_writer is not None:
                 video_writer.release()
+            # 成片改名（审查 #3）：release 后文件才可回读；SIGKILL 打穿 finally
+            # 时 .tmp 残留、正式名不产生——下游不会误读损坏成片
+            if video_path is not None and video_path.suffix == ".tmp":
+                _final_video = video_path.with_suffix("")
+                try:
+                    os.replace(video_path, _final_video)
+                    video_path = _final_video
+                except OSError as _e:
+                    console.print(f"[yellow]⚠ 成片改名失败（保留 .tmp）: {_e}[/yellow]")
+                    video_path = None
 
         # MOT 导出（全帧合并，frame 从 1 起）
         from auto2dlabel.export.mot import export_mot
@@ -550,10 +703,13 @@ def _detect_frames(
     batch_size: int,
     num_workers: int,
     sahi: bool,
+    cancel_event: threading.Event | None = None,
 ) -> list[list[Any]]:
-    """逐帧检测（分块批量 + 0 框降阈值重试 + OOM 降级逐图），返回帧序对齐的结果。"""
-    from collections.abc import Callable
+    """逐帧检测（分块批量 + 0 框降阈值重试 + OOM 降级逐图），返回帧序对齐的结果。
 
+    cancel_event 置位 → 抛 TrackingCancelledError（v1.0 P3；torch forward 中途
+    Python 层无法打断，检查粒度 = 块/帧边界，进程级兜底由 TUI terminate 承担）。
+    """
     det_batch: Callable[[list[str], list[str], float, int], list[list[Any]]] | None = getattr(
         model, "detect_batch", None
     )
@@ -563,6 +719,7 @@ def _detect_frames(
         idx = 0
         try:
             for i in range(0, len(frames), batch_size):
+                _raise_if_cancelled(cancel_event)
                 chunk = frames[i : i + batch_size]
                 per = det_batch([str(p) for p in chunk], prompts, threshold, num_workers)
                 for frame_path, results in zip(chunk, per):
@@ -579,10 +736,15 @@ def _detect_frames(
 
             torch.cuda.empty_cache()
             for frame_path in frames[idx:]:
+                _raise_if_cancelled(cancel_event)
                 out.append(_detect_one(model, frame_path, prompts, threshold, sahi))
         return out
 
-    return [_detect_one(model, f, prompts, threshold, sahi) for f in frames]
+    out_frames: list[list[Any]] = []
+    for f in frames:
+        _raise_if_cancelled(cancel_event)
+        out_frames.append(_detect_one(model, f, prompts, threshold, sahi))
+    return out_frames
 
 
 def _detect_one(

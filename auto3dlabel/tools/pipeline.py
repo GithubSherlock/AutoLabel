@@ -31,7 +31,7 @@ from auto3dlabel.tools.cluster import cluster_instance
 from auto3dlabel.tools.device import disable_tf32
 from auto3dlabel.tools.fit import fit_box3d
 from auto3dlabel.tools.geometry import points_in_box
-from auto3dlabel.tools.visualize import draw_bev, draw_projection_check
+from auto3dlabel.tools.visualize import draw_bev, draw_lidar_bev_predictions, draw_projection_check
 
 
 def annotate_frame(
@@ -176,12 +176,15 @@ def _lidar_frame_result(
 
 
 def _draw_lidar_bev(frame: KittiFrame, result: FrameResult, out_dir: Path) -> None:
-    """BEV 对比图落盘（单帧/批量同源；目录按需创建）。"""
+    """BEV 点云预测图落盘（单帧/批量同源；目录按需创建）。
+
+    点云散点 + 预测 3D 框（类别色）+ GT 对照——验收产物（复用不复制：
+    单一事实源 draw_lidar_bev_predictions，chat 路径 tools3d 共用）。
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
-    result.bev_path = draw_bev(
+    result.bev_path = draw_lidar_bev_predictions(
         frame,
         out_dir / f"{frame.frame_id}_bev.png",
-        points_cam=None,  # LiDAR 直检无需语义点云散点（标定链 v0.1 已验证）
-        boxes=result.boxes3d,
+        result.boxes3d,
         gt_boxes=frame.load_gt3d(),
     )

@@ -15,6 +15,14 @@ from auto3dlabel.schema.box3d import Box3D, KittiFrame
 
 _BEV_SIZE = 800
 _BEV_RANGE = 60.0  # 鸟瞰视野：前后各 60m（车头 z 正向）
+_BEV_MAX_POINTS = 60000  # BEV 散点抽样上限（过密不增信息量，纯省时）
+
+# KITTI 3 类框配色（BGR）：Car 绿 / Pedestrian 青 / Cyclist 品红；未知类兜底绿
+_CLASS_COLORS = {
+    "Car": (0, 255, 0),
+    "Pedestrian": (255, 255, 0),
+    "Cyclist": (255, 0, 255),
+}
 
 
 def _depth_color(depth: np.ndarray, dmax: float = 80.0) -> np.ndarray:
@@ -57,9 +65,10 @@ def draw_bev(
     boxes: list[Box3D] | None = None,
     gt_boxes: list[Box3D] | None = None,
 ) -> str:
-    """鸟瞰图（800×800，视野 120m）：可选语义点云散点 + 预测 3D 框（绿）+ GT 框（蓝）。
+    """鸟瞰图（800×800，视野 120m）：可选点云散点 + 预测 3D 框（类别色+标签）+ GT 框（蓝）。
 
     points_cam: (N,3) 相机系点；colors: (N,3) BGR 色（None 时深度着色）。
+    预测框按 KITTI 类着色并标注类别名（未知类兜底绿）。
     """
     canvas = np.full((_BEV_SIZE, _BEV_SIZE, 3), 32, dtype=np.uint8)
 
@@ -86,12 +95,37 @@ def draw_bev(
             draw_box(b, (255, 128, 0), 1)  # 蓝 GT
     if boxes:
         for b in boxes:
-            draw_box(b, (0, 255, 0), 2)  # 绿预测
+            color = _CLASS_COLORS.get(b.label, (0, 255, 0))
+            draw_box(b, color, 2)
+            tx, ty = to_px(*b.corners_bev()[0])
+            cv2.putText(
+                canvas, b.label, (tx, ty - 6),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA,
+            )
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out), canvas)
     return str(out)
+
+
+def draw_lidar_bev_predictions(
+    frame: KittiFrame,
+    out_path: str | Path,
+    boxes: list[Box3D],
+    gt_boxes: list[Box3D] | None = None,
+) -> str:
+    """LiDAR 点云 BEV 预测图：点云散点（相机系，深度着色）+ 预测 3D 框（类别色）+ GT（蓝）。
+
+    cli run（pipeline._draw_lidar_bev）与 chat（tools3d 的 detect/visualize 工具）
+    共用单一事实源——点云线「BEV 点云预测图」验收产物；散点比例抽样防过密
+    （≤ _BEV_MAX_POINTS，与投影自检图同款抽样）。
+    """
+    pts = frame.load_calib().velo_to_cam(frame.load_points())
+    if len(pts) > _BEV_MAX_POINTS:
+        idx = np.linspace(0, len(pts) - 1, _BEV_MAX_POINTS).astype(int)
+        pts = pts[idx]
+    return draw_bev(frame, out_path, points_cam=pts, boxes=boxes, gt_boxes=gt_boxes)
 
 
 def draw_bev_semantic(

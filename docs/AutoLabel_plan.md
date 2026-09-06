@@ -20,6 +20,94 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 - **Auto3dLabel**：3D 标注（调研完成，MVP 走「2D 基础模型 → 3D 提升」路线，**2026-08-19 战略调整：主推进**，**v0.1 ✅（2026-08-24）+ v0.2 ✅（2026-08-27）+ v0.3 ✅（2026-08-31）+ v0.4 ✅（2026-09-02）**——P1 cuboid 手柄编辑 + P2 nuScenes 端到端标注闭环 + P3 KITTI 微调闭环，见 `auto3dlabel/milestone/`）
 - **人工介入点**：低置信度自动入 review/hard 队列 + Web 审核界面 + 主动学习采样，Agent 不确定时主动求助
 
+## Agent 工作流全景图（v1.0 P1+ 落盘状态，2026-09-06）
+
+> 上文核心链路的代码级展开（L1 入口 → L2 规划 → L3 执行 → L4 引擎 → L5 质量 → L6 HITL → L7 产物）。
+> LLM 决策点仅 3 处（① 对话式规划、② 质量处置、③ 批次调参）且条件触发——多 agent 编排框架不引入（论证见 `auto2dlabel/milestone/v0.6.md`）。
+> 2D/3D 复用边界：`agent/dialog.py` 骨架 + `agent/llm.py` 统一出口为共享层，planner/planner3d 各自注入 prompt 与 schema。
+
+```mermaid
+flowchart TD
+    subgraph ENTRY["L1 入口层"]
+        AUT["autolabel&lt;指令&gt;<br/>v1.0 统一入口"]
+        TUI["Textual TUI<br/>无参进入：/help /model /cost /new /resume /quit"]
+        ROUTE["route_domain 路由（单一事实源 autolabel/route.py）<br/>3D 引擎名单 · 3D 关键词 · 6 位帧号<br/>「宁 2D 勿错」（kitti 不是 3D 强特征）"]
+        C2D["auto2dlabel cli<br/>run / chat / track / sample / cost-report / web"]
+        C3D["auto3dlabel cli<br/>run / chat / nuscenes-queue / web"]
+    end
+
+    subgraph PLAN["L2 规划层（LLM 调用点 ①）"]
+        DIALOG["agent/dialog.py parse_with_dialog 通用骨架<br/>LLM → JSON + questions[] → 渲染问题 → 用户回答 → 回喂<br/>≤3 轮；questions 空 / 用户放弃 / 轮次耗尽 → 出缺参 plan<br/>降级链：非法 JSON / 空响应 → 单轮 parse → 代码兜底；无 key → 零 LLM"]
+        P2D["planner.parse_dialog → TaskPlan<br/>{steps, questions}<br/>prompt 外置 prompts/planner.md + catalog/GPU/批参摘要"]
+        P3D["planner3d.parse_dialog → Plan3D<br/>{frame_id, prompts, det_model, dataset}"]
+    end
+
+    subgraph EXEC["L3 执行层（两条路径）"]
+        ACHAT["路径A chat（默认）：execute_plan 纯代码执行<br/>逐 step 分派：检测 / 分割 / 分类 / OBB / 姿态 / 跟踪 / 批量"]
+        BRUN["路径B run：AgentOrchestrator（LLM 在环）<br/>≤3 迭代 tool-use：DetectionTool<br/>_detect_called 防重复 · 模型级重试"]
+        A3D["3D：run_3d_agent（复用 2D 循环薄壳）<br/>Detect3DTool / Visualize3DTool / fit_points 判据"]
+        BATCH3D["3D 批量：nuScenes 队列管线<br/>Plan3D dataset/sample_limit + seed=42 抽样确定性<br/>resume 幂等 + CPU 守卫降级"]
+    end
+
+    subgraph MODELS["L4 模型引擎层"]
+        M2D["2D 模型<br/>检测 29 · 分割 24 · 分类 16 · OBB 15 · Pose<br/>跟踪：ByteTrack / BoT-SORT + 指代 L1-L3 / ROI"]
+        M3D["3D 引擎工厂 detection3d.py<br/>LiDAR 直检：pointpillars / pvrcnn / bevfusion / centerpoint / fcos3d<br/>反投影回退：G-DINO/SAM2 mask → 反投影 → DBSCAN → bbox 拟合"]
+        BSTRAT["batch_strategy：每批恰 1 次 LLM 调参（③）<br/>conf 覆写；模型建议仅进 model_hint"]
+        RULE["批量铁律：rect=False + disable_tf32<br/>（批量 = 逐图 parity）"]
+    end
+
+    subgraph QUALITY["L5 质量层（LLM 调用点 ②）"]
+        F4["F4 代码级 evaluate_detections<br/>0 框 → 降阈值×0.5 重试 · 类别覆盖 · >200 框警告"]
+        EVAL["LLM Evaluate：仅 quality.ok == False 条件暴露<br/>accept / flag_for_review / retry_lower_threshold(×0.25) / retry_swap_model<br/>失败/超时 → 确定性规则（与 pick_alternate_model 同源）"]
+        HARNESS["LLMClient.chat 统一出口（全部 LLM 调用点公共层）<br/>usage 台账 → logs/llm_usage.jsonl + 费用折算<br/>max_tokens 分级 · json_mode · 前缀缓存 · 流式 on_delta<br/>→ cost-report 聚合（调用数/费用/缓存命中率）"]
+    end
+
+    subgraph HITL["L6 HITL 三档分流（AI 初稿 → 人工修正 → 数据反哺）"]
+        TRIAGE["triage_annotations<br/>采纳 / 复核 / 困难 → *_review.json"]
+        WEB["Web 复核<br/>2D :8765（拖拽/undo/快捷键/edited_by_human）<br/>3D REVIEW3D_DIR（three.js 四视图 + 改标签回写）"]
+        TRAIN["3D：train3d 微调 → 域内权重回灌引擎"]
+        SAMPLE["主动学习采样 sample --top-k"]
+    end
+
+    subgraph OUTPUT["L7 产物层"]
+        EXPORT["COCO / YOLO / VOC / LabelMe / cls / DOTA / YOLO-OBB / MOT / KITTI / nuScenes"]
+        FILES["reviews/（含 reviewed 增量）· logs/（llm_usage.jsonl + Chat_*.log）· outputs/"]
+    end
+
+    AUT -->|"无参"| TUI
+    AUT -->|"指令"| ROUTE
+    ROUTE -->|"2D"| C2D
+    ROUTE -->|"3D"| C3D
+    C2D -->|"chat"| P2D
+    P2D --> DIALOG
+    C3D -->|"chat"| P3D
+    P3D --> DIALOG
+    P2D -->|"缺参已补齐"| ACHAT
+    P3D --> A3D
+    P3D -->|"dataset=nuscenes"| BATCH3D
+    C2D -->|"run"| BRUN
+    C3D -->|"run（代码级直跑）"| M3D
+    ACHAT --> M2D
+    BRUN --> M2D
+    A3D --> M3D
+    BATCH3D --> M3D
+    M2D --> F4
+    M3D --> F4
+    F4 -->|"quality.ok == False"| EVAL
+    EVAL -->|"retry / swap"| M2D
+    EVAL -.->|"失败降级"| F4
+    F4 --> TRIAGE
+    TRIAGE --> WEB
+    TRIAGE --> SAMPLE
+    WEB --> TRAIN
+    TRAIN -.->|"域内权重回灌"| M3D
+    TRIAGE --> EXPORT
+    TRIAGE --> FILES
+    DIALOG -.->|"①"| HARNESS
+    EVAL -.->|"②"| HARNESS
+    BSTRAT -.->|"③"| HARNESS
+```
+
 ## Target User（目标用户）
 
 - **主要用户**：AI 算法工程师 / 数据科学家，需要为训练/微调模型快速生成高质量预标注，再在外部审核工具（Label Studio / CVAT）中精修
@@ -60,7 +148,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 | **v0.4** | + 3D 基石（Tracking 视频时序 ID + KITTI 域 2D 质量 + Agentic 骨架收尾） | ✅ 完成 2026-08-23（见 `auto2dlabel/milestone/v0.4.md` 与 `auto2dlabel/tests/test-v0.4.md`） |
 | **v0.5** | + Pose Estimation + VLM 指代检测（Florence-2/Qwen2-VL）+ 自动车道 ROI 等非 3D 内容（3D 使命完成后殿后；定义见 `auto2dlabel/milestone/v0.5.md`） | ✅ 完成 2026-08-23 |
 | **v0.6** | + **对话式 Agent 统一入口**（chat 唯一入口 + LLM 多轮对话确定参数）+ mmdet/mmpose 双引擎 + LLM Harness Token 降本（定义见 `auto2dlabel/milestone/v0.6.md`） | ✅ 完成 2026-08-31（实测 `auto2dlabel/tests/test-v0.6.md`） |
-| **v1.0** | + **Agentic 交互化**（产品形态跃迁：`autolabel` 命令 → Textual 对话式终端界面 + 多模型 API 可配置 + 后台任务面板 + 会话管理；企划见 `docs/Agentic_UI_plan.md`，执行指南见下方 §Agentic 交互化） | ⏳ 企划完成、可开工（2026-09-02 3D v0.4 收尾，资源冲突解除） |
+| **v1.0** | + **Agentic 交互化**（产品形态跃迁：`autolabel` 命令 → Textual 对话式终端界面 + 多模型 API 可配置 + 后台任务面板 + 会话管理 + HITL 指挥台；企划见 `docs/Agentic_UI_plan.md`，执行指南见下方 §Agentic 交互化） | ✅ **P1 2026-09-02**（TUI 骨架 + 流式改造，四验收全过，实测 `auto2dlabel/tests/test-v1.0.md`）；**P1+ 2026-09-02** 批量 nuScenes 扩展（3D chat 直跑队列管线：Plan3D dataset/sample_limit + 抽样确定性 + CPU 守卫降级，用户原指令实测跑通）；**P2–P5 ✅ 2026-09-06**（P2 provider 注册表 `/model` 三态 + 台账 provider 字段 → P3 后台任务面板（`[AL_PROGRESS]` 行协议 + `/cancel` 两级终止 + `--resume` 续跑引导）→ P4 会话 JSONL（`/new` `/resume` 真实现）→ P5 HITL 指挥台（`/review` 三档统计 + `/web` 一键 Web 复核）；pytest 1267 + smoke_tui 31/31，质量门 pyright 0 / mypy 168 / ruff 86 存量不恶化） |
 
 > 编号注记：早期路线表曾把「分类+OBB」标为 v0.2，实现时后移为 v0.3（v0.2 编号已被分割里程碑文件占用，不重命名现有文件）。
 > 战略注记（2026-08-19）：Auto2dLabel 为 Auto3dLabel 做基石——优先交付能支撑 3D 的内容（原 v1.0 Tracking 提前至 v0.4），原 v0.4 Pose 平移至 v0.5；与 Auto3dLabel v0.1 双线并行。
@@ -81,7 +169,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 
 | 项 | 状态 |
 | --- | --- |
-| **Auto2dLabel** | v0.1–v0.3 ✅：检测 + 分割 + 分类（CLIP/SigLIP + torchvision 14 款）+ OBB（YOLO-OBB）+ Web 闭环 + Agentic 闭环，**84 个模型**（含 cityscapes 域内 Mask R-CNN，全量 500 图 mAP 0.5149），**12 数据集 Benchmark**（含 DOTA OBB 旋转框；CPU 可行性 + GPU 复测均完成，见 `auto2dlabel/tests/test-v0.3.md`）；**v0.4 ✅ 2026-08-23**（Tracking Phase 1 ByteTrack + Phase 2 BoT-SORT/约束过滤/KITTI difficulty + **KITTI 域内微调 0.8867** + Phase 3 AgentState 续跑/模型级重试/Web 三件套，见 `tests/test-v0.4.md`）；**v0.5 ✅ 2026-08-23**（Pose YOLO-pose / 指代 L2 Florence-2 + **L3 Qwen2-VL-7B 4bit**（GPU 冒烟 33.2s，L2 失败自动升级阶梯）/ 自动车道 ROI UFLD / ILSVRC2012 val 分类扩展（全量 5 万图 top-1 0.6968 与官方一致）/ **Web 复核增强**（CVAT 借鉴：快捷键/undo/手柄/列表/过滤/右键/区域 issue + edited_by_human 数据回路 + 已复核重开，jsdom 冒烟 76/76），见 `tests/test-v0.5.md`；质量门 595/0/167/127）；**v0.6 ✅ 2026-08-31**（对话式 Planner 多轮收集 + mmdet 双引擎 **RTMDet/Mask2Former**（rtmdet_l 0.6179 ≈ fasterrcnn 0.6287 同档；mask2former mask mAP 0.6008 超两段式 SAM2 0.5778）+ mmpose **RTMPose 精度档**（0.5455 vs yolo11n-pose 0.4545）+ **LLM Harness**（usage 台账/前缀缓存命中率 97.7%/json mode/Evaluate 代码级降级）；实测修复 torch 2.6+ weights_only 拒载 + COCO 91→80 类别错位两 bug（均带回归），见 `auto2dlabel/tests/test-v0.6.md`） |
+| **Auto2dLabel** | v0.1–v0.3 ✅：检测 + 分割 + 分类（CLIP/SigLIP + torchvision 14 款）+ OBB（YOLO-OBB）+ Web 闭环 + Agentic 闭环，**84 个模型**（含 cityscapes 域内 Mask R-CNN，全量 500 图 mAP 0.5149），**12 数据集 Benchmark**（含 DOTA OBB 旋转框；CPU 可行性 + GPU 复测均完成，见 `auto2dlabel/tests/test-v0.3.md`）；**v0.4 ✅ 2026-08-23**（Tracking Phase 1 ByteTrack + Phase 2 BoT-SORT/约束过滤/KITTI difficulty + **KITTI 域内微调 0.8867** + Phase 3 AgentState 续跑/模型级重试/Web 三件套，见 `tests/test-v0.4.md`）；**v0.5 ✅ 2026-08-23**（Pose YOLO-pose / 指代 L2 Florence-2 + **L3 Qwen2-VL-7B 4bit**（GPU 冒烟 33.2s，L2 失败自动升级阶梯）/ 自动车道 ROI UFLD / ILSVRC2012 val 分类扩展（全量 5 万图 top-1 0.6968 与官方一致）/ **Web 复核增强**（CVAT 借鉴：快捷键/undo/手柄/列表/过滤/右键/区域 issue + edited_by_human 数据回路 + 已复核重开，jsdom 冒烟 76/76），见 `tests/test-v0.5.md`；质量门 595/0/167/127）；**v0.6 ✅ 2026-08-31**（对话式 Planner 多轮收集 + mmdet 双引擎 **RTMDet/Mask2Former**（rtmdet_l 0.6179 ≈ fasterrcnn 0.6287 同档；mask2former mask mAP 0.6008 超两段式 SAM2 0.5778）+ mmpose **RTMPose 精度档**（0.5455 vs yolo11n-pose 0.4545）+ **LLM Harness**（usage 台账/前缀缓存命中率 97.7%/json mode/Evaluate 代码级降级）；实测修复 torch 2.6+ weights_only 拒载 + COCO 91→80 类别错位两 bug（均带回归），见 `auto2dlabel/tests/test-v0.6.md`）；**v1.0 P1 ✅ 2026-09-02**（Agentic 交互化：`autolabel` 统一入口（无参 → Textual TUI / 指令 → route_domain 路由一次性对话）+ ChatApp 骨架（斜杠命令 6 + 凭据横幅 + Worker subprocess 执行通道）+ LLM 流式改造（OpenAI/Anthropic 双协议，台账统一出口不动）；纯 CPU 新机器基线 mypy 183 / ruff 83 / pytest 1129 起，交付后 mypy 174 / ruff 74 / pyright 0/0/0 / pytest 1129 + smoke_tui 11/11，实测 `auto2dlabel/tests/test-v1.0.md`）；**v1.0 P1+ ✅ 2026-09-02**（批量 nuScenes 扩展：3D chat 分派队列管线（Plan3D dataset/sample_limit + seed=42 抽样确定性 + resume 幂等）+ CPU 守卫（bevfusion/centerpoint CUDA op 无 CUDA 自动降级 pointpillars_nus，E2E 用户原指令实测跑通）；pytest 1141）；**v1.0 P2–P5 ✅ 2026-09-06**（P2 provider 注册表：`configs/providers.yaml`（deepseek/openai/anthropic/ollama，`api_key_env` 只引用环境变量名）+ `/model` 列出/切换/set-key + runner 契约一次升级到 5 参（instruction/domain/provider/on_line/on_progress）+ per-provider 用量台账；P3 后台任务面板：`[AL_PROGRESS] done/total` stdout 行协议（4 挂点 cli_run/cli_commands/tracking/3D chat）+ TrackingTool `progress_cb`/`cancel_event`（`TrackingCancelled` 收敛既有 except ValueError 链）+ `/cancel` 两级终止（terminate→wait→kill）+ `--resume` manifest 续跑引导；P4 会话管理：`logs/chat_sessions.jsonl` 逐行落盘（子进程回显 record=False 防膨胀）+ `/new` `/resume` 真实现（重放不重跑任务）；P5 HITL 指挥台：`/review` 三档分流统计（2D 两档 + 3D 三档，如实按两侧 summary schema）+ `/web` 一键 spawn Web 复核（端口 env 检测 + 10s 轮询 + kill 指引）；质量门 pyright 0 / mypy 168 ≤169 / ruff 86 存量不恶化 / pytest 1267 / smoke_tui 31/31） |
 | **质量门** | pyright 0 / mypy 169（auto2dlabel 基线不恶化）/ ruff 119（基线 127 不恶化）/ pytest 双环境 1046+1049 passed（每版本硬性门槛，命令与标准见 `Benchmark_plan.md` §10.6；auto3dlabel 侧归零：ruff 0 / mypy 0 / pyright 0） |
 | **代码托管** | GitHub `GithubSherlock/AutoLabel`（private），权重与 `.env` 不入库 |
 | **Auto3dLabel** | 调研 ✅，路线定案（2D → 3D 提升）；**2026-08-19 战略调整：主推进**；**v0.1 ✅ 2026-08-24**（单帧 KITTI 五步管线 + Agentic 闭环 + Web 复核 + 128 用例，质量门全绿；3D 层 AP 近零为反投影路线精度天花板实证，演进方向 CenterPoint/PointPillars）；**v0.2 ✅ 2026-08-27**（mmdet3d 硬装 PointPillars——KITTI 全 val 官方口径 Car 89.8/82.0/77.2 超 zoo + Tracker3D 多帧 + nuScenes Mini，实测 `auto3dlabel/tests/test-v0.2.md`）；**v0.3 ✅ 2026-08-31**（P1 对话式 Planner → P2 PV-RCNN/CenterPoint 精度档（pvrcnn_kitti 官方口径 / centerpoint_nus 23.4）→ P3 BEVFusion 融合（mAP 27.0）+ pgd KITTI 单目（33.7）→ P4 Web 真 3D 四视图复核（与 2D :8765 同端口共存）→ P5 LabelAny3D 8 步管线全链路验证（判据不达标 → 决策不接入，误差归因落盘）→ P6 模型矩阵扩展（FCOS3D 单目基准 mAP 0.8/car 8.0 + FreeAnchor 速度档 25.8 全 Mini 最快）+ 共享 Token 工程零实现受益，实测 `auto3dlabel/tests/test-v0.3.md`）；**v0.4 ✅ 2026-09-02**（P1 cuboid 手柄编辑（六面拖拽 + undo/redo，smoke 94 断言）→ P2 nuScenes 端到端标注闭环（bevfusion 队列 81 样本 → Web 复核点云 + 6 相机 → devkit 标签导出 → 回灌评测 mAP 24.6）→ P3 KITTI 微调闭环（pointpillars 300/40 帧冒烟训练 exit 0，40-point 主口径微调全面优于或持平官方，Car hard 76.4→80.5，实测 `auto3dlabel/tests/test-v0.4.md`） |
@@ -102,7 +190,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 
 ## 下一步
 
-（2026-08-19 战略调整：Auto2dLabel 为 Auto3dLabel 做基石——两模块**双线并行**：3D 主推进 v0.1 单帧 MVP，2D 侧优先交付支撑 3D 的内容（原 v1.0 Tracking 提前至 v0.4）；3D 使命完成后才做 Pose 等非 3D 内容（v0.5）。2026-08-17 首调：Auto3dLabel v0.1 提前——2D 基础能力已就绪、单帧 3D 不依赖 Pose/Tracking。2026-08-28 二调：**对话式 Agent 架构迭代优先**——v0.6（2D）+ auto3dlabel v0.3 P1（3D）双线并行，其余 3D 目标顺延。**2026-08-31 双双收尾**：auto2dlabel v0.6 ✅ 与 auto3dlabel v0.3 ✅（P1–P6 全完成）。**2026-09-02 auto3dlabel v0.4 ✅**：HITL 编辑闭环（P1 手柄编辑）+ nuScenes 端到端标注闭环（P2，回灌出表）+ KITTI 微调闭环（P3，40-point 主口径全面优于或持平官方）——「AI 初稿 → 人工修正 → 数据反哺模型」完整回路在 3D 侧闭环。**2026-09-02 三调：Agentic 交互化立项**——3D 侧闭环后主线回到产品形态跃迁，v1.0 P1（TUI + 流式）可开工（执行指南见上方 §Agentic 交互化执行指南）；3D 侧下一轮议题：自标注增量微调（P3b/P4，nuScenes 域）、无 LiDAR 域标注候选（v2+））
+（2026-08-19 战略调整：Auto2dLabel 为 Auto3dLabel 做基石——两模块**双线并行**：3D 主推进 v0.1 单帧 MVP，2D 侧优先交付支撑 3D 的内容（原 v1.0 Tracking 提前至 v0.4）；3D 使命完成后才做 Pose 等非 3D 内容（v0.5）。2026-08-17 首调：Auto3dLabel v0.1 提前——2D 基础能力已就绪、单帧 3D 不依赖 Pose/Tracking。2026-08-28 二调：**对话式 Agent 架构迭代优先**——v0.6（2D）+ auto3dlabel v0.3 P1（3D）双线并行，其余 3D 目标顺延。**2026-08-31 双双收尾**：auto2dlabel v0.6 ✅ 与 auto3dlabel v0.3 ✅（P1–P6 全完成）。**2026-09-02 auto3dlabel v0.4 ✅**：HITL 编辑闭环（P1 手柄编辑）+ nuScenes 端到端标注闭环（P2，回灌出表）+ KITTI 微调闭环（P3，40-point 主口径全面优于或持平官方）——「AI 初稿 → 人工修正 → 数据反哺模型」完整回路在 3D 侧闭环。**2026-09-02 三调：Agentic 交互化立项**——3D 侧闭环后主线回到产品形态跃迁，v1.0 P1（TUI + 流式）可开工（执行指南见上方 §Agentic 交互化执行指南）；3D 侧下一轮议题：自标注增量微调（P3b/P4，nuScenes 域）、无 LiDAR 域标注候选（v2+）。**2026-09-02 v1.0 P1 ✅**：TUI 骨架 + 流式改造交付（`autolabel` 统一入口 / ChatApp 斜杠命令 / chat() stream+on_delta 双协议 / route_domain 路由，pytest 1129 + smoke_tui 11/11 + 质量门不恶化）；下一议题 P2 provider 注册表）。**2026-09-06 v1.0 P2–P5 ✅**：Agentic 交互化剩余四阶段连续交付（P2 provider 注册表 → P3 后台任务面板 → P4 会话管理 → P5 HITL 指挥台，逐 Phase 质量门全绿；pytest 1267 + smoke_tui 31/31 + pyright 0 / mypy 168 / ruff 86 存量不恶化，全部改动留工作区未 commit）——「自然语言 → Agent 规划 → 多引擎执行 → 质量评估 → HITL 三档分流 → 复核回流」完整回路在 TUI 指挥台一站可操作；下一议题：3D 侧自标注增量微调（P3b/P4，nuScenes 域）、无 LiDAR 域标注候选（v2+））
 
 | 优先级 | 事项 | 内容 |
 | --- | --- | --- |
@@ -114,7 +202,7 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 | 4' | **Auto3dLabel v0.4**（HITL 编辑闭环 + 训练微调闭环）✅ 2026-09-02 | P1 cuboid 手柄编辑（AI 初稿 → 人工修正几何完整化）→ P2 nuScenes 端到端标注闭环（队列 → Web 复核 → devkit 导出 → 回灌评测）→ P3 KITTI 微调闭环（mmdet3d 训练管线 + 同口径评测对比官方权重，40-point 主口径全面优于或持平）（里程碑见 `auto3dlabel/milestone/v0.4.md`） |
 | 5 | 已知缺口消化 | mot 域微调权重（cityscapes ✅ 已闭环 0.5149，时机与域内数据同步）、分类数据集扩展（ImageNet100 ✅ + ILSVRC2012 val ✅，cifar/CUB200 待排期）、Web bbox 拖拽/标签编辑、分类与 OBB 的 Web 展示（已随 v0.4 Phase 3 消化） |
 | 6 | **GPU 必需项**（2026-08-23 GPU 3080 Ti 到位，三项全部 ✅） | ① 指代 L3 Qwen2-VL-7B ✅（NF4 4bit ~4.5G，红车锁定冒烟 33.2s）；② KITTI 域内微调闭环 ✅（best.pt val mAP50 0.9430，官方口径 overall 0.8867 vs 基线全量同口径 0.2702；cityscapes 0.0082→0.5149 先例第二例）；③ 全量 ImageNet1k 5 万图基准 ✅（top-1 0.6968 / top-5 0.8899，440.8s） |
-| 7 | **Agentic 交互化 v1.0 P1**（2026-09-02 可开工，企划 `docs/Agentic_UI_plan.md` 立项前提全满足） | TUI 外壳 + 流式对话（具体步骤见下方 §Agentic 交互化执行指南） |
+| 7 | **Agentic 交互化 v1.0**（2026-09-02 立项，企划 `docs/Agentic_UI_plan.md` 立项前提全满足）✅ 2026-09-06 | P1 ✅ 2026-09-02（TUI 外壳 + 流式对话，验收与实测见 §Agentic 交互化执行指南 / `auto2dlabel/tests/test-v1.0.md`）；P1+ ✅ 2026-09-02（批量 nuScenes 扩展）；P2 ✅ provider 注册表（providers.yaml + /model 三态 + per-provider 台账）→ P3 ✅ 后台任务面板（[AL_PROGRESS] 行协议 + /cancel 两级终止 + manifest 续跑引导）→ P4 ✅ 会话管理（logs/chat_sessions.jsonl + /new /resume 真实现）→ P5 ✅ HITL 指挥台（/review 三档统计 + /web 一键 Web 复核）；P2–P5 实测见 `auto2dlabel/tests/test-v1.0.md` |
 
 ## 差异化定位
 
@@ -123,10 +211,17 @@ AutoLabel 是一个软件开发计划，其中暂定包括 **Auto2dLabel** 和 *
 
 ---
 
-## Agentic 交互化执行指南（v1.0，2026-09-02 可开工）
+## Agentic 交互化执行指南（v1.0，2026-09-02 可开工 → 2026-09-06 P1–P5 全交付）
 
-> 详细企划与评审记录见 `docs/Agentic_UI_plan.md`；本节 = 下次会话直接执行的浓缩版（定案 + 分期 + 第一步 + 坑清单）。
-> **状态**：立项前提三项全满足（3D v0.4 已收尾不抢资源 / Textual 版本评估通过 / 统一入口评审通过）。开工须用户显式确认。
+> 详细企划与评审记录见 `docs/Agentic_UI_plan.md`；本节 = 执行浓缩版（定案 + 分期 + 第一步 + 坑清单）。
+> **状态（2026-09-06）**：**P1 ✅ 已交付**——① `autolabel` 统一入口（无参 → TUI；指令 → `route_domain` 路由一次性对话，2D/3D 两端零重构）；② ChatApp 骨架（对话区/输入区/Footer + 凭据横幅 + 斜杠命令 /help /model /cost /new /resume /quit + Worker 线程 subprocess 执行通道，runner 可注入）；③ LLM 流式改造（`LLMClient.chat()` 加 `stream: bool` + `on_delta` 增量回调，OpenAI/Anthropic 双协议，usage 台账统一出口不动，json_mode 与 stream 正交，响应仍全量返回解析兜底）+ 穿透链（dialog → planner×2 → cli 调用点×2）。四验收全过（进对话 / 流式输出 / /cost 出台账 / 无 key 降级提示）；新增 31 用例 + smoke_tui 11 断言，质量门与实测见 `auto2dlabel/tests/test-v1.0.md`。**P1+ ✅ 2026-09-02**（批量 nuScenes：3D chat 直跑队列管线 + CPU 守卫降级，E2E 用户原指令「随机 2 张 + 推荐模型」实测跑通出 2 队列文件；pytest 1141）。**P2–P5 ✅ 2026-09-06 连续交付**（逐 Phase 质量门全绿才进下一 Phase）：
+
+- **P2 provider 注册表**：`auto2dlabel/configs/providers.yaml`（deepseek/openai/anthropic/ollama，`api_key_env` 只引用环境变量名、绝不含密钥；`api_key_env: null` 即本地端点免 key）+ `llm.py` ProviderSpec/load/create_client 四档模型解析 + `/model` 列出/`set <name>`/`set-key` 三态 + runner 契约一次升级到 5 参（`--provider` 透传子进程）+ 台账 provider 字段（旧行 `-` 容错）+ 红线修复（`auto3dlabel/configs/.env` git rm --cached + `.env.example` ×2）
+- **P3 后台任务面板（差异化核心）**：`[AL_PROGRESS] done/total` stdout 行协议（4 挂点：cli_run 图像循环 / cli_commands 批量分支 / tracking 帧循环 / 3D chat 帧循环，协议行进面板不进对话区）+ TrackingTool `forward` 加 `progress_cb`/`cancel_event`（`TrackingCancelled` 抛 ValueError 子类收敛既有 except 链，finally video_writer 天然释放）+ `/cancel`（无参全量/带 id 单任务，terminate→wait(5s)→kill 两级 + `_ACTIVE_PROCS` 登记表按指令匹配）+ 任务面板（指令截断 40 字 + ProgressBar 不确定态转确定态 + 状态行）+ 取消后 `--resume` manifest 引导（TUI 从 stdout 缓存倒序扫提取）
+- **P4 会话管理**：`logs/chat_sessions.jsonl` 单文件逐行 append（kind: user/assistant/system/task_result + task{id,status,manifest}；子进程回显 record=False 防膨胀；损坏行跳过/旧行缺字段容错）+ `/new`（新 session_id + 清屏 + seq 归零）+ `/resume`（无参列最近 5 会话 / `<session_id>` 逐行重放，markup 保真；重放不重跑任务，续跑走 manifest 引导）
+- **P5 HITL 指挥台**：`/review` 三档分流统计（2D `outputs/*_review.json` 两档（无 accepted 如实展示）+ 3D `outputs/kitti3d/reviews/` 三档；`*.reviewed` 侧车排除；损坏 JSON 跳过；每次重扫零缓存）+ `/web [2d|3d]`（端口 env AUTOLABEL_PORT/AUTOLABEL3D_PORT 检测 → 已占用提示 / spawn detach（DEVNULL）+ 10s 轮询 → URL + kill 指引；web/ 无 `__init__.py` 走脚本路径 spawn）
+
+质量门：pyright 0 / mypy 168 ≤169 / ruff 86 存量不恶化（P2–P5 文件全绿）/ pytest 1267 passed / smoke_tui 31/31；全部改动留工作区未 commit。红线顺带修复提醒：3D `.env` key 已进 git 历史（5b8768d 进入，已 git rm --cached 止血未来），**轮换与否由用户决定**。
 
 ### 一、定案（勿再讨论）
 
@@ -167,10 +262,12 @@ pip install "textual>=8.2.8,<9"          # 锁上界（8.x 重构中）；rich 1
 
 ### 五、已知坑（写码必读）
 
-1. **Textual 8.x API 重构**（勿凭 0.x/6.x 旧版记忆）：Footer 无 `.content`、App 无 `.bindings`（内化 `_bindings`）、Label 无 `.renderable`——渲染断言统一走 `export_screenshot()`；**SVG 里空格被编码为 `&#160;`**，字符串断言用无空格片段
+1. **Textual 8.x API 重构**（勿凭 0.x/6.x 旧版记忆）：Footer 无 `.content`、App 无 `.bindings`（内化 `_bindings`）、Label 无 `.renderable`——渲染断言统一走 `export_screenshot()`；**SVG 里空格被编码为 `&#160;`**，字符串断言用无空格片段；**顶层 `textual.widgets` 无重导出**（8.2.8 实测，组件在 `_input`/`_static`/`_footer` 私有子模块，P1 直接 import 具体子模块）；**py.typed 为 partial** → mypy 报 `App`/`work` 未类型化，行级 `# type: ignore`（textual 通配 override 不生效，错误报在 autolabel 模块）
 2. 每个组件属性访问先 `dir()` 实测，把验证写进测试（8.x 频繁内化）
 3. 本项目与 Claude Code 的本质差异：**工具是秒~分钟级推理任务**——TUI 必须带后台任务面板（对话区可继续输入），这是 P3 最大工程增量，P1 骨架即预留 Worker 挂点
 4. 无 key 降级链在 TUI 内保持（`has_credentials` 判定 + 代码级兜底，v0.6 红线不回归）
+5. **推理模型禁用低温（2026-09-02 实测）**：`deepseek-v4-flash` 等推理模型在 planner 低温确定性请求（temperature=0）下推理链吃满 max_tokens 产出空 content（temp=0.1 → reasoning 1023/content 0）——`chat()` 统一出口已钳制（温度 1.0 + 预算 ≥4096，测试锁死），但推理长度高方差仍可能截断；**标注规划任务 .env 用 `deepseek-chat`**（.env 注释已警示）
+6. **TUI 子进程必须 `-u` 无缓冲**：stdout 连 pipe 时 Python 默认全缓冲，输出积压到进程退出才 flush，TUI 表现为「无响应」（回归断言锁死）
 
 ---
 

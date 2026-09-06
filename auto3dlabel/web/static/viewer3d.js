@@ -11,9 +11,8 @@
   if (!canvas) return;
 
   const THREE = root.THREE;
-  const COLOR_MAP = { Car: 0x4da3ff, Pedestrian: 0x58d68d, Cyclist: 0xe8b339 };
-  const SEL_COLOR = 0xffd166;
-  const colorFor = (label) => COLOR_MAP[label] || 0xb0b6c0;
+  const SEL_COLOR = L3D.SEL_COLOR;
+  const colorFor = L3D.colorFor; // 单一事实源：logic3d.js（app.js 相机图叠加同源）
 
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setClearColor(0x14161a);
@@ -85,7 +84,7 @@
     for (const o of objects) scene.remove(o.group);
     objects.length = 0;
     builtForPayload = payload;
-    for (const obj of payload.objects || []) {
+    for (const obj of (payload && payload.objects) || []) {
       const corners = obj.corners;
       if (!corners || corners.length !== 8) continue;
       const group = new THREE.Group();
@@ -102,12 +101,13 @@
       group.add(edges);
 
       const head = L3D.headLine(corners);
+      let hline = null;
       if (head) {
         const hp = [...L3D.camToThree(head[0][0], head[0][1], head[0][2]),
           ...L3D.camToThree(head[1][0], head[1][1], head[1][2])];
         const hgeo = new THREE.BufferGeometry();
         hgeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(hp), 3));
-        const hline = new THREE.Line(hgeo, new THREE.LineBasicMaterial({ color: 0xe5534b }));
+        hline = new THREE.Line(hgeo, new THREE.LineBasicMaterial({ color: 0xe5534b }));
         hline.frustumCulled = false;
         group.add(hline);
       }

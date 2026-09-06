@@ -40,6 +40,7 @@ def parse_with_dialog(
     instruction: str,
     max_rounds: int = 3,
     call_site: str = "dialog",
+    on_delta: Callable[[str], None] | None = None,
 ) -> PlanT:
     """多轮对话收集缺参 → 返回已补全/缺参的 plan。
 
@@ -48,6 +49,8 @@ def parse_with_dialog(
         system_prompt: 调用方注入的规划 prompt（含模型目录/GPU 上下文等资产）。
         parse_fn: LLM 响应 content → plan（schema 绑定，如 _parse_json_response）。
         ask_fn: 渲染问题并收集回答 → 回答文本（""/空白 = 用户放弃对话）。
+        on_delta: LLM 流式增量回调（v1.0 P1；None = 非流式旧路径——测试
+            Fake 的 chat 覆写无 stream 参数，条件传参保护兼容）。
         instruction: 原始用户指令。
         max_rounds: LLM 解析轮次上限（默认 3）。
         call_site: usage 台账调用点标注（v0.6 Phase 4；2D/3D 各注入区分）。
@@ -64,6 +67,10 @@ def parse_with_dialog(
     accumulated: list[str] = []
 
     for i in range(max_rounds):
+        # 流式条件传参：on_delta 为 None 时保持旧 6 参数签名（测试 Fake 兼容）
+        stream_kwargs: dict[str, Any] = {}
+        if on_delta is not None:
+            stream_kwargs = {"stream": True, "on_delta": on_delta}
         response = llm.chat(
             messages,
             tools=None,
@@ -71,6 +78,7 @@ def parse_with_dialog(
             max_tokens=1024,
             json_mode=True,
             call_site=call_site,
+            **stream_kwargs,
         )
         if not response.content:
             raise ValueError("LLM 返回空响应，无法解析任务")

@@ -122,8 +122,16 @@ def generate_review_queue(
     version: str = "v1.0-mini",
     tau_high: float = 0.7,
     tau_low: float = 0.3,
+    limit: int | None = None,
+    seed: int = 42,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> dict[str, Path]:
-    """val 场景全量 → 复核队列（resume 幂等：已存在 {sample_token}_review.json 跳过）。"""
+    """val 场景 → 复核队列（resume 幂等：已存在 {sample_token}_review.json 跳过）。
+
+    limit: 随机抽样 N 个 sample（seed 固定确定性；None/0 = 全量）——抽样
+    先于 resume 决策，重跑同一子集幂等。progress_cb(done, total)：每样本
+    完成回调（v1.0 P1 起供 TUI/CLI 进度回显，P3 后台任务面板同挂点）。
+    """
     nusc = load_nuscenes(root=dataroot, version=version)
     dataroot_p = Path(nusc.dataroot)
     class_names = list(det.class_names)  # 触发懒加载——config 真实类序
@@ -133,14 +141,26 @@ def generate_review_queue(
         predict_sample_nus, det, nusc=nusc, dataroot=dataroot_p,
         conf=conf, class_names=class_names,
     )
+    pairs: list[tuple[str, dict]] = [
+        (scene_name, sample)
+        for scene_name in val_scene_names(version)
+        for sample in samples_of_scene(nusc, scene_name)
+    ]
+    if limit is not None and 0 < limit < len(pairs):
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(len(pairs), size=limit, replace=False)
+        pairs = [pairs[int(i)] for i in idx]
     written: dict[str, Path] = {}
-    for scene_name in val_scene_names(version):
-        for sample in samples_of_scene(nusc, scene_name):
-            path = out / f"{sample['token']}_review.json"
-            if path.is_file():
-                continue  # resume：已存在跳过（幂等）
-            written[sample["token"]] = queue_one_sample(
-                predict, sample, scene_name, nusc, dataroot_p, out,
-                tau_high=tau_high, tau_low=tau_low,
-            )
+    for done, (scene_name, sample) in enumerate(pairs, start=1):
+        path = out / f"{sample['token']}_review.json"
+        if path.is_file():
+            if progress_cb is not None:
+                progress_cb(done, len(pairs))  # resume 跳过的样本也计进度
+            continue
+        written[sample["token"]] = queue_one_sample(
+            predict, sample, scene_name, nusc, dataroot_p, out,
+            tau_high=tau_high, tau_low=tau_low,
+        )
+        if progress_cb is not None:
+            progress_cb(done, len(pairs))
     return written

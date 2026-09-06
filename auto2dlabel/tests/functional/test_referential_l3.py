@@ -221,7 +221,12 @@ def test_load_requires_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_load_requires_cached_weights(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """权重未就位 → 快速失败并提示下载脚本（不静默触发 16GB 下载）。"""
+    """权重未就位 → 快速失败并提示下载脚本（不静默触发 16GB 下载）。
+
+    patch GPU 检查使测试自包含（GPU 检查在权重检查之前；纯 CPU 机器上
+    不 patch 会先撞 GPU 错误——本测试意图是权重分支）。
+    """
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(l3, "L3_CACHE_DIR", tmp_path / "nonexistent")
     with pytest.raises(RuntimeError, match="download_qwen_l3"):
         QwenVLReferentialResolver()._load()
@@ -260,7 +265,11 @@ def _patch_cli_track(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             captured.update(kwargs)
 
         def forward(
-            self, source: str, prompts: Any, confidence_threshold: float
+            self,
+            source: str,
+            prompts: Any,
+            confidence_threshold: float,
+            progress_cb: Any = None,
         ) -> None:
             pass
 

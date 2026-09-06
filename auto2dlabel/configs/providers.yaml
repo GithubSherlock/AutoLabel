@@ -1,0 +1,29 @@
+# LLM provider 注册表（v1.0 P2）：连接配置单一事实源，入库。
+# 绝不含密钥——api_key_env 只引用环境变量名，密钥写 configs/.env（不入库，模板见 .env.example）。
+# api_key_env: null = 本地免 key 端点（Ollama 等，SDK 用占位 key "EMPTY"）。
+# 注意：开启鉴权的本地端点（如 vLLM --api-key）应配置真实 api_key_env 变量名，
+# 不要写 null——null 只代表「端点确实不要 key」，写错会把密钥校验静默跳过。
+# price 可选 {prompt, cached, completion} 元/百万 token，缺省 = 台账费用记 null。
+providers:
+  - name: deepseek
+    provider: openai              # 客户端实现：openai | anthropic
+    model: deepseek-chat
+    model_env: DEEPSEEK_MODEL     # 可选：env 覆盖模型名
+    base_url: https://api.deepseek.com
+    base_url_env: DEEPSEEK_BASE_URL
+    api_key_env: DEEPSEEK_API_KEY
+  - name: openai
+    provider: openai
+    model: gpt-4o
+    base_url: null
+    api_key_env: OPENAI_API_KEY
+  - name: anthropic
+    provider: anthropic
+    model: claude-sonnet-5
+    base_url: null
+    api_key_env: ANTHROPIC_API_KEY
+  - name: ollama                  # 本地端点示例（Ollama/vLLM 同款：base_url 指向 /v1）
+    provider: openai
+    model: qwen2.5:7b
+    base_url: http://localhost:11434/v1
+    api_key_env: null             # null = 本地免 key

@@ -85,6 +85,9 @@ class ClipModel:
         if self._model is not None:
             return self._model
         os.environ.setdefault("HF_HOME", str(WEIGHTS_DIR / "hf"))
+        # AutoDL 等国内服务器直连 huggingface.co 不通（Errno 99）——镜像兜底，
+        # 与 detection.py GroundingDINO / referential.py 同款
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
         try:
             from transformers import CLIPModel, CLIPProcessor  # pyright: ignore[reportMissingImports]  # isort: skip
         except ImportError:
@@ -160,6 +163,8 @@ class SigLIPModel:
         if self._model is not None:
             return self._model
         os.environ.setdefault("HF_HOME", str(WEIGHTS_DIR / "hf"))
+        # 镜像兜底同 ClipModel（国内服务器直连 huggingface.co 不通）
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
         try:
             from transformers import AutoProcessor, SiglipModel  # pyright: ignore[reportMissingImports]  # isort: skip
         except ImportError:
@@ -331,6 +336,9 @@ class ClipCropScorer:
         if self._model is not None:
             return self._model
         os.environ.setdefault("HF_HOME", str(WEIGHTS_DIR / "hf"))
+        # AutoDL 等国内服务器直连 huggingface.co 不通（Errno 99）——镜像兜底，
+        # 与 detection.py GroundingDINO / referential.py 同款
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
         try:
             from transformers import CLIPModel, CLIPProcessor  # pyright: ignore[reportMissingImports]  # isort: skip
         except ImportError:

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 from rich.table import Table
@@ -12,6 +14,38 @@ from auto2dlabel.agent.state import AgentState
 
 console = Console()
 logger = logging.getLogger(__name__)
+
+# v1.0 P3 进度协议行前缀（TUI 任务面板解析；与 autolabel/tui/app.py 解析端单一约定）
+AL_PROGRESS_PREFIX = "[AL_PROGRESS]"
+# 协议行开关 env（TUI 子进程由 autolabel/tui/app.py 传入）：非 TUI 用户
+# （终端/重定向/管道）输出保持干净，协议行只在 TUI 通道开启
+PROGRESS_ENV = "AUTOLABEL_PROGRESS"
+
+
+def print_al_progress(done: int, total: int) -> None:
+    """进度协议行 `[AL_PROGRESS] done/total`（v1.0 P3 子进程 → TUI 任务面板通道）。
+
+    纯文本 print + flush（协议行必须绕开 rich 与缓冲，pipe 下行级可读）；
+    由 env PROGRESS_ENV=1 门控——仅 TUI 子进程开启，普通 CLI 输出零污染。
+    """
+    if os.environ.get(PROGRESS_ENV) != "1":
+        return
+    print(f"{AL_PROGRESS_PREFIX} {done}/{total}", flush=True)
+
+
+def install_sigterm_interrupt() -> None:
+    """SIGTERM → KeyboardInterrupt（v1.0 P3：TUI /cancel 的 terminate 信号）。
+
+    转成异常打断主线程序列 → finally 链清理保证执行（manifest 原子写 /
+    video_writer.release / 临时文件）；只接管 SIGTERM，终端 Ctrl+C（SIGINT）不变。
+    """
+
+    def _handler(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    import signal
+
+    signal.signal(signal.SIGTERM, _handler)
 
 
 def setup_logging(verbose: bool) -> None:

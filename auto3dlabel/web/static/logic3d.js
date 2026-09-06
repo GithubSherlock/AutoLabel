@@ -32,6 +32,11 @@
   ];
   const edgesOf = (corners) => EDGES.map(([a, b]) => [corners[a], corners[b]]);
 
+  // 类别颜色（单一事实源：viewer3d 渲染 / app.js 相机图叠加共用）
+  const COLOR_MAP = { Car: 0x4da3ff, Pedestrian: 0x58d68d, Cyclist: 0xe8b339 };
+  const SEL_COLOR = 0xffd166;
+  const colorFor = (label) => COLOR_MAP[label] || 0xb0b6c0;
+
   // 车头方向线（BEV 平面）：前边（角 0/3）中点 → 车头单位向量 → [前端点, 伸出点]（相机系）
   function headLine(corners) {
     const cx = (corners[0][0] + corners[1][0] + corners[2][0] + corners[3][0]) / 4;
@@ -60,6 +65,41 @@
     let r = 0;
     for (const p of t) r = Math.max(r, Math.hypot(p[0] - cx, p[1] - cy, p[2] - cz));
     return { center: [cx, cy, cz], radius: Math.max(r, 0.5) };
+  }
+
+  // ── v1.0 相机图叠加投影纯函数（KITTI rect：P2 3x4、K⁻¹ 3x3，payload 交付）──
+  // 投影：cam 系点 → 像素 [u,v]；w≤0.1（相机后方/焦平面）判无效返回 null。
+  function projectP2(p2, xyz) {
+    const x = xyz[0], y = xyz[1], z = xyz[2];
+    const w = p2[2][0] * x + p2[2][1] * y + p2[2][2] * z + p2[2][3];
+    if (w <= 0.1) return null;
+    return [
+      (p2[0][0] * x + p2[0][1] * y + p2[0][2] * z + p2[0][3]) / w,
+      (p2[1][0] * x + p2[1][1] * y + p2[1][2] * z + p2[1][3]) / w,
+    ];
+  }
+
+  // 反投影：像素 (u,v) 射线（起点相机中心 camCenter、方向 K⁻¹[u,v,1]）∩ 地面平面
+  // y=cy → cam 系 [x,z]；射线近平行地面（|dy|<1e-9，点在地平线）无解返回 null。
+  // 精确解（含 P2 非零平移列的相机中心项，非雅可比近似）。
+  function p2ToGround(kInv, camCenter, cy, u, v) {
+    const d0 = kInv[0][0] * u + kInv[0][1] * v + kInv[0][2];
+    const d1 = kInv[1][0] * u + kInv[1][1] * v + kInv[1][2];
+    const d2 = kInv[2][0] * u + kInv[2][1] * v + kInv[2][2];
+    if (Math.abs(d1) < 1e-9) return null;
+    const t = (cy - camCenter[1]) / d1;
+    return [camCenter[0] + t * d0, camCenter[2] + t * d2];
+  }
+
+  // 框 8 角投影：corners_cam 8x3 → 8×[u,v]|null（后方角 null；边绘制跳过含 null 的边）
+  function boxCorners2d(p2, corners) {
+    return corners.map((c) => projectP2(p2, c));
+  }
+
+  // 相机图拖动：ptr = {x,z}（cam 地面坐标，p2ToGround 反投影），drag 起点为锚平移 cx/cz
+  function moveGroundEdit(c, drag, ptr) {
+    c.cx = drag.cx0 + (ptr.x - drag.x0);
+    c.cz = drag.cz0 + (ptr.z - drag.z0);
   }
 
   // ── v0.4 P1 cuboid 编辑纯函数 ───────────────────────────────
@@ -287,9 +327,9 @@
     ann.rotation_y = yawToRotationY(cur.yaw);
   }
 
-  // beginEdit(i, view, mode, drag)：view = 1 Top | 2 Side；mode = 'corner'|'edge'|'yaw'|
-  // 'top'|'bottom'|'move'。drag = 视图层 mousedown 几何锚点（各编辑纯函数的 drag 参数）；
-  // snapshot = 编辑前全量深拷贝（undo 锚点）。
+  // beginEdit(i, view, mode, drag)：view = 1 Top | 2 Side | 3 相机图；mode = 'corner'|'edge'|
+  // 'yaw'|'top'|'bottom'|'move'（view 3 仅 'move'：地面平移）。drag = 视图层 mousedown
+  // 几何锚点（各编辑纯函数的 drag 参数）；snapshot = 编辑前全量深拷贝（undo 锚点）。
   function beginEdit(i, view, mode, drag) {
     if (!state.data || !state.data.annotations[i]) return;
     const ann = state.data.annotations[i];
@@ -324,6 +364,10 @@
         resizeSideEdit(c, e.drag, ptr);
       } else if (mode === 'move') {
         moveSideEdit(c, e.drag, ptr);
+      }
+    } else if (view === 3) {
+      if (mode === 'move') {
+        moveGroundEdit(c, e.drag, ptr);
       }
     }
     c.yaw = wrapPi(c.yaw);
@@ -372,6 +416,8 @@
     // v0.4 P1 编辑
     wrapPi, rotationYToYaw, yawToRotationY, boxToCorners,
     resizeTopEdit, rotateYawEdit, resizeSideEdit, moveSideEdit, MIN_BOX3D,
+    projectP2, p2ToGround, boxCorners2d, moveGroundEdit,
+    COLOR_MAP, SEL_COLOR, colorFor,
     beginEdit, editTo, endEdit, pushUndo, undo, redo,
   };
   root.L3D = api;

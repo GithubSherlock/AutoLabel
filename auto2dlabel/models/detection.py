@@ -75,6 +75,13 @@ class GroundingDINOModel:
         """加载模型与处理器（幂等）。transformers 为可选依赖，类型按 Any 处理。"""
         if self._model is not None:
             return self._model
+        from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
+
+        # 顺序红线：HF_HOME/HF_ENDPOINT 必须在 import transformers 之前 setdefault
+        # ——transformers 导入即拉 huggingface_hub，constants.ENDPOINT 于 import 期
+        # 读取 os.environ 后冻结，事后 setdefault 无效（曾致 Errno 99 直连失败）
+        os.environ.setdefault("HF_HOME", str(WEIGHTS_DIR / "hf"))
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
         try:
             from transformers import (  # type: ignore  # 可选依赖，未安装时跳过静态解析
                 AutoModelForZeroShotObjectDetection,
@@ -83,9 +90,6 @@ class GroundingDINOModel:
         except ImportError:
             raise ImportError("transformers 未安装，请运行: pip install transformers")
 
-        from auto2dlabel.configs.model_catalog import WEIGHTS_DIR
-
-        os.environ.setdefault("HF_HOME", str(WEIGHTS_DIR / "hf"))
         self._processor = AutoProcessor.from_pretrained(self._model_name)
         self._model = AutoModelForZeroShotObjectDetection.from_pretrained(self._model_name)
         self._model.to(self._device)
@@ -500,6 +504,20 @@ def create_detection_model(model_name: str | None = None, **kwargs) -> Detection
     # weights/kitti_finetune/.../best.pt），误判为 HF repo id 会走
     # GroundingDINO 分支（AutoProcessor 报 OSError）
     if model_name.endswith(".pt"):
+        # 未知 .pt 兜底：本地（weights/ 或完整路径）不存在 → 黄字回退 DEFAULT_MODEL
+        # （曾致 not_a_model.pt 直通 ultralytics 下载失败，FileNotFoundError traceback）
+        from pathlib import Path as _Path
+
+        from rich.console import Console as _Console
+
+        from auto2dlabel.configs.model_catalog import WEIGHTS_DIR as _WEIGHTS_DIR
+
+        candidate = _WEIGHTS_DIR / model_name if "/" not in model_name else _Path(model_name)
+        if not candidate.exists():
+            _Console().print(
+                f"[yellow]未找到模型权重 {model_name}，回退默认 {DEFAULT_MODEL}[/yellow]"
+            )
+            model_name = DEFAULT_MODEL
         return UltralyticsModel(model_name=model_name, **kwargs)
     elif "/" in model_name:
         return GroundingDINOModel(model_name=model_name, **kwargs)

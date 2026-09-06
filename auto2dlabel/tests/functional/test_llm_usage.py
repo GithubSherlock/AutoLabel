@@ -6,6 +6,7 @@ chat() 统一出口（台账落盘 / 台账失败不阻断 / 截断告警可见�
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -162,6 +163,22 @@ def test_aggregate_usage_groups_and_sorts(tmp_path: Path) -> None:
     assert rows[1]["cache_hit_rate"] == 0.0
 
 
+def test_aggregate_bad_cost_type_skipped_not_crash(tmp_path: Path) -> None:
+    """台账脏行 cost_rmb 非数字（如字符串）→ 跳过该行费用不崩，其余照常聚合。
+
+    2026-09-07 审查修复回归：float("abc") 曾致整份 cost-report 崩溃。
+    """
+    path = tmp_path / "usage.jsonl"
+    with path.open("w", encoding="utf-8") as f:
+        f.write('{"call_site": "a", "model": "m", "prompt_tokens": 10, "cost_rmb": "abc"}\n')
+        f.write('{"call_site": "a", "model": "m", "prompt_tokens": 10, "cost_rmb": 1.5}\n')
+    rows = aggregate_usage(load_usage_logs(path))
+    assert len(rows) == 1
+    assert rows[0]["calls"] == 2
+    assert rows[0]["prompt_tokens"] == 20
+    assert rows[0]["cost_rmb"] == pytest.approx(1.5)
+
+
 # ============ chat() 统一出口 ============
 
 
@@ -180,6 +197,8 @@ class _UsageClient(LLMClient):
         temperature: float,
         max_tokens: int | None,
         json_mode: bool,
+        stream: bool = False,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMResponse:
         return LLMResponse(
             content="{}", usage=self._usage, finish_reason=self._finish_reason
@@ -234,3 +253,52 @@ def _ns(**kwargs: Any) -> Any:
     from types import SimpleNamespace
 
     return SimpleNamespace(**kwargs)
+
+
+# ============ 推理模型钳制（v1.0 P1 bugfix） ============
+
+
+class _CaptureClient(LLMClient):
+    """捕获 chat() → _chat 透传参数的 Fake（钳制断言用）。"""
+
+    def __init__(self, model: str) -> None:
+        super().__init__(model=model)
+        self.last: dict[str, Any] = {}
+
+    def _chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        temperature: float,
+        max_tokens: int | None,
+        json_mode: bool,
+        stream: bool = False,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> LLMResponse:
+        self.last = {"temperature": temperature, "max_tokens": max_tokens}
+        return LLMResponse(content="{}", usage=None, finish_reason="stop")
+
+
+def test_reasoning_model_clamps_temperature_and_budget() -> None:
+    """推理模型（deepseek-v4-flash）：显式 temperature=0 钳到 1.0、max_tokens 放大。
+
+    2026-09-02 实测回归：低温下推理链吃满 max_tokens 产出空 content
+    （temp=0.1 → reasoning 1023/content 0），统一出口钳制防静默空响应。
+    """
+    c = _CaptureClient("deepseek-v4-flash")
+    c.chat([{"role": "user", "content": "hi"}], temperature=0.0, max_tokens=1024)
+    assert c.last == {"temperature": 1.0, "max_tokens": 4096}
+
+
+def test_reasoning_model_max_tokens_none_kept() -> None:
+    """推理模型但调用方未设 max_tokens → 不臆造预算（provider 默认）。"""
+    c = _CaptureClient("deepseek-reasoner")
+    c.chat([{"role": "user", "content": "hi"}], temperature=0.0)
+    assert c.last == {"temperature": 1.0, "max_tokens": None}
+
+
+def test_non_reasoning_model_params_untouched() -> None:
+    """非推理模型：参数原样透传（钳制零影响红线）。"""
+    c = _CaptureClient("deepseek-chat")
+    c.chat([{"role": "user", "content": "hi"}], temperature=0.0, max_tokens=1024)
+    assert c.last == {"temperature": 0.0, "max_tokens": 1024}
