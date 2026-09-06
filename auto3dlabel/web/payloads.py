@@ -14,10 +14,10 @@ from typing import Any
 
 import numpy as np
 
-from auto3dlabel.data.nuscenes import load_lidar_file
+from auto3dlabel.data.nuscenes import load_lidar_file, load_nuscenes, rot_matrix
 from auto3dlabel.schema.box3d import Box3D, load_points_bin
 from auto3dlabel.schema.calib import KittiCalib
-from auto3dlabel.tools.geometry import global_to_cam_like
+from auto3dlabel.tools.geometry import GLOBAL_TO_CAM_LIKE, global_to_cam_like
 
 # 单帧点云交付上限（KITTI 帧 ~12 万点；渲染帧率与 JSON 体积折中）
 MAX_POINTS = 100_000
@@ -67,29 +67,100 @@ def _objects_from_annotations(annotations: list[Any]) -> list[dict[str, Any]]:
     return objects
 
 
-def _nuscenes_payload(data: dict[str, Any]) -> dict[str, Any] | None:
-    """nuScenes 队列（dataset=="nuscenes"）→ 渲染 payload：cam_like 点云 + 6 相机路径。
+def _nuscenes_points_cam_like(
+    data: dict[str, Any], nusc: Any, pcd_path: str, ego: tuple[float, float, float]
+) -> np.ndarray:
+    """nuScenes 点云 → cam_like 帧（两级位姿正确链；查表失败 → 旧链降级零标定行为）。
 
-    points = global_to_cam_like(pcd xyz, ego_translation)（队列 JSON 自足，零 devkit）；
-    cameras 的 image_path 为 dataroot 绝对路径（review-image 端点读）。
+    正确链（v0.4 修复既有错位 bug：LIDAR 传感器系 .bin 曾被直接当全局系喂
+    global_to_cam_like，四视图错位 ~1800m）：p_glob = R_e·(R_l·p_lidar + t_l) + t_e
+    → p_cl = M @ (p_glob − t_ego)。LIDAR 位姿经队列 sample_token 查 devkit 表；
+    pcd_path 文件名与 LIDAR 记录不一致（数据被移动/混用）→ 降级旧链（宁缺勿假）。
+    """
+    pts = load_lidar_file(Path(pcd_path))
+    if nusc is not None:
+        try:
+            sample = nusc.get("sample", str(data.get("sample_token") or ""))
+            lidar_rec = nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
+            if Path(pcd_path).name != Path(lidar_rec["filename"]).name:
+                raise ValueError("pcd_path 与 LIDAR sample_data 文件名不一致")
+            calib = nusc.get("calibrated_sensor", lidar_rec["calibrated_sensor_token"])
+            ego_pose = nusc.get("ego_pose", lidar_rec["ego_pose_token"])
+            r_l = rot_matrix(tuple(calib["rotation"]))
+            t_l = np.asarray(calib["translation"], dtype=np.float64)
+            r_e = rot_matrix(tuple(ego_pose["rotation"]))
+            t_e = np.asarray(ego_pose["translation"], dtype=np.float64)
+            pts_glob = (r_e @ (r_l @ pts[:, :3].T + t_l[:, None])).T + t_e
+            return (pts_glob - t_e) @ GLOBAL_TO_CAM_LIKE.T
+        except (KeyError, ValueError):
+            pass  # 查表失败 → 降级（旧链，无标定行为不变）
+    return global_to_cam_like(pts[:, :3], ego)
+
+
+def _nuscenes_cam_proj(cam: dict[str, Any], nusc: Any) -> dict[str, Any] | None:
+    """队列相机 {name,token,filename} → 相机图叠加投影参数（devkit 查表；失败 → None 纯图）。
+
+    P2 = K @ [R_cᵀ·R_egoᵀ·Mᵀ | −R_cᵀ·t_c]（直接吃 cam_like 点，前端 projectP2 零改动）；
+    k_inv = R2ᵀ·K⁻¹（像素→cam_like 方向，吸收旋转，前端 p2ToGround 零改动；
+    与 KITTI inv(p2[:,:3]) 隐含 R0_rectᵀ·K⁻¹ 的模式对称）；
+    cam_center = −k_inv @ P2[:,3]（cam_like 系相机中心，通用精确反投影锚点）。
+    """
+    if nusc is None:
+        return None
+    try:
+        sd = nusc.get("sample_data", str(cam.get("token") or ""))
+        calib = nusc.get("calibrated_sensor", sd["calibrated_sensor_token"])
+        ego_pose = nusc.get("ego_pose", sd["ego_pose_token"])
+        k = np.asarray(calib["camera_intrinsic"], dtype=np.float64)
+        r_c = rot_matrix(tuple(calib["rotation"]))
+        t_c = np.asarray(calib["translation"], dtype=np.float64)
+        r_ego = rot_matrix(tuple(ego_pose["rotation"]))
+    except (KeyError, ValueError):
+        return None
+    r2 = r_c.T @ r_ego.T @ GLOBAL_TO_CAM_LIKE.T
+    p2 = k @ np.hstack([r2, (-r_c.T @ t_c)[:, None]])
+    k_inv = r2.T @ np.linalg.inv(k)
+    return {
+        "p2": p2.tolist(),
+        "k_inv": k_inv.tolist(),
+        "cam_center": (-k_inv @ p2[:, 3]).tolist(),
+        # 主点半像素偏移（nuScenes cu/cv = 799.5/449.5）→ round 后 ×2 = 真实图 1600×900
+        "img_size": [int(round(k[0, 2])) * 2, int(round(k[1, 2])) * 2],
+    }
+
+
+def _nuscenes_payload(data: dict[str, Any]) -> dict[str, Any] | None:
+    """nuScenes 队列（dataset=="nuscenes"）→ 渲染 payload：cam_like 点云 + 6 相机叠加投影。
+
+    devkit 查表交付（v0.4 增量）：点云两级位姿正确链（_nuscenes_points_cam_like）+
+    每相机 p2/k_inv/cam_center/img_size（_nuscenes_cam_proj，前端 projectP2/p2ToGround
+    零改动复用）；devkit 不可用/查表失败 → 相机降级纯图（无 p2），点云降级旧链。
     """
     pcd_path = str(data.get("pcd_path") or "")
     try:
-        pts_glob = load_lidar_file(Path(pcd_path))
+        load_lidar_file(Path(pcd_path))  # 先探测可读（错误路径 → 整帧 None）
     except (OSError, ValueError):
         return None
     ego_raw = data.get("ego_translation", (0.0, 0.0, 0.0))
     ego = (float(ego_raw[0]), float(ego_raw[1]), float(ego_raw[2]))
-    pts_cam = global_to_cam_like(pts_glob[:, :3], ego)
+    try:
+        nusc = load_nuscenes(Path(str(data.get("dataroot") or "")), str(data.get("version") or "v1.0-mini"))
+    except (ImportError, FileNotFoundError, OSError):
+        nusc = None  # devkit 不可用 → 相机纯图 + 点云旧链（行为不变）
+    pts_cam = _nuscenes_points_cam_like(data, nusc, pcd_path, ego)
     dataroot = str(data.get("dataroot") or "")
-    cameras = [
-        {
+    cameras: list[dict[str, Any]] = []
+    for c in data.get("cameras", []):
+        if not isinstance(c, dict) or not c.get("filename"):
+            continue
+        cam_out: dict[str, Any] = {
             "name": c.get("name", ""),
             "image_path": str(Path(dataroot) / c["filename"]),
         }
-        for c in data.get("cameras", [])
-        if isinstance(c, dict) and c.get("filename")
-    ]
+        proj = _nuscenes_cam_proj(c, nusc)
+        if proj is not None:
+            cam_out.update(proj)
+        cameras.append(cam_out)
     return {
         "image": data.get("image", ""),
         "image_path": "",
@@ -107,7 +178,8 @@ def frame_payload(name: str, review_dir: Path) -> dict[str, Any] | None:
     KITTI 输出键：image/image_path/bev_path（透传）、points（相机系 (N,3) list）、
     objects（label/confidence/fit_points/corners 8x3 list；坏框跳过）、
     p2/k_inv/img_size（相机图投影叠加：前端 projectP2 投影 + p2ToGround 地面反投影拖动）。
-    nuScenes（dataset=="nuscenes"）：cam_like 点云 + cameras 6 相机（见 _nuscenes_payload）。
+    nuScenes（dataset=="nuscenes"）：cam_like 点云（两级位姿正确链）+ cameras 6 相机，
+    每相机带 p2/k_inv/cam_center/img_size（devkit 查表；失败降级纯图，见 _nuscenes_payload）。
     """
     src = review_dir / name
     try:
