@@ -72,9 +72,7 @@ def _parse_frame_ids(spec: str) -> list[str]:
     raise typer.BadParameter(f"无法识别的帧 ID/目录: {spec}")
 
 
-def _make_models(
-    det_model: str | None, seg_model: str | None
-) -> tuple[object, object, object]:
+def _make_models(det_model: str | None, seg_model: str | None) -> tuple[object, object, object]:
     """双引擎模型工厂：det_model 命中 DETECTOR3D_NAMES → LiDAR 直检（seg 不实例化）。
 
     Returns: (det, seg, det3d)（det3d 非 None 时 det/seg 为 None）
@@ -184,15 +182,12 @@ def _run_batch_lidar(
 
     stat = {"accepted": 0, "review": 0, "hard": 0, "failed": 0}
     todo = [
-        fid for fid in frame_ids
-        if not (resume and (out_dir / "labels" / f"{fid}.txt").is_file())
+        fid for fid in frame_ids if not (resume and (out_dir / "labels" / f"{fid}.txt").is_file())
     ]
     if not todo:
         return stat
     frames = [resolve_frame(fid) for fid in todo]
-    batch = batch_size or _measure_batch_size(
-        det3d, frames[:1], prompts, conf, viz, out_dir
-    )
+    batch = batch_size or _measure_batch_size(det3d, frames[:1], prompts, conf, viz, out_dir)
     console.print(f"[dim]batch size = {batch}（{'实测' if batch_size is None else '显式'}）[/dim]")
 
     i = 0
@@ -284,8 +279,10 @@ def _run_tracked_sequence(
             stat["accepted"] += len(triage.accepted)
             stat["review"] += len(triage.review)
             stat["hard"] += len(triage.hard)
-            console.print(f"  {fid}: 采纳 {len(triage.accepted)} / 复核 {len(triage.review)} / "
-                          f"困难 {len(triage.hard)}")
+            console.print(
+                f"  {fid}: 采纳 {len(triage.accepted)} / 复核 {len(triage.review)} / "
+                f"困难 {len(triage.hard)}"
+            )
         except Exception as e:  # 失败隔离：单帧异常不中断序列
             stat["failed"] += 1
             console.print(f"  [red]{fid}: 失败 {e}[/red]")
@@ -381,8 +378,7 @@ def run(
             "--det-model",
             "-d",
             help=(
-                "检测模型：2D（kitti_finetune/gdino…）或 3D LiDAR"
-                f"（{'/'.join(DETECTOR3D_NAMES)}）"
+                f"检测模型：2D（kitti_finetune/gdino…）或 3D LiDAR（{'/'.join(DETECTOR3D_NAMES)}）"
             ),
         ),
     ] = None,
@@ -445,9 +441,7 @@ def run(
                 if resume and (out_dir / "labels" / f"{fid}.txt").is_file():
                     continue
                 try:
-                    a, r, h = _run_frame(
-                        fid, prompts, det, seg, None, conf, out_dir, not no_viz
-                    )
+                    a, r, h = _run_frame(fid, prompts, det, seg, None, conf, out_dir, not no_viz)
                     stat["accepted"] += a
                     stat["review"] += r
                     stat["hard"] += h
@@ -483,9 +477,7 @@ def chat(
     max_iterations: Annotated[
         int, typer.Option("--max-iterations", help="Agent Loop 最大迭代")
     ] = 3,
-    timeout: Annotated[
-        int, typer.Option("--timeout", help="对话等待秒数（0 = 不等待）")
-    ] = 30,
+    timeout: Annotated[int, typer.Option("--timeout", help="对话等待秒数（0 = 不等待）")] = 30,
     no_wait: Annotated[
         bool, typer.Option("--no-wait", help="跳过对话，缺参直接报错（等价 --timeout 0）")
     ] = False,
@@ -589,24 +581,30 @@ def chat(
         if not isinstance(result, dict):
             continue
         step_boxes = [
-            Box3D.from_dict(item) for item in (result.get("objects") or result.get("data") or [])
+            Box3D.from_dict(item)
+            for item in (result.get("objects") or result.get("data") or [])
             if isinstance(item, dict) and item.get("label")
         ]
         step_triage = triage_3d(step_boxes)
-        steps_results.append({
-            "step_id": tc.get("tool_call_id"),
-            "model": det_name,
-            "boxes3d_count": len(step_boxes),
-            "triage_summary": {
-                "accepted": len(step_triage.accepted),
-                "review": len(step_triage.review),
-                "hard": len(step_triage.hard),
-            },
-        })
+        steps_results.append(
+            {
+                "step_id": tc.get("tool_call_id"),
+                "model": det_name,
+                "boxes3d_count": len(step_boxes),
+                "triage_summary": {
+                    "accepted": len(step_triage.accepted),
+                    "review": len(step_triage.review),
+                    "hard": len(step_triage.hard),
+                },
+            }
+        )
     log_chat_call(
         instruction=instruction,
-        plan_summary={"frame_id": frame.frame_id, "det_model": det_name,
-                      "seg_model": seg_model or plan.seg_model},
+        plan_summary={
+            "frame_id": frame.frame_id,
+            "det_model": det_name,
+            "seg_model": seg_model or plan.seg_model,
+        },
         steps_results=steps_results,
         elapsed=round(elapsed, 3),
         llm_model=provider,
@@ -660,16 +658,15 @@ def _run_nuscenes_batch(plan: Plan3D, out_dir: Path) -> None:
     from auto2dlabel.cli_common import print_al_progress
 
     written = generate_review_queue(
-        det, reviews, conf=plan.confidence_threshold, limit=plan.sample_limit,
+        det,
+        reviews,
+        conf=plan.confidence_threshold,
+        limit=plan.sample_limit,
         # v1.0 P3 行协议：每 sample 一行 [AL_PROGRESS] done/total（TUI 面板推进）
         progress_cb=print_al_progress,
     )
-    console.print(
-        f"[bold]汇总[/bold] 新生成 {len(written)} 个队列文件（resume：已存在跳过）"
-    )
-    console.print(
-        f"[dim]后续: REVIEW3D_DIR={reviews} python3 -m auto3dlabel.web.server[/dim]"
-    )
+    console.print(f"[bold]汇总[/bold] 新生成 {len(written)} 个队列文件（resume：已存在跳过）")
+    console.print(f"[dim]后续: REVIEW3D_DIR={reviews} python3 -m auto3dlabel.web.server[/dim]")
 
 
 @app.command("nuscenes-queue")
@@ -717,15 +714,81 @@ def nuscenes_queue(
         f"[bold]nuScenes 复核队列[/bold] 引擎={det_model} conf={conf} {scope} → {out_dir}"
     )
     written = generate_review_queue(
-        det, out_dir, conf=conf, dataroot=Path(dataroot) if dataroot else None,
-        version=version, limit=limit,
-        progress_cb=lambda done, total: console.print(
-            f"[dim]进度 {done}/{total}[/dim]"
-        ) if done % 10 == 0 or done == total else None,
+        det,
+        out_dir,
+        conf=conf,
+        dataroot=Path(dataroot) if dataroot else None,
+        version=version,
+        limit=limit,
+        progress_cb=lambda done, total: (
+            console.print(f"[dim]进度 {done}/{total}[/dim]")
+            if done % 10 == 0 or done == total
+            else None
+        ),
     )
+    console.print(f"[bold]汇总[/bold] 新生成 {len(written)} 个队列文件（resume：已存在跳过）")
+
+
+@app.command("mapvec-report")
+def mapvec_report(
+    pred_dir: Annotated[
+        Path, typer.Option("--pred-dir", help="mapvec_pred/1 契约目录（{token}.json 逐帧，必填）")
+    ],
+    img_root: Annotated[
+        Path,
+        typer.Option(
+            "--img-root", help="图像数据根（cam_front/ + calib.json + ego_pose.json，必填）"
+        ),
+    ],
+    out_dir: Annotated[Path, typer.Option("--out-dir", help="报告/overlay 输出目录")] = Path(
+        "outputs/mapvec_report"
+    ),
+    review_out: Annotated[
+        Path, typer.Option("--review-out", help="复核队列输出目录（REVIEW3D_DIR 指向它）")
+    ] = Path("outputs/mapvec_reviews"),
+    score_thr: Annotated[
+        float, typer.Option("--score-thr", help="预测置信度阈值（报告强制打印；契约内不匹配告警）")
+    ] = 0.2,
+) -> None:
+    """MapTR 矢量对账（v0.4 P4）：逐帧契约 → GT vs 预测自动比对 → 报告 + 复核队列。
+
+    三件套产物：CAM_FRONT overlay（pred 品红 / GT 青绿）+ BEV 面板 +
+    逐帧 TP/FP/FN、CD 分布、越窗计数。AP 是 3 阈值 precision 均值、无 recall 项，
+    报告强制打印 score_thr。产物后接 Web：
+    REVIEW3D_DIR=<review_out> python3 -m auto3dlabel.web.server
+    """
+    from auto3dlabel.export.mapvec_report import run_mapvec_report
+
+    pred_dir = pred_dir.resolve()
+    img_root = img_root.resolve()
+    out_dir = out_dir.resolve()
+    review_out = review_out.resolve()
     console.print(
-        f"[bold]汇总[/bold] 新生成 {len(written)} 个队列文件（resume：已存在跳过）"
+        f"[bold]MapTR 矢量对账[/bold] pred={pred_dir} img={img_root} "
+        f"score_thr={score_thr}\n    → 报告 {out_dir}\n    → 队列 {review_out}"
     )
+    summary = run_mapvec_report(
+        pred_dir,
+        img_root,
+        out_dir,
+        review_out,
+        score_thr=score_thr,
+        progress_cb=lambda done, total: (
+            console.print(f"[dim]进度 {done}/{total}[/dim]")
+            if done % 10 == 0 or done == total
+            else None
+        ),
+    )
+    for p, err in summary["errors"]:
+        console.print(f"[yellow]坏契约跳过 {p}: {err}[/yellow]")
+    for tok in summary["skipped_render"]:
+        console.print(f"[yellow]缺图/缺 ego 跳过渲染 {tok}[/yellow]")
+    console.print(
+        f"[bold]汇总[/bold] 比对 {summary['frames']} 帧,渲染段数 "
+        f"pred={summary['overlay_segs']['pred']} gt={summary['overlay_segs']['gt']},"
+        f"队列 {summary['review_queue']} 个 → {summary['report_md']}"
+    )
+    console.print(f"[dim]后续: REVIEW3D_DIR={review_out} python3 -m auto3dlabel.web.server[/dim]")
 
 
 if __name__ == "__main__":

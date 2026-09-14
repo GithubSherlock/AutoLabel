@@ -97,13 +97,16 @@ def _nuscenes_points_cam_like(
     return global_to_cam_like(pts[:, :3], ego)
 
 
-def _nuscenes_cam_proj(cam: dict[str, Any], nusc: Any) -> dict[str, Any] | None:
+def _nuscenes_cam_proj(
+    cam: dict[str, Any], nusc: Any, image_path: str
+) -> dict[str, Any] | None:
     """队列相机 {name,token,filename} → 相机图叠加投影参数（devkit 查表；失败 → None 纯图）。
 
     P2 = K @ [R_cᵀ·R_egoᵀ·Mᵀ | −R_cᵀ·t_c]（直接吃 cam_like 点，前端 projectP2 零改动）；
     k_inv = R2ᵀ·K⁻¹（像素→cam_like 方向，吸收旋转，前端 p2ToGround 零改动；
     与 KITTI inv(p2[:,:3]) 隐含 R0_rectᵀ·K⁻¹ 的模式对称）；
     cam_center = −k_inv @ P2[:,3]（cam_like 系相机中心，通用精确反投影锚点）。
+    img_size 读真实图像尺寸（nuScenes 主点 816.27 不在图中心，2·cu 不可靠）。
     """
     if nusc is None:
         return None
@@ -120,12 +123,19 @@ def _nuscenes_cam_proj(cam: dict[str, Any], nusc: Any) -> dict[str, Any] | None:
     r2 = r_c.T @ r_ego.T @ GLOBAL_TO_CAM_LIKE.T
     p2 = k @ np.hstack([r2, (-r_c.T @ t_c)[:, None]])
     k_inv = r2.T @ np.linalg.inv(k)
+    img_size: tuple[int, int] | None = None
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as im:
+            img_size = (int(im.width), int(im.height))
+    except (OSError, ValueError, ImportError):
+        img_size = None
     return {
         "p2": p2.tolist(),
         "k_inv": k_inv.tolist(),
         "cam_center": (-k_inv @ p2[:, 3]).tolist(),
-        # 主点半像素偏移（nuScenes cu/cv = 799.5/449.5）→ round 后 ×2 = 真实图 1600×900
-        "img_size": [int(round(k[0, 2])) * 2, int(round(k[1, 2])) * 2],
+        **({"img_size": list(img_size)} if img_size is not None else {}),
     }
 
 
@@ -153,11 +163,12 @@ def _nuscenes_payload(data: dict[str, Any]) -> dict[str, Any] | None:
     for c in data.get("cameras", []):
         if not isinstance(c, dict) or not c.get("filename"):
             continue
+        image_path = str(Path(dataroot) / c["filename"])
         cam_out: dict[str, Any] = {
             "name": c.get("name", ""),
-            "image_path": str(Path(dataroot) / c["filename"]),
+            "image_path": image_path,
         }
-        proj = _nuscenes_cam_proj(c, nusc)
+        proj = _nuscenes_cam_proj(c, nusc, image_path)
         if proj is not None:
             cam_out.update(proj)
         cameras.append(cam_out)

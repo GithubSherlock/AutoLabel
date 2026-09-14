@@ -96,6 +96,18 @@
     return corners.map((c) => projectP2(p2, c));
   }
 
+  // 相机图投影参数解析：KITTI 单相机走 payload 顶层；nuScenes 多相机走 cameras[i]
+  // （该相机无标定 → null 纯图，后端降级语义）。payload = frame-data payload。
+  function camProjParams(payload, idx) {
+    if (!payload) return null;
+    if (payload.dataset === "nuscenes") {
+      const c = (payload.cameras || [])[idx];
+      return c && c.p2 ? { p2: c.p2, k_inv: c.k_inv, cam_center: c.cam_center } : null;
+    }
+    if (idx !== 0 || !payload.p2) return null;
+    return { p2: payload.p2, k_inv: payload.k_inv, cam_center: payload.cam_center };
+  }
+
   // 相机图拖动：ptr = {x,z}（cam 地面坐标，p2ToGround 反投影），drag 起点为锚平移 cx/cz
   function moveGroundEdit(c, drag, ptr) {
     c.cx = drag.cx0 + (ptr.x - drag.x0);
@@ -514,7 +526,7 @@
     // v0.4 P1 编辑
     wrapPi, rotationYToYaw, yawToRotationY, boxToCorners,
     resizeTopEdit, rotateYawEdit, resizeSideEdit, moveSideEdit, MIN_BOX3D,
-    projectP2, p2ToGround, boxCorners2d, moveGroundEdit,
+    projectP2, p2ToGround, boxCorners2d, camProjParams, moveGroundEdit,
     clipSegImage, camOverlayGeom, camHitHandle, camHitIndicator,
     COLOR_MAP, SEL_COLOR, colorFor,
     beginEdit, editTo, endEdit, pushUndo, undo, redo,

@@ -37,22 +37,25 @@
   function renderDetail() {
     const d = L3D.state.data;
     const anns = d.annotations || [];
-    // KITTI 有标定（payload.p2）→ 相机图加投影框叠加层；nuScenes 相机图为纯图
-    const hasCalib = !!(L3D.state.payload && L3D.state.payload.p2);
-    const cam = d.image_path
-      ? `<figure>${hasCalib
-          ? `<div class="cam-wrap"><img id="cam-img" src="api/review-image?path=${encodeURIComponent(d.image_path)}"><canvas id="cam-overlay"></canvas></div>`
-          : `<img src="api/review-image?path=${encodeURIComponent(d.image_path)}">`
-        }<figcaption>相机图${hasCalib ? " · 点框选中/拖动平移 · 拖角点边缩放 · 边缘三角=视野外框" : ""}</figcaption></figure>` : "";
+    // 相机图列表：KITTI 主相机（image_path）+ nuScenes 6 相机（payload.cameras，
+    // image_path 只存在于 frame-data payload——队列文件 cameras 仅 {name,token,filename}）
+    const camFigs = [];
+    if (d.image_path) camFigs.push({ cap: "相机图", src: d.image_path });
+    ((L3D.state.payload || {}).cameras || []).forEach((c) =>
+      camFigs.push({ cap: c.name, src: c.image_path }));
+    const camHtml = camFigs.map((f, i) => {
+      const params = L3D.camProjParams(L3D.state.payload, i);
+      const img = `<img id="cam-img-${i}" src="api/review-image?path=${encodeURIComponent(f.src)}">`;
+      return `<figure>${params
+        ? `<div class="cam-wrap">${img}<canvas class="cam-overlay" id="cam-overlay-${i}"></canvas></div>`
+        : img}<figcaption>${esc(f.cap)}${params
+          ? " · 点框选中/拖动平移 · 拖角点边缩放 · 边缘三角=视野外框" : ""}</figcaption></figure>`;
+    }).join("");
     const bev = d.bev_path
       ? `<figure><img src="api/review-image?path=${encodeURIComponent(d.bev_path)}"><figcaption>BEV 鸟瞰</figcaption></figure>` : "";
-    // nuScenes 6 相机：image_path 只存在于 frame-data payload（_nuscenes_payload 计算
-    // dataroot/filename），队列文件 cameras 仅 {name,token,filename}——从 payload 读，否则 path=undefined
-    const cams = (((L3D.state.payload || {}).cameras) || []).map((c) =>
-      `<figure><img src="api/review-image?path=${encodeURIComponent(c.image_path)}"><figcaption>${esc(c.name)}</figcaption></figure>`).join("");
     $("#detail").innerHTML = `
       <h3 style="margin-top:0">${esc(d.image || L3D.state.name)} <span style="color:var(--dim);font-weight:400">— ${anns.length} 框待复核</span></h3>
-      <div class="imgs">${cam}${bev}${cams}</div>
+      <div class="imgs">${camHtml}${bev}</div>
       <div id="table-wrap">${L3D.renderTableHtml()}</div>
       <div class="toolbar">
         <button id="save">保存复核结果</button>
@@ -64,8 +67,8 @@
   }
 
   // ── v1.0 相机图叠加：投影框显示 + 点击选中 + 拖动平移（view=3 'move' 编辑）──
-  function camNativePoint(e) {
-    const img = $("#cam-img");
+  // 多相机参数化（KITTI 1 相机 / nuScenes 6 相机）：每图 overlay 独立 p2/k_inv/cam_center。
+  function camNativePoint(e, img) {
     if (!img) return null;
     const rect = img.getBoundingClientRect();
     return {
@@ -81,8 +84,7 @@
     return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
   }
 
-  function camHitTest(u, v) {
-    const p2 = L3D.state.payload && L3D.state.payload.p2;
+  function camHitTest(u, v, p2) {
     if (!p2) return null;
     const tol = 8; // 原生像素命中阈值
     let best = null, bestD = tol;
@@ -99,10 +101,12 @@
     return best;
   }
 
-  function drawCamOverlay() {
-    const ov = $("#cam-overlay"), img = $("#cam-img");
-    const p2 = L3D.state.payload && L3D.state.payload.p2;
-    if (!ov || !img || !p2) return;
+  function drawCamOverlay(idx) {
+    const ov = document.getElementById("cam-overlay-" + idx);
+    const img = document.getElementById("cam-img-" + idx);
+    const params = L3D.camProjParams(L3D.state.payload, idx);
+    if (!ov || !img || !params) return;
+    const p2 = params.p2;
     const ctx = ov.getContext("2d");
     if (!ctx) return; // jsdom 无 canvas 实现：绘制静默跳过（结构断言靠 DOM）
     const W = img.naturalWidth || 1, H = img.naturalHeight || 1;
@@ -158,96 +162,97 @@
     });
   }
 
-  let camDrag = null; // {mode, yPlane, x0, y0, moved}：相机图拖动会话（view=3 编辑）
-  let camResizeHandler = null;
+  let camDrag = null; // {idx, mode, yPlane, x0, y0, moved}：相机图拖动会话（view=3 编辑）
+  let camResizeFits = [];
   function bindCamOverlay() {
-    const ov = $("#cam-overlay"), img = $("#cam-img");
-    if (!ov) return;
-    const fit = () => {
-      const rect = img.getBoundingClientRect();
-      ov.width = rect.width || 1;
-      ov.height = rect.height || 1;
-      drawCamOverlay();
-    };
-    img.onload = fit;
-    if (camResizeHandler) window.removeEventListener("resize", camResizeHandler);
-    camResizeHandler = fit;
-    window.addEventListener("resize", camResizeHandler);
-    fit();
+    camResizeFits.forEach((f) => window.removeEventListener("resize", f));
+    camResizeFits = [];
+    document.querySelectorAll(".cam-overlay").forEach((ov) => {
+      const idx = Number(ov.id.replace("cam-overlay-", ""));
+      const img = document.getElementById("cam-img-" + idx);
+      const params = L3D.camProjParams(L3D.state.payload, idx);
+      if (!img || !params) return;
+      const fit = () => {
+        const rect = img.getBoundingClientRect();
+        ov.width = rect.width || 1;
+        ov.height = rect.height || 1;
+        drawCamOverlay(idx);
+      };
+      img.onload = fit;
+      camResizeFits.push(fit);
+      window.addEventListener("resize", fit);
+      fit();
 
-    // 指示标记命中表：每框 geom（下标 = annotations 下标；删除框不建）
-    const indicatorGeoms = () => {
-      const p2 = L3D.state.payload && L3D.state.payload.p2;
-      if (!p2) return [];
-      return (L3D.state.data.annotations || []).map((a, i) => {
-        if (L3D.state.deleted.has(i) || a.cx == null) return null;
-        return L3D.camOverlayGeom(p2, a, img.naturalWidth || 1, img.naturalHeight || 1);
-      });
-    };
+      // 指示标记命中表：每框 geom（下标 = annotations 下标；删除框不建）
+      const indicatorGeoms = () => {
+        return (L3D.state.data.annotations || []).map((a, i) => {
+          if (L3D.state.deleted.has(i) || a.cx == null) return null;
+          return L3D.camOverlayGeom(params.p2, a, img.naturalWidth || 1, img.naturalHeight || 1);
+        });
+      };
 
-    ov.onmousedown = (e) => {
-      const p = camNativePoint(e);
-      if (!p) return;
-      const pl = L3D.state.payload;
-      if (!pl || !pl.p2) return;
-      const camCenter = pl.cam_center || [0, 0, 0]; // 旧 payload 兜底（零平移近似）
-      const W = img.naturalWidth || 1, H = img.naturalHeight || 1;
+      ov.onmousedown = (e) => {
+        const p = camNativePoint(e, img);
+        if (!p) return;
+        const camCenter = params.cam_center || [0, 0, 0]; // 旧 payload 兜底（零平移近似）
+        const W = img.naturalWidth || 1, H = img.naturalHeight || 1;
 
-      // 1) 选中框手柄命中（角点 > 边中点）→ beginEdit corner/edge（地面 resize）
-      const sel = L3D.state.selected;
-      if (sel != null) {
-        const ann = L3D.state.data.annotations[sel];
-        if (ann && ann.cx != null) {
-          const hd = L3D.camHitHandle(L3D.camOverlayGeom(pl.p2, ann, W, H), p.u, p.v);
-          if (hd) {
-            const yaw = L3D.rotationYToYaw(ann.rotation_y || 0);
-            const yPlane = ann.cy + ann.h / 2; // 底面（cam y 向下：cy+h/2 = 地面）
-            const g0 = L3D.p2ToGround(pl.k_inv, camCenter, yPlane, p.u, p.v);
-            if (!g0) return; // 点在地平线附近无地面解
-            L3D.beginEdit(sel, 3, hd.mode, {
-              t0: -yaw, cx0: ann.cx, cz0: ann.cz, w0: ann.w, l0: ann.l, sx: hd.sx, sy: hd.sy,
-            });
-            camDrag = { mode: hd.mode, yPlane, x0: e.clientX, y0: e.clientY, moved: false };
-            return;
+        // 1) 选中框手柄命中（角点 > 边中点）→ beginEdit corner/edge（地面 resize）
+        const sel = L3D.state.selected;
+        if (sel != null) {
+          const ann = L3D.state.data.annotations[sel];
+          if (ann && ann.cx != null) {
+            const hd = L3D.camHitHandle(L3D.camOverlayGeom(params.p2, ann, W, H), p.u, p.v);
+            if (hd) {
+              const yaw = L3D.rotationYToYaw(ann.rotation_y || 0);
+              const yPlane = ann.cy + ann.h / 2; // 底面（cam y 向下：cy+h/2 = 地面）
+              const g0 = L3D.p2ToGround(params.k_inv, camCenter, yPlane, p.u, p.v);
+              if (!g0) return; // 点在地平线附近无地面解
+              L3D.beginEdit(sel, 3, hd.mode, {
+                t0: -yaw, cx0: ann.cx, cz0: ann.cz, w0: ann.w, l0: ann.l, sx: hd.sx, sy: hd.sy,
+              });
+              camDrag = { idx, mode: hd.mode, yPlane, x0: e.clientX, y0: e.clientY, moved: false };
+              return;
+            }
           }
         }
-      }
 
-      // 2) 视野外指示标记命中 → 选中该框（几何编辑走 Top 视图手柄/拖进视野后再调）
-      const ii = L3D.camHitIndicator(indicatorGeoms(), p.u, p.v);
-      if (ii != null) {
-        L3D.selectObject(ii);
-        return;
-      }
+        // 2) 视野外指示标记命中 → 选中该框（几何编辑走 Top 视图手柄/拖进视野后再调）
+        const ii = L3D.camHitIndicator(indicatorGeoms(), p.u, p.v);
+        if (ii != null) {
+          L3D.selectObject(ii);
+          return;
+        }
 
-      // 3) 框边命中 → 选中 + 地面平移（move）
-      const i = camHitTest(p.u, p.v);
-      if (i == null) return;
-      L3D.selectObject(i);
-      const ann = L3D.state.data.annotations[i];
-      const g0 = L3D.p2ToGround(pl.k_inv, camCenter, ann.cy, p.u, p.v);
-      if (!g0) return;
-      L3D.beginEdit(i, 3, "move", { cx0: ann.cx, cz0: ann.cz, x0: g0[0], z0: g0[1] });
-      camDrag = { mode: "move", yPlane: ann.cy, x0: e.clientX, y0: e.clientY, moved: false };
-    };
-    ov.onmousemove = (e) => {
-      if (!camDrag) return;
-      const p = camNativePoint(e);
-      if (!p) return;
-      if (!camDrag.moved && Math.hypot(e.clientX - camDrag.x0, e.clientY - camDrag.y0) > 3) {
-        camDrag.moved = true; // 3px 阈值区分点击/拖动
-      }
-      if (!camDrag.moved) return;
-      const pl = L3D.state.payload;
-      const g = L3D.p2ToGround(pl.k_inv, pl.cam_center || [0, 0, 0], camDrag.yPlane, p.u, p.v);
-      if (!g) return;
-      L3D.editTo(3, camDrag.mode, { x: g[0], z: g[1] });
-    };
-    const up = () => {
-      if (camDrag) { L3D.endEdit(); camDrag = null; }
-    };
-    ov.onmouseup = up;
-    ov.onmouseleave = up; // 拖出画布结束编辑（防 mouseup 落空）
+        // 3) 框边命中 → 选中 + 地面平移（move）
+        const i = camHitTest(p.u, p.v, params.p2);
+        if (i == null) return;
+        L3D.selectObject(i);
+        const ann = L3D.state.data.annotations[i];
+        const g0 = L3D.p2ToGround(params.k_inv, camCenter, ann.cy, p.u, p.v);
+        if (!g0) return;
+        L3D.beginEdit(i, 3, "move", { cx0: ann.cx, cz0: ann.cz, x0: g0[0], z0: g0[1] });
+        camDrag = { idx, mode: "move", yPlane: ann.cy, x0: e.clientX, y0: e.clientY, moved: false };
+      };
+      ov.onmousemove = (e) => {
+        if (!camDrag || camDrag.idx !== idx) return;
+        const p = camNativePoint(e, img);
+        if (!p) return;
+        if (!camDrag.moved && Math.hypot(e.clientX - camDrag.x0, e.clientY - camDrag.y0) > 3) {
+          camDrag.moved = true; // 3px 阈值区分点击/拖动
+        }
+        if (!camDrag.moved) return;
+        const g = L3D.p2ToGround(params.k_inv, params.cam_center || [0, 0, 0],
+          camDrag.yPlane, p.u, p.v);
+        if (!g) return;
+        L3D.editTo(3, camDrag.mode, { x: g[0], z: g[1] });
+      };
+      const up = () => {
+        if (camDrag && camDrag.idx === idx) { L3D.endEdit(); camDrag = null; }
+      };
+      ov.onmouseup = up;
+      ov.onmouseleave = up; // 拖出画布结束编辑（防 mouseup 落空）
+    });
   }
 
   function bindTable() {
@@ -297,7 +302,8 @@
     if (!state.data || !$("#table-wrap")) return;
     $("#table-wrap").innerHTML = L3D.renderTableHtml();
     bindTable();
-    drawCamOverlay();
+    document.querySelectorAll(".cam-overlay").forEach((ov) =>
+      drawCamOverlay(Number(ov.id.replace("cam-overlay-", ""))));
   });
 
   loadFiles();

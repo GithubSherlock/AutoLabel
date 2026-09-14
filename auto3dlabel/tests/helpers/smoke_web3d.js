@@ -334,9 +334,15 @@ const close = (a, b, tol, msg) => ok(Math.abs(a - b) < tol, `${msg}（${a} vs ${
   const NUS_PAYLOAD = {
     points: [[1, 2, 3]],
     objects: [{ index: 0, label: 'Car', confidence: 0.9, fit_points: 10, corners: CORNERS }],
+    dataset: 'nuscenes',
+    // 后端 _nuscenes_cam_proj 交付契约：有标定相机带 p2/k_inv/cam_center；
+    // 查表失败相机仅 {name,image_path}（前端纯图降级）
     cameras: [
-      { name: 'CAM_FRONT', image_path: '/root/datasets/nuscenes_mini/samples/CAM_FRONT/x.jpg' },
-      { name: 'CAM_BACK', image_path: '/root/datasets/nuscenes_mini/samples/CAM_BACK/x.jpg' },
+      { name: 'CAM_FRONT', image_path: '/root/datasets/nuscenes_mini/samples/CAM_FRONT/x.jpg',
+        p2: P2, k_inv: K_INV, cam_center: [0, 0, 0] },
+      { name: 'CAM_BACK', image_path: '/root/datasets/nuscenes_mini/samples/CAM_BACK/x.jpg',
+        p2: P2, k_inv: K_INV, cam_center: [0, -1.58, -3] }, // 每相机独立相机中心
+      { name: 'CAM_FRONT_LEFT', image_path: '/root/datasets/nuscenes_mini/samples/CAM_FRONT_LEFT/x.jpg' },
     ],
   };
   replies['api/review-files'].files.push({ name: 'nus123_review.json', image_stem: 'nus123', count: 1 });
@@ -359,12 +365,12 @@ const close = (a, b, tol, msg) => ok(Math.abs(a - b) < tol, `${msg}（${a} vs ${
   const wrap = document.querySelector('#view3d-wrap');
   ok(wrap && wrap.style.display === 'block', '打开成功后 3D 四视图容器显示（曾恒 display:none）');
   const imgs = [...document.querySelectorAll('#detail .imgs img')];
-  ok(imgs.length === 2, `相机图渲染 2 张（${imgs.length}）`);
+  ok(imgs.length === 3, `相机图渲染 3 张（${imgs.length}）`);
   ok(imgs.length > 0 && !imgs.some((im) => /undefined/.test(im.src)),
     '相机图 src 无 undefined（读 payload.cameras.image_path）');
   ok(imgs.length > 0 && imgs[0].src.startsWith('http://localhost:8766/api/review-image?path=%2Froot%2F'),
     '相机图 src 为 review-image 绝对路径');
-  ok(L3D.state.payload && L3D.state.payload.cameras.length === 2, 'payload.cameras 2 相机');
+  ok(L3D.state.payload && L3D.state.payload.cameras.length === 3, 'payload.cameras 3 相机');
 
   // frame-data 失败（payload null）→ rebuildObjects(null) 经 viewer3d 监听不抛异常
   let badErr = null;
@@ -391,13 +397,52 @@ const close = (a, b, tol, msg) => ok(Math.abs(a - b) < tol, `${msg}（${a} vs ${
   let kittiClickErr = null;
   if (kittiItem) { try { await kittiItem.onclick(); } catch (e) { kittiClickErr = e; } }
   ok(kittiClickErr === null, `打开 KITTI 帧无异常（${kittiClickErr && kittiClickErr.message}）`);
-  ok(!!document.querySelector('#cam-overlay'), 'KITTI 帧相机图挂载投影叠加 canvas');
-  const kittiOv = document.querySelector('#cam-overlay');
+  ok(!!document.querySelector('#cam-overlay-0'), 'KITTI 帧相机图挂载投影叠加 canvas');
+  const kittiOv = document.querySelector('#cam-overlay-0');
   ok(kittiOv && kittiOv.width > 0 && kittiOv.height > 0, '叠加 canvas 已适配尺寸');
+  ok(!document.querySelector('#cam-overlay-1'), 'KITTI 帧仅 1 相机叠加层');
+
+  // camProjParams：KITTI 顶层参数 / nuScenes 每相机参数 / 无标定相机 null（纯图降级）
+  ok(L3D.camProjParams(PAYLOAD, 0) && L3D.camProjParams(PAYLOAD, 0).p2 === P2,
+    'camProjParams KITTI idx=0 走 payload 顶层');
+  ok(L3D.camProjParams(PAYLOAD, 1) === null, 'camProjParams KITTI idx>0 null');
+  ok(L3D.camProjParams(NUS_PAYLOAD, 0) && L3D.camProjParams(NUS_PAYLOAD, 0).cam_center[1] === 0,
+    'camProjParams nus idx=0 走 cameras[0]');
+  ok(L3D.camProjParams(NUS_PAYLOAD, 1) && L3D.camProjParams(NUS_PAYLOAD, 1).cam_center[1] === -1.58,
+    'camProjParams nus idx=1 走 cameras[1]（每相机独立参数）');
+  ok(L3D.camProjParams(NUS_PAYLOAD, 2) === null, 'camProjParams nus 无标定相机 null（纯图）');
+  ok(L3D.camProjParams(null, 0) === null, 'camProjParams null payload null');
+
   const nusItem2 = [...document.querySelectorAll('#files .file-item')]
     .find((el) => el.dataset.name === 'nus123_review.json');
   if (nusItem2) { await nusItem2.onclick(); }
-  ok(!document.querySelector('#cam-overlay'), 'nuScenes 无标定 → 无叠加层（纯图）');
+  ok(document.querySelectorAll('.cam-overlay').length === 2,
+    'nuScenes 有标定相机 2 张 → 2 个叠加层（曾无标定纯图，本次修复后加投影）');
+  ok(!document.querySelector('#cam-overlay-2'), 'nuScenes 无标定相机（CAM_FRONT_LEFT）纯图无叠加层');
+
+  // nuScenes 相机图拖动用每相机参数：spy p2ToGround 的 cam_center 实参
+  // （CAM_BACK cc=[0,-1.58,-3] ≠ CAM_FRONT cc=[0,0,0]；u,v 选投影框边线上点）
+  const backImg = document.getElementById('cam-img-1');
+  const backOv = document.getElementById('cam-overlay-1');
+  backImg.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1242, height: 375 });
+  Object.defineProperty(backImg, 'naturalWidth', { value: 1242 });
+  Object.defineProperty(backImg, 'naturalHeight', { value: 375 });
+  const origP2G = L3D.p2ToGround;
+  const spyCCs = [];
+  L3D.p2ToGround = (kInv, cc, cy, u, v) => { spyCCs.push([cc, u, v]); return origP2G(kInv, cc, cy, u, v); };
+  L3D.state.selected = null; // 清 KITTI 帧残留选中（手柄分支不干扰边命中）
+  backOv.onmousedown({ clientX: 715, clientY: 234 }); // NUS 框投影边线点（yaw=π/2 车头边）
+  ok(L3D.state.selected === 0, 'CAM_BACK mousedown 命中投影框边 → 选中');
+  backOv.onmousemove({ clientX: 726, clientY: 234 });
+  backOv.onmouseup();
+  L3D.p2ToGround = origP2G; // spy 复位
+  ok(spyCCs.length >= 2, `拖动链路经 p2ToGround（${spyCCs.length} 次）`);
+  ok(spyCCs.length >= 1 && spyCCs[0][0][1] === -1.58 && spyCCs[0][0][2] === -3,
+    `CAM_BACK 拖动用 cameras[1].cam_center（${JSON.stringify(spyCCs[0] && spyCCs[0][0])}）`);
+  const nusAnn = L3D.state.data.annotations[0];
+  ok(nusAnn.edited_by_human === true, 'nuScenes 相机图拖动置人工标记');
+  // 数值锚点：cc=[0,-1.58,-3] 下 t=(1.4+1.58)/d1，d1=(234-180)/700 → 与 cc=[0,0,0] 显著不同
+  close(nusAnn.cx, 1.6069, 1e-2, 'CAM_BACK 拖动 cx 数值（cam_center 反投影锚点）');
 
   // view=3 'move' 拖动编辑：走 beginEdit/editTo/endEdit + undo（相机图拖动语义）
   await L3D.loadFrame('000123_review.json');
