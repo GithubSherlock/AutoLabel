@@ -188,6 +188,38 @@ flowchart TD
 | cityscapes 域内权重 | ✅ 已闭环（mmdet 官方权重转换接入 `maskrcnn_r50_cityscapes`，全量 500 图 mAP 0.5149，见 `tests/test-v0.3.md`） |
 | dota/mot 域微调权重（GPU 复测定性为域边界：COCO 预训练模型在航拍/密集行人域失效，规模/SAHI/架构均无效） | 域微调路线（预标注 → 微调 → 回采闭环，AutoLabel 价值场景） |
 
+## RAG 与多 Agent 演进调研（v1.1 候选，2026-09-16 设计定案）
+
+> 动机：将标注经验沉淀为可检索知识（RAG）、将质检升级为生成-质检双 Agent。**本节为设计，未实现**，实现归入 v1.1 待排期。
+> 红线约束：纯本地（向量库与 Embedding 均本地权重，不新增外部 API）、LLM 调用点不扩容（质检仅条件触发）、复用 `agent/dialog.py` 骨架与 Harness 台账、多 agent 编排框架不引入（沿用 v0.6 论证）。
+
+### 1. RAG：标注经验库
+
+**检索单元**：一次标注会话摘要 {指令, 域/数据集, 任务类型, 选型与阈值, 质量判定, 人工修正动作}；人工修正从 `*_reviewed.json` 的 edited_by_human/issues 提取——现有数据回路零新增采集。
+
+**检索时点**：LLM 调用点 ① 规划——planner prompt 注入 top-k 相似历史案例作 few-shot（相似指令历史上用什么模型/阈值、出现过什么问题）；候选扩展调用点 ② 评估——注入「同类错误的历史处置先例」。
+
+**选型**（守纯本地红线）：
+- 向量库：FAISS（CPU 可跑；备选 sqlite-vec 免进程）；Embedding：本地 bge-small-zh-v1.5，图像侧复用已集成 CLIP 做图-文跨模态（找相似图的历史标注）
+- 存储：向量（.index）+ 原文（JSONL）双文件同构；入库挂在 HITL 回流之后异步执行，不进标注关键路径
+- 评估：复用 12 数据集 Benchmark 与 no-LLM baseline 套路，对比「注入历史案例 vs 无注入」的标注质量与 LLM 调用数
+
+**种子条目**（首轮入库）：cityscapes 用 maskrcnn_r50_cityscapes（COCO 预训练对小目标失效）、DOTA/KITTI 域 COCO 权重失效需域微调、批量 rect=False/TF32 铁律——现散落于 CLAUDE.md 与测试文档，向量化后按指令相似度检索。
+
+### 2. 多 Agent：路由 + 生成-质检对抗
+
+> 多 Agent = 多套 prompt/schema + 独立 toolset，复用 dialog.py 骨架；providers.yaml 已支持质检用不同 provider/模型。
+
+- **Router Agent**：route_domain 代码级规则保留为兜底，前置一次 LLM 轻量分类（域/任务/复杂度分档），低置信回退规则，单一事实源不变
+- **标注 Agent（Generator）**：现有 planner + execute 路径出初稿，不动
+- **质检 Agent（Critic）**：LLM Evaluate 升级为独立质检——独立 prompt + 不同模型（planner 用 deepseek-chat、质检用更强模型），**仅 hard 档 / quality.ok 不达标条件触发**；增量价值 = 跨模型交叉校验，降低同模型自我确认偏差
+- **成本口径**：质检 hard 档触发 vs 现全量不达标触发，台账（Harness 已有）对比调用数与费用
+
+### 3. 版本归属与验收
+
+- **v1.1 候选**：P1 RAG 最小闭环（bge + FAISS + 规划时注入 + 对比基准）；P2 质检 Agent 独立化（跨模型交叉校验 + hard 档触发口径）
+- **验收**：① 纯本地零新外部 API；② 注入组 vs 基线组在既有 Benchmark 上的标注质量/LLM 调用数对比；③ 质量门不恶化
+
 ## 下一步
 
 （2026-08-19 战略调整：Auto2dLabel 为 Auto3dLabel 做基石——两模块**双线并行**：3D 主推进 v0.1 单帧 MVP，2D 侧优先交付支撑 3D 的内容（原 v1.0 Tracking 提前至 v0.4）；3D 使命完成后才做 Pose 等非 3D 内容（v0.5）。2026-08-17 首调：Auto3dLabel v0.1 提前——2D 基础能力已就绪、单帧 3D 不依赖 Pose/Tracking。2026-08-28 二调：**对话式 Agent 架构迭代优先**——v0.6（2D）+ auto3dlabel v0.3 P1（3D）双线并行，其余 3D 目标顺延。**2026-08-31 双双收尾**：auto2dlabel v0.6 ✅ 与 auto3dlabel v0.3 ✅（P1–P6 全完成）。**2026-09-02 auto3dlabel v0.4 ✅**：HITL 编辑闭环（P1 手柄编辑）+ nuScenes 端到端标注闭环（P2，回灌出表）+ KITTI 微调闭环（P3，40-point 主口径全面优于或持平官方）——「AI 初稿 → 人工修正 → 数据反哺模型」完整回路在 3D 侧闭环。**2026-09-02 三调：Agentic 交互化立项**——3D 侧闭环后主线回到产品形态跃迁，v1.0 P1（TUI + 流式）可开工（执行指南见上方 §Agentic 交互化执行指南）；3D 侧下一轮议题：自标注增量微调（P3b/P4，nuScenes 域）、无 LiDAR 域标注候选（v2+）。**2026-09-02 v1.0 P1 ✅**：TUI 骨架 + 流式改造交付（`autolabel` 统一入口 / ChatApp 斜杠命令 / chat() stream+on_delta 双协议 / route_domain 路由，pytest 1129 + smoke_tui 11/11 + 质量门不恶化）；下一议题 P2 provider 注册表）。**2026-09-06 v1.0 P2–P5 ✅**：Agentic 交互化剩余四阶段连续交付（P2 provider 注册表 → P3 后台任务面板 → P4 会话管理 → P5 HITL 指挥台，逐 Phase 质量门全绿；pytest 1267 + smoke_tui 31/31 + pyright 0 / mypy 168 / ruff 86 存量不恶化，全部改动留工作区未 commit）——「自然语言 → Agent 规划 → 多引擎执行 → 质量评估 → HITL 三档分流 → 复核回流」完整回路在 TUI 指挥台一站可操作；下一议题：3D 侧自标注增量微调（P3b/P4，nuScenes 域）、无 LiDAR 域标注候选（v2+））
@@ -203,6 +235,7 @@ flowchart TD
 | 5 | 已知缺口消化 | mot 域微调权重（cityscapes ✅ 已闭环 0.5149，时机与域内数据同步）、分类数据集扩展（ImageNet100 ✅ + ILSVRC2012 val ✅，cifar/CUB200 待排期）、Web bbox 拖拽/标签编辑、分类与 OBB 的 Web 展示（已随 v0.4 Phase 3 消化） |
 | 6 | **GPU 必需项**（2026-08-23 GPU 3080 Ti 到位，三项全部 ✅） | ① 指代 L3 Qwen2-VL-7B ✅（NF4 4bit ~4.5G，红车锁定冒烟 33.2s）；② KITTI 域内微调闭环 ✅（best.pt val mAP50 0.9430，官方口径 overall 0.8867 vs 基线全量同口径 0.2702；cityscapes 0.0082→0.5149 先例第二例）；③ 全量 ImageNet1k 5 万图基准 ✅（top-1 0.6968 / top-5 0.8899，440.8s） |
 | 7 | **Agentic 交互化 v1.0**（2026-09-02 立项，企划 `docs/Agentic_UI_plan.md` 立项前提全满足）✅ 2026-09-06 | P1 ✅ 2026-09-02（TUI 外壳 + 流式对话，验收与实测见 §Agentic 交互化执行指南 / `auto2dlabel/tests/test-v1.0.md`）；P1+ ✅ 2026-09-02（批量 nuScenes 扩展）；P2 ✅ provider 注册表（providers.yaml + /model 三态 + per-provider 台账）→ P3 ✅ 后台任务面板（[AL_PROGRESS] 行协议 + /cancel 两级终止 + manifest 续跑引导）→ P4 ✅ 会话管理（logs/chat_sessions.jsonl + /new /resume 真实现）→ P5 ✅ HITL 指挥台（/review 三档统计 + /web 一键 Web 复核）；P2–P5 实测见 `auto2dlabel/tests/test-v1.0.md` |
+| 8 | **RAG + 多 Agent 演进（v1.1 候选，2026-09-16 设计定案）** | P1 标注经验库（bge + FAISS + 规划时注入 + 对比基准）→ P2 质检 Agent 独立化（跨模型交叉校验 + hard 档触发）；红线：纯本地、LLM 调用点不扩容、不引入编排框架；详见 §RAG 与多 Agent 演进调研 |
 
 ## 差异化定位
 
