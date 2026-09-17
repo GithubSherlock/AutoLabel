@@ -149,7 +149,7 @@ Benchmark 版本随主项目版本对齐，不单独立版本号。
 
 | 项 | 状态 |
 | --- | --- |
-| **Benchmark 套件** | 检测 5 + OBB 1 + 分割 4 + 分类 ImageNet100 共 11 数据集就绪（`auto2dlabel/benchmarks/` 15 文件）；另 3 个分类数据集归档已就绪待接入（见 `datasets_plan.md`）；双入口：`python -m auto2dlabel.benchmarks.run_all` 一键 + 单脚本直跑；`bash auto2dlabel/benchmarks/run_benchmarks.sh` 一键包装（all/detection/segmentation/classification/obb 分组，见程序规范 §10.8）；纯 CPU 全量可行性已验证（见 `tests/test-v0.3.md`） |
+| **Benchmark 套件** | 检测 5 + OBB 1 + 分割 4 + 分类 ImageNet100 共 11 数据集就绪（`auto2dlabel/benchmarks/` 16 文件）+ **experience 对比**（v1.1 P1：`experience_benchmark.py`——RAG few-shot 注入 vs 基线，同源 COCO GT/检测器/评估协议，唯一差异 = planner system prompt 是否注入检索经验；指标 mAP@0.5 + planner LLM 调用数（台账聚合）+ 费用；已注册 `run_benchmarks.sh experience` 组跑两遍）；双入口：`python -m auto2dlabel.benchmarks.run_all` 一键 + 单脚本直跑；`bash auto2dlabel/benchmarks/run_benchmarks.sh` 一键包装（all/detection/segmentation/classification/obb/experience 分组，见程序规范 §10.8）；纯 CPU 全量可行性已验证（见 `tests/test-v0.3.md`） |
 | **实测数据** | 在 `auto2dlabel/tests/test-v0.1.md`、`test-v0.2.md`（VOC 100 图 yolo26x mAP 0.592 等）；完整产物在 `benchmarks_outputs/`（不入库） |
 | **质量门** | pyright 0 / mypy strict ≤ 基线 / ruff ≤ 基线 / pytest 全绿（每版本硬性门槛，数字基线以 `AutoLabel_plan.md` 当前状态为准） |
 | **已知不一致** | 7 项缺口见下节（分类基准缺失、docstring 过期、双注册键名不一致等） |

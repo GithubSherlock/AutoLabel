@@ -13,6 +13,7 @@ import typer
 
 from auto2dlabel.cli_commands import (
     chat_command,
+    cost_critic_command,
     cost_report_command,
     dataset_add_command,
     dataset_list_command,
@@ -151,6 +152,14 @@ def cost_report(
 ) -> None:
     """按调用点聚合 LLM token 用量与费用（v0.6 Phase 4 usage 台账）。"""
     cost_report_command(path=path or None)
+
+
+@app.command()
+def cost_critic(
+    path: str = typer.Option("", "--path", help="台账 JSONL 路径（默认 logs/llm_usage.jsonl）"),
+) -> None:
+    """Critic 质检成本 vs 规划成本对比（v1.1 P2 evaluate_critic 调用点）。"""
+    cost_critic_command(path=path or None)
 
 
 dataset_app = typer.Typer(help="管理用户自建数据集注册（供 LLM 路径引导）")

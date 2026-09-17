@@ -188,10 +188,20 @@ flowchart TD
 | cityscapes 域内权重 | ✅ 已闭环（mmdet 官方权重转换接入 `maskrcnn_r50_cityscapes`，全量 500 图 mAP 0.5149，见 `tests/test-v0.3.md`） |
 | dota/mot 域微调权重（GPU 复测定性为域边界：COCO 预训练模型在航拍/密集行人域失效，规模/SAHI/架构均无效） | 域微调路线（预标注 → 微调 → 回采闭环，AutoLabel 价值场景） |
 
-## RAG 与多 Agent 演进调研（v1.1 候选，2026-09-16 设计定案）
+## RAG 与多 Agent 演进调研（v1.1，2026-09-16 设计定案 → 2026-09-17 P1+P2 ✅）
 
-> 动机：将标注经验沉淀为可检索知识（RAG）、将质检升级为生成-质检双 Agent。**本节为设计，未实现**，实现归入 v1.1 待排期。
+> 动机：将标注经验沉淀为可检索知识（RAG）、将质检升级为生成-质检双 Agent。**P1 RAG 最小闭环 + P2 质检 Agent 独立化均已交付**（逐 Phase 质量门全绿，改动留工作区未 commit）。
 > 红线约束：纯本地（向量库与 Embedding 均本地权重，不新增外部 API）、LLM 调用点不扩容（质检仅条件触发）、复用 `agent/dialog.py` 骨架与 Harness 台账、多 agent 编排框架不引入（沿用 v0.6 论证）。
+
+### 0. P1+P2 交付摘要（2026-09-17）
+
+- **P1 标注经验库**：`auto2dlabel/agent/experience.py`——`ExperienceEntry`（指令/域/数据集/任务类型/选型阈值/质量判定/人工修正）+ `build_entry` 纯代码构造（**零 LLM**）+ `append_entry` JSONL 入库（logs/experience.jsonl，去重）+ `retrieve` metadata 精确过滤 → CLIP 文本向量 top-k（复用已集成 ClipModel，`weights/hf` 缓存零新权重；transformers 5.x 取 `pooler_output`）+ numpy 暴力余弦（种子量小免 faiss）；入库挂 `cli_execute._finalize_step` 异步 daemon 线程不阻塞；种子 3 条（cityscapes 域权重 / DOTA 域失效 / 跟踪批量铁律）在 `configs/experience_seeds.jsonl`
+- **P1 注入**：`planner.md` 加 `$experience_fewshot` 段；`planner._build_system_prompt(instruction)` 每次解析动态检索注入（import 期常量保留测试契约）；检索失败/空库静默降级 `""`
+- **P2 质检 Agent（Critic）**：`auto2dlabel/agent/critic.py` + `prompts/critic.md`（独立 prompt 与 planner 不同源）+ `build_critic_client`（create_client 独立 provider，env `AUTOLABEL_CRITIC_PROVIDER` 覆盖默认 deepseek）+ `criticize` 独立 call_site `evaluate_critic`；触发 = `quality.ok == False`（与 LLM Evaluate 同一判据）挂在 `_finalize_step`，无 key/失败/非法 JSON 静默跳过；只出意见不执行重试（交叉校验降同模型自我确认偏差）
+- **P2 cost-critic**：`auto2dlabel cost-critic` 子命令——aggregate_usage 过滤 evaluate_critic vs planner 调用点对比（复用台账单一事实源）
+- **质量门**：pyright 0（3 = 基线 mapvec_crosscheck 存量）/ mypy 168 ≤166 基线不恶化（改动文件 0）/ ruff 74 存量不恶化（改动文件全绿）/ pytest 1352 passed + smoke_tui ALL PASS
+
+> 备注：本节为设计 + P1/P2 实现摘要（2026-09-17 交付，改动留工作区）。Router Agent 暂缓——route_domain 代码级规则 17/17 手动 + 23 用例已覆盖，无规则误路由实证前不做（避免 LLM 分类扩容调用点 + 新失败面）。
 
 ### 1. RAG：标注经验库
 
@@ -212,13 +222,14 @@ flowchart TD
 
 - **Router Agent**：route_domain 代码级规则保留为兜底，前置一次 LLM 轻量分类（域/任务/复杂度分档），低置信回退规则，单一事实源不变
 - **标注 Agent（Generator）**：现有 planner + execute 路径出初稿，不动
-- **质检 Agent（Critic）**：LLM Evaluate 升级为独立质检——独立 prompt + 不同模型（planner 用 deepseek-chat、质检用更强模型），**仅 hard 档 / quality.ok 不达标条件触发**；增量价值 = 跨模型交叉校验，降低同模型自我确认偏差
-- **成本口径**：质检 hard 档触发 vs 现全量不达标触发，台账（Harness 已有）对比调用数与费用
+- **质检 Agent（Critic）** ✅：LLM Evaluate 升级为独立质检——独立 prompt（`prompts/critic.md`）+ 不同模型（env `AUTOLABEL_CRITIC_PROVIDER`，默认 deepseek-chat、用户配更强模型），**quality.ok == False 条件触发**（用户定案，与 LLM Evaluate 同一判据）；增量价值 = 跨模型交叉校验，降低同模型自我确认偏差
+- **成本口径**：`auto2dlabel cost-critic` 子命令——台账（Harness 已有）按 evaluate_critic call_site 聚合 vs planner 调用点对比（复用 aggregate_usage 单一事实源）
 
 ### 3. 版本归属与验收
 
-- **v1.1 候选**：P1 RAG 最小闭环（bge + FAISS + 规划时注入 + 对比基准）；P2 质检 Agent 独立化（跨模型交叉校验 + hard 档触发口径）
-- **验收**：① 纯本地零新外部 API；② 注入组 vs 基线组在既有 Benchmark 上的标注质量/LLM 调用数对比；③ 质量门不恶化
+- **v1.1 P1 ✅ RAG 最小闭环**（CLIP 文本向量 + numpy 暴力检索替代文档定案 bge+FAISS——复用已集成 ClipModel 零新权重、中文实测可用；对比基准 `experience_benchmark.py` 已交付并注册 `run_benchmarks.sh experience` 组）
+- **v1.1 P2 ✅ 质检 Agent 独立化**（跨模型交叉校验 + quality.ok==False 触发口径 + cost-critic 成本对比）
+- **验收**：① 纯本地零新外部 API ✅（CLIP 复用、numpy 暴力检索、create_client 既有 provider）；② 注入组 vs 基线组标注质量/LLM 调用数对比 ✅（`experience_benchmark.py`：同源 GT/检测器/评估协议，两组唯一差异 = few-shot 注入；CPU 3 图冒烟基线 0.6250 / 注入 0.6250；LLM 调用数 = planner call_site 台账聚合）③ 质量门不恶化 ✅（pyright 0 / mypy 168 / ruff 74 / pytest 1354 / smoke_tui ALL PASS）
 
 ## 下一步
 
@@ -235,7 +246,7 @@ flowchart TD
 | 5 | 已知缺口消化 | mot 域微调权重（cityscapes ✅ 已闭环 0.5149，时机与域内数据同步）、分类数据集扩展（ImageNet100 ✅ + ILSVRC2012 val ✅，cifar/CUB200 待排期）、Web bbox 拖拽/标签编辑、分类与 OBB 的 Web 展示（已随 v0.4 Phase 3 消化） |
 | 6 | **GPU 必需项**（2026-08-23 GPU 3080 Ti 到位，三项全部 ✅） | ① 指代 L3 Qwen2-VL-7B ✅（NF4 4bit ~4.5G，红车锁定冒烟 33.2s）；② KITTI 域内微调闭环 ✅（best.pt val mAP50 0.9430，官方口径 overall 0.8867 vs 基线全量同口径 0.2702；cityscapes 0.0082→0.5149 先例第二例）；③ 全量 ImageNet1k 5 万图基准 ✅（top-1 0.6968 / top-5 0.8899，440.8s） |
 | 7 | **Agentic 交互化 v1.0**（2026-09-02 立项，企划 `docs/Agentic_UI_plan.md` 立项前提全满足）✅ 2026-09-06 | P1 ✅ 2026-09-02（TUI 外壳 + 流式对话，验收与实测见 §Agentic 交互化执行指南 / `auto2dlabel/tests/test-v1.0.md`）；P1+ ✅ 2026-09-02（批量 nuScenes 扩展）；P2 ✅ provider 注册表（providers.yaml + /model 三态 + per-provider 台账）→ P3 ✅ 后台任务面板（[AL_PROGRESS] 行协议 + /cancel 两级终止 + manifest 续跑引导）→ P4 ✅ 会话管理（logs/chat_sessions.jsonl + /new /resume 真实现）→ P5 ✅ HITL 指挥台（/review 三档统计 + /web 一键 Web 复核）；P2–P5 实测见 `auto2dlabel/tests/test-v1.0.md` |
-| 8 | **RAG + 多 Agent 演进（v1.1 候选，2026-09-16 设计定案）** | P1 标注经验库（bge + FAISS + 规划时注入 + 对比基准）→ P2 质检 Agent 独立化（跨模型交叉校验 + hard 档触发）；红线：纯本地、LLM 调用点不扩容、不引入编排框架；详见 §RAG 与多 Agent 演进调研 |
+| 8 | **RAG + 多 Agent 演进（v1.1，2026-09-16 设计定案 → P1+P2 ✅ 2026-09-17）** | P1 标注经验库 ✅（CLIP 文本向量 + numpy 暴力检索 + planner few-shot 注入 + 零 LLM 入库 + 种子 3 条）→ P2 质检 Agent 独立化 ✅（critic.md + 独立 provider 交叉校验 + evaluate_critic call_site + cost-critic 对比）；Router Agent 缓行（无规则误路由实证不做）；红线：纯本地、LLM 调用点不扩容、不引入编排框架；详见 §RAG 与多 Agent 演进调研 |
 
 ## 差异化定位
 

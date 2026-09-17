@@ -76,3 +76,8 @@ Dataset resolution:
 $task_params_summary
 - 缺参指令（未提 REQUIRED 字段）→ 对应字段留空/默认 + questions 追问，
   不要臆造路径/类别
+
+$experience_fewshot
+- 若下方有「历史经验」列表（相似指令的模型/阈值/处置），优先参考其
+  选型与阈值（历史出过问题的方案不要重复踩坑）
+- 无该列表则忽略本节，按模型目录自主选型

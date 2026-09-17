@@ -6,6 +6,7 @@ import re
 import time as _time
 from collections.abc import Callable
 from datetime import datetime as _datetime
+from logging import getLogger
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -22,6 +23,8 @@ from auto2dlabel.schema.annotation import Annotation, Bbox
 from auto2dlabel.schema.task_plan import DEFAULT_MODEL, TaskPlan, TaskStep
 from auto2dlabel.tools.constraints import ReferentialConstraint
 from auto2dlabel.tools.tracking import DEFAULT_REID_MODEL, TrackingCancelledError
+
+logger = getLogger(__name__)
 
 if TYPE_CHECKING:
     from auto2dlabel.agent.evaluate import QualityReport
@@ -91,6 +94,7 @@ def execute_plan(
     _plan_t0 = _time.time()
     steps_results: list[dict[str, Any]] = []
     tracking_failures = 0
+    _set_current_instruction(plan.raw_instruction)
 
     # 启动显存体检（2026-08-29）：上次运行未正常退出（Ctrl+Z 挂起/终端未关）
     # 残留进程占显存 → 开跑前黄字提醒（不阻断，单图 OOM 时另有跳过保护）
@@ -1281,6 +1285,58 @@ def _finalize_step(
         "quality": quality.to_dict() if quality else None,
     })
 
+    # v1.1 P1：经验入库挂点——本步执行摘要异步写入经验库（纯代码构造，
+    # 零 LLM 调用；daemon 线程不阻塞标注关键路径）。
+    _record_experience_async(
+        plan_raw_instruction=_current_instruction(),
+        step=step,
+        quality=quality,
+        triage_summary=triage.summary,
+    )
+
+    # v1.1 P2：Critic 质检 Agent——quality.ok == False 条件触发（与现有
+    # LLM Evaluate 同一判据），独立 client 跨模型交叉校验。失败/无 key/
+    # 非法响应 → 静默跳过（Critic 是增强不是必需，绝不阻断标注路径）。
+    _run_critic_if_needed(quality=quality, steps_results=steps_results)
+
+
+def _run_critic_if_needed(
+    quality: QualityReport | None,
+    steps_results: list[dict[str, Any]],
+) -> None:
+    """Critic 触发：quality.ok == False + 有凭据。结果只展示 + 记 steps_results，
+    不执行检测重试（交叉校验出意见）。"""
+    if not _should_run_critic(quality):
+        return
+    try:
+        from auto2dlabel.agent.critic import (
+            CRITIC_CALL_SITE,
+            build_critic_client,
+            critic_provider,
+            criticize,
+        )
+
+        client = build_critic_client()
+        if not client.has_credentials:
+            return  # 无 key 静默跳过（零影响）
+        verdict = criticize(quality, client)
+        console.print(
+            f"[dim]Critic 质检 ({critic_provider()}): "
+            f"{'通过' if verdict['judgment'] == 'pass' else '不通过'} — "
+            f"{verdict['reason']}（建议: {verdict['action']}）[/dim]"
+        )
+        verdict["call_site"] = CRITIC_CALL_SITE
+        if steps_results:
+            steps_results[-1]["critic"] = verdict
+    except Exception as e:
+        logger.warning("Critic 质检失败，跳过: %s", e)
+
+
+def _should_run_critic(quality: QualityReport | None) -> bool:
+    from auto2dlabel.agent.critic import should_criticize
+
+    return should_criticize(quality)
+
 
 def _log_plan(plan: TaskPlan, steps_results: list[dict[str, Any]], plan_t0: float) -> None:
     """记录顶层 Chat 日志。"""
@@ -1297,3 +1353,69 @@ def _log_plan(plan: TaskPlan, steps_results: list[dict[str, Any]], plan_t0: floa
         elapsed=round(_time.time() - plan_t0, 3),
         timestamp=_datetime.now().strftime("%Y-%m-%d-%H-%M-%S"),
     )
+
+
+# v1.1 P1 经验入库：当前 plan 指令的线程局部缓存（_finalize_step 内读取——
+# 函数签名不加参防所有调用点连锁改动；execute_plan 开头设置）
+_instruction_ctx: Any = None
+
+
+def _set_current_instruction(instruction: str) -> None:
+    """记录当前 plan 原始指令（execute_plan 开头设置，_finalize_step 读取）。"""
+    global _instruction_ctx
+    _instruction_ctx = instruction
+
+
+def _current_instruction() -> str:
+    return _instruction_ctx or ""
+
+
+def _record_experience_async(
+    plan_raw_instruction: str,
+    step: TaskStep,
+    quality: QualityReport | None,
+    triage_summary: dict[str, int],
+) -> None:
+    """本步执行摘要异步写入经验库（v1.1 P1；零 LLM，daemon 线程不阻塞）。
+
+    instruction 用 plan 原始指令（检索文本与用户意图一致）；domain 恒 "2d"
+    （execute_plan 是 2D chat 路径）；dataset 从 source 路径子串粗判
+    （kitti/coco/dota/cityscapes 等——为 metadata 过滤提供粗粒度键）。
+    triage_summary 的 review/hard 计数作质量上下文；入库失败零影响。
+    """
+    import threading
+
+    from auto2dlabel.agent.experience import EXPERIENCE_LOG_PATH, append_entry, build_entry
+
+    instruction = plan_raw_instruction or step.source
+    entry = build_entry(
+        instruction=instruction,
+        domain="2d",
+        task_type=step.task_type,
+        model=step.model_name,
+        confidence_threshold=step.confidence_threshold,
+        quality=quality,
+        dataset=_infer_dataset(step.source),
+        notes=_triage_note(triage_summary),
+    )
+    threading.Thread(
+        target=append_entry, args=(EXPERIENCE_LOG_PATH, entry), daemon=True
+    ).start()
+
+
+def _infer_dataset(source: str) -> str:
+    """从 source 路径子串粗判数据集（""=无；metadata 过滤粗粒度键）。"""
+    s = source.lower()
+    for name in ("kitti", "coco", "dota", "cityscapes", "voc", "ilsvrc", "mot", "nuscenes"):
+        if name in s:
+            return name
+    return ""
+
+
+def _triage_note(summary: dict[str, int]) -> str:
+    """分流计数 → 经验 notes（供检索注入，人工处置上下文）。"""
+    review = summary.get("review", 0)
+    hard = summary.get("hard", 0)
+    if review or hard:
+        return f"HITL 分流: {review} 待复核 / {hard} 困难"
+    return "HITL 分流: 全量直接采纳"

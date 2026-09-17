@@ -39,7 +39,7 @@ GROUP_OBB="dota_obb"
 
 usage() {
     cat <<EOF
-${BOLD}用法:${NC} bash run_benchmarks.sh [all|detection|segmentation|classification|obb] [--only DATASET,...] [--extra "ARGS"] [--check-only]
+${BOLD}用法:${NC} bash run_benchmarks.sh [all|detection|segmentation|classification|obb|experience] [--only DATASET,...] [--extra "ARGS"] [--check-only]
 
 ${BOLD}分组:${NC}
   all            全部 11 数据集（默认）
@@ -47,6 +47,7 @@ ${BOLD}分组:${NC}
   segmentation   ${GROUP_SEGMENTATION//,/, }
   classification ${GROUP_CLASSIFICATION//,/, }
   obb            ${GROUP_OBB//,/, }
+  experience     RAG few-shot 注入 vs 基线对比（跑两遍：基线 + 注入）
 
 ${BOLD}选项:${NC}
   --only DATASET,...   仅跑指定数据集（逗号分隔，覆盖分组选择）
@@ -72,7 +73,7 @@ while [[ $# -gt 0 ]]; do
         --extra)
             [[ -z "${2:-}" ]] && { echo -e "${RED}❌ --extra 缺少参数${NC}"; exit 1; }
             EXTRA="$2"; shift 2 ;;
-        all|detection|segmentation|classification|obb) GROUP="$1"; shift ;;
+        all|detection|segmentation|classification|obb|experience) GROUP="$1"; shift ;;
         *) echo -e "${RED}❌ 未知参数: $1${NC}"; usage; exit 1 ;;
     esac
 done
@@ -133,11 +134,19 @@ else
     DATASETS="${GROUP_DETECTION},${GROUP_SEGMENTATION},${GROUP_CLASSIFICATION},${GROUP_OBB}"
 fi
 
-# ── 执行（调度归 run_all.py） ──
+# ── 执行（调度归 run_all.py；experience 组直跑对比脚本两遍：基线 + 注入） ──
 echo ""
 echo -e "${BOLD}== 运行 Benchmark ==${NC}"
 echo -e "  数据集: ${CYAN}${DATASETS}${NC}"
 [[ -n "$EXTRA" ]] && echo -e "  额外参数: ${CYAN}${EXTRA}${NC}"
+
+if [[ "$GROUP" == "experience" ]]; then
+    # RAG few-shot 对比：基线组（无注入）→ 注入组；结果落 benchmarks_outputs/
+    echo -e "  ${CYAN}experience 组：先基线再注入（同 GT/同检测器/同协议，唯一差异 = few-shot 注入）${NC}"
+    python3 -m auto2dlabel.benchmarks.experience_benchmark ${EXTRA:-}
+    python3 -m auto2dlabel.benchmarks.experience_benchmark --inject ${EXTRA:-}
+    exit $?
+fi
 
 python3 -m auto2dlabel.benchmarks.run_all --only "$DATASETS" --extra "${EXTRA:-}"
 exit $?

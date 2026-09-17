@@ -42,11 +42,14 @@ logger = logging.getLogger(__name__)
 # 借鉴 claude-code agents/*.md 模式）。import 期 render 保持「8 个测试直接
 # import 常量断言子串」的旧语义——目录/数据集/参数摘要仍为运行时注入值。
 _PLANNER_SPEC = load_prompt("planner.md")
+# v1.1 P1：基础 system prompt（不含经验 few-shot——few-shot 是每指令动态
+# 检索注入，import 期无法预知；测试契约子串断言仍用此常量）
 _PLANNER_SYSTEM_PROMPT = render(
     _PLANNER_SPEC,
     catalog_summary=format_catalog_summary(),
     datasets_summary=format_datasets_summary(),
     task_params_summary=format_task_params_summary(),
+    experience_fewshot="",  # 动态段默认空（parse/parse_dialog 每次构建时检索注入）
 )
 
 _BENCHMARK_SPEC = load_prompt("benchmark.md")
@@ -89,6 +92,30 @@ def _gpu_context_line() -> str:
     return "\n".join(lines)
 
 
+def _build_system_prompt(instruction: str) -> str:
+    """构建 planner system prompt（v1.1 P1：每次解析动态注入 RAG few-shot）。
+
+    import 期常量 `_PLANNER_SYSTEM_PROMPT` 为无 few-shot 基础版（测试契约
+    子串断言）；本函数在基础版上按指令检索 top-k 经验注入 `$experience_fewshot`
+    （`planner.md` 里与 `$catalog_summary` 等同级占位符）。检索失败/空库 →
+    注入空串（静默降级，RAG 是增强不是必需）。
+    """
+    try:
+        from auto2dlabel.agent.experience import format_fewshot, retrieve
+
+        hits = retrieve(instruction)
+        return render(
+            _PLANNER_SPEC,
+            catalog_summary=format_catalog_summary(),
+            datasets_summary=format_datasets_summary(),
+            task_params_summary=format_task_params_summary(),
+            experience_fewshot=format_fewshot(hits),
+        )
+    except Exception as e:
+        logger.warning("经验 few-shot 注入失败，回退基础 prompt: %s", e)
+        return _PLANNER_SYSTEM_PROMPT
+
+
 class TaskPlanner:
     """任务规划器 —— NL → TaskPlan / BenchmarkRequest。"""
 
@@ -107,7 +134,7 @@ class TaskPlanner:
         """
 
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": _PLANNER_SYSTEM_PROMPT},
+            {"role": "system", "content": _build_system_prompt(instruction)},
             {"role": "user", "content": _gpu_context_line() + "\n\n" + instruction},
         ]
 
@@ -152,7 +179,7 @@ class TaskPlanner:
         LLM 响应非法 / 空响应 → ValueError 传播（调用方降级链处理）。
         on_delta: LLM 流式增量回调（v1.0 P1；None = 非流式）。
         """
-        system_prompt = _PLANNER_SYSTEM_PROMPT + "\n\n" + _gpu_context_line()
+        system_prompt = _build_system_prompt(instruction) + "\n\n" + _gpu_context_line()
         plan = parse_with_dialog(
             llm=self.llm,
             system_prompt=system_prompt,

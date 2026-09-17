@@ -169,6 +169,61 @@ def cost_report_command(path: str | None = None) -> None:
     )
 
 
+def cost_critic_command(path: str | None = None) -> None:
+    """`cost-critic` 命令实现（v1.1 P2）：Critic 质检成本 vs planner 规划成本对比。
+
+    同表展示两调用点（evaluate_critic / planner.dialog），对比跨模型交叉
+    校验的增量成本（调用数/tokens/费用）。复用 aggregate_usage 单一事实源。
+    """
+    from pathlib import Path
+
+    from auto2dlabel.agent.critic import CRITIC_CALL_SITE
+    from auto2dlabel.agent.llm import USAGE_LOG_PATH, aggregate_usage, load_usage_logs
+
+    target = Path(path) if path else USAGE_LOG_PATH
+    entries = load_usage_logs(target)
+    if not entries:
+        console.print(f"[yellow]台账为空或不存在: {target}[/yellow]")
+        return
+
+    rows = aggregate_usage(entries)
+    table = Table(title=f"Critic 质检成本对比（{target}）")
+    table.add_column("调用点", style="cyan")
+    table.add_column("模型", style="magenta")
+    table.add_column("调用数", justify="right")
+    table.add_column("prompt", justify="right")
+    table.add_column("completion", justify="right")
+    table.add_column("费用(元)", justify="right", style="green")
+
+    critic_total = 0.0
+    shown = 0
+    for r in rows:
+        if r["call_site"] not in (CRITIC_CALL_SITE, "planner.dialog", "planner"):
+            continue
+        table.add_row(
+            str(r["call_site"]),
+            str(r["model"]),
+            str(r["calls"]),
+            f"{r['prompt_tokens']:,}",
+            f"{r['completion_tokens']:,}",
+            f"{r['cost_rmb']:.6f}",
+        )
+        shown += 1
+        if r["call_site"] == CRITIC_CALL_SITE:
+            critic_total += float(r["cost_rmb"])
+
+    if not shown:
+        console.print(
+            "[yellow]台账中无 evaluate_critic / planner 调用点（Critic 尚未触发）[/yellow]"
+        )
+        return
+    console.print(table)
+    console.print(
+        f"[bold]Critic 质检总费用: ¥{critic_total:.6f}[/bold]"
+        f"（{CRITIC_CALL_SITE}；对比 planner 规划费用见上表）"
+    )
+
+
 def chat_command(
     instruction: str | None,
     det_model: str | None,
