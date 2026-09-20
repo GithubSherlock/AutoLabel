@@ -149,6 +149,7 @@ flowchart TD
 | **v0.5** | + Pose Estimation + VLM 指代检测（Florence-2/Qwen2-VL）+ 自动车道 ROI 等非 3D 内容（3D 使命完成后殿后；定义见 `auto2dlabel/milestone/v0.5.md`） | ✅ 完成 2026-08-23 |
 | **v0.6** | + **对话式 Agent 统一入口**（chat 唯一入口 + LLM 多轮对话确定参数）+ mmdet/mmpose 双引擎 + LLM Harness Token 降本（定义见 `auto2dlabel/milestone/v0.6.md`） | ✅ 完成 2026-08-31（实测 `auto2dlabel/tests/test-v0.6.md`） |
 | **v1.0** | + **Agentic 交互化**（产品形态跃迁：`autolabel` 命令 → Textual 对话式终端界面 + 多模型 API 可配置 + 后台任务面板 + 会话管理 + HITL 指挥台；企划见 `docs/Agentic_UI_plan.md`，执行指南见下方 §Agentic 交互化） | ✅ **P1 2026-09-02**（TUI 骨架 + 流式改造，四验收全过，实测 `auto2dlabel/tests/test-v1.0.md`）；**P1+ 2026-09-02** 批量 nuScenes 扩展（3D chat 直跑队列管线：Plan3D dataset/sample_limit + 抽样确定性 + CPU 守卫降级，用户原指令实测跑通）；**P2–P5 ✅ 2026-09-06**（P2 provider 注册表 `/model` 三态 + 台账 provider 字段 → P3 后台任务面板（`[AL_PROGRESS]` 行协议 + `/cancel` 两级终止 + `--resume` 续跑引导）→ P4 会话 JSONL（`/new` `/resume` 真实现）→ P5 HITL 指挥台（`/review` 三档统计 + `/web` 一键 Web 复核）；pytest 1267 + smoke_tui 31/31，质量门 pyright 0 / mypy 168 / ruff 86 存量不恶化） |
+| **v1.1** | + **RAG 与多 Agent 演进**（P1 标注经验库：零 LLM 入库 + CLIP 检索 + planner few-shot 注入；P2 质检 Agent 独立化：Critic 跨模型交叉校验 + cost-critic）——定义见 `auto2dlabel/milestone/v1.1.md` | ✅ P1+P2 完成 2026-09-17（Router Agent 缓行；注入组 vs 基线组 benchmark 已交付但 mAP 无差异，如实记录见里程碑） |
 
 > 编号注记：早期路线表曾把「分类+OBB」标为 v0.2，实现时后移为 v0.3（v0.2 编号已被分割里程碑文件占用，不重命名现有文件）。
 > 战略注记（2026-08-19）：Auto2dLabel 为 Auto3dLabel 做基石——优先交付能支撑 3D 的内容（原 v1.0 Tracking 提前至 v0.4），原 v0.4 Pose 平移至 v0.5；与 Auto3dLabel v0.1 双线并行。
