@@ -490,10 +490,5 @@ cd auto3dlabel/tests/helpers && node smoke_web3d.js                 # 3D Web 复
 
 ## 许可证
 
-[MIT](LICENSE) © AutoLabel Team
+[MIT](LICENSE) © GithubSherlock
 
----
-
-<p align="center">
-  <sub>Built with ❤️ by an AI-first perception engineer. 用 AI 重新定义标注。</sub>
-</p>
